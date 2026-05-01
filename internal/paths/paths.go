@@ -5,7 +5,7 @@
 //   - Claude Code's own state, under $HOME/.claude (and a sibling fallback).
 //     cux never invents these — it follows whatever Claude Code itself uses.
 //   - cux's own state, under a backup root that follows XDG on Linux and
-//     falls back to $HOME/.claude-switch elsewhere.
+//     falls back to $HOME/.cux elsewhere.
 package paths
 
 import (
@@ -85,31 +85,20 @@ func ProjectTranscriptDir(cwd string) string {
 
 // BackupRoot is cux's own data directory.
 //
-// On Linux it follows XDG: $XDG_DATA_HOME/claude-switch, defaulting to
-// $HOME/.local/share/claude-switch. On macOS/Windows we keep things simple
-// at $HOME/.claude-switch, matching where backup data already tends to live
-// for tools in this niche.
-//
-// If the legacy path $HOME/.claude-switch exists on Linux and the new XDG
-// path does not, we keep using the legacy path so an existing install
-// keeps working without an automatic migration the user did not ask for.
+// On Linux it follows XDG: $XDG_DATA_HOME/cux, defaulting to
+// $HOME/.local/share/cux. On macOS/Windows we keep things simple at
+// $HOME/.cux. No legacy migration code — cux is unreleased before
+// this rename, so no on-disk state under the old name exists in the
+// wild.
 func BackupRoot() string {
 	if Detect() == Linux {
-		legacy := filepath.Join(Home(), ".claude-switch")
 		xdg := os.Getenv("XDG_DATA_HOME")
 		if xdg == "" {
 			xdg = filepath.Join(Home(), ".local", "share")
 		}
-		newPath := filepath.Join(xdg, "claude-switch")
-		if _, err := os.Stat(newPath); err == nil {
-			return newPath
-		}
-		if _, err := os.Stat(legacy); err == nil {
-			return legacy
-		}
-		return newPath
+		return filepath.Join(xdg, "cux")
 	}
-	return filepath.Join(Home(), ".claude-switch")
+	return filepath.Join(Home(), ".cux")
 }
 
 func StateFile() string    { return filepath.Join(BackupRoot(), "state.json") }

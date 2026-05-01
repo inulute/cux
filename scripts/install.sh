@@ -5,7 +5,7 @@
 # release, and places it at ~/.local/bin/cux (creating the dir if needed).
 # Designed to run via:
 #
-#     curl -fsSL https://raw.githubusercontent.com/<user>/claude-switch/main/scripts/install.sh | sh
+#     curl -fsSL https://raw.githubusercontent.com/inulute/cux/main/scripts/install.sh | sh
 #
 # The script does not write outside $HOME and does not require sudo. It
 # does, however, ask the user to add ~/.local/bin to their PATH if it is
@@ -13,9 +13,30 @@
 
 set -eu
 
-REPO="${CUX_REPO:-inulute/claude-switch}"
+REPO="${CUX_REPO:-inulute/cux}"
 INSTALL_DIR="${CUX_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_NAME="cux"
+
+# Banner. Kept in lockstep with internal/branding/branding.go — when
+# you change one, change the other. Suppressed by CUX_NO_BANNER=1 so
+# scripted installers can stay quiet.
+print_banner() {
+    [ -n "${CUX_NO_BANNER:-}" ] && return 0
+    cat <<'EOF'
+
+  ██████╗ ██╗   ██╗ ██╗  ██╗
+ ██╔════╝ ██║   ██║ ╚██╗██╔╝
+ ██║      ██║   ██║  ╚███╔╝
+ ██║      ██║   ██║  ██╔██╗
+ ╚██████╗ ╚██████╔╝ ██╔╝ ██╗
+  ╚═════╝  ╚═════╝  ╚═╝  ╚═╝
+
+ CUX: Run multiple Claude Code Pro/Max accounts as one
+
+EOF
+}
+
+print_banner
 
 # --- detect platform ------------------------------------------------------
 

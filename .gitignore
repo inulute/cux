@@ -1,5 +1,5 @@
 # compiled binary
-cux
+/cux
 cux-*
 *.exe
 *.sha256

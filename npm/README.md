@@ -5,7 +5,7 @@ Multi-account switcher for Claude Code with hook-driven auto-resume.
 This package is a thin npm wrapper. On install it downloads the right
 prebuilt `cux` binary for your platform (Linux x64/arm64, macOS
 x64/arm64, Windows x64) from the
-[GitHub release matching its version](https://github.com/inulute/claude-switch/releases)
+[GitHub release matching its version](https://github.com/inulute/cux/releases)
 and exposes it as the `cux` command on your `PATH`.
 
 ```bash
@@ -17,9 +17,9 @@ cux add        # while logged in to each Claude account you want to manage
 For full documentation (auto-swap on rate-limit, threshold-based
 swaps, strategies, history, configuration), see the main repository:
 
-- **README:** https://github.com/inulute/claude-switch#readme
-- **Releases:** https://github.com/inulute/claude-switch/releases
-- **Issues:** https://github.com/inulute/claude-switch/issues
+- **README:** https://github.com/inulute/cux#readme
+- **Releases:** https://github.com/inulute/cux/releases
+- **Issues:** https://github.com/inulute/cux/issues
 
 ## What it does
 
@@ -36,7 +36,7 @@ swaps, strategies, history, configuration), see the main repository:
 1. Reads `process.platform` and `process.arch` to pick the right
    release artefact name (e.g. `cux-darwin-arm64`).
 2. Downloads the binary from
-   `https://github.com/inulute/claude-switch/releases/download/v<version>/<asset>`.
+   `https://github.com/inulute/cux/releases/download/v<version>/<asset>`.
 3. Verifies the sidecar `<asset>.sha256` if present.
 4. `chmod +x` on POSIX, then exposes it as the `cux` command via `bin`.
 
@@ -47,7 +47,7 @@ maintain a fork. To skip the network entirely, install with
 
 ## License
 
-MIT — see https://github.com/inulute/claude-switch/blob/main/LICENSE.
+MIT — see https://github.com/inulute/cux/blob/main/LICENSE.
 
 ---
 

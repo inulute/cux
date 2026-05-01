@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/logo-wordmark.svg" alt="cux" width="480"/>
+  <img src="assets/cux-banner.svg" alt="cux — Run multiple Claude Code Pro/Max accounts as one" width="100%"/>
 </p>
 
-# cux — Claude Code account switcher with auto-resume
+# cux — Run multiple Claude Code Pro/Max accounts as one
 
 Run multiple Claude Code Pro/Max accounts as one. cux wraps `claude`,
 listens to its `Stop` / `SessionStart` / `PostToolUseFailure` hooks,
@@ -42,11 +42,11 @@ inside Claude is supported too. One ~5 MB Go binary — no Python, no
 One-line installer (Linux / macOS / WSL / Git Bash):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/inulute/claude-switch/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/inulute/cux/main/scripts/install.sh | sh
 ```
 
 Or download a binary directly from the
-[releases page](https://github.com/inulute/claude-switch/releases),
+[releases page](https://github.com/inulute/cux/releases),
 `chmod +x cux-<os>-<arch>`, and put it on your `PATH`.
 
 After install, run once:
@@ -74,6 +74,7 @@ cux status                   # current login and ccux state
 cux history                  # recent swaps with reasons
 cux config show              # current settings
 cux usage refresh            # poll all accounts
+cux upgrade                  # update cux via npm or the shell installer
 cux switch <slot|email>      # manual swap (no auto-resume)
 cux remove <slot|email>      # forget an account
 ```
@@ -113,6 +114,7 @@ cux config set thresholds.five_hour 85
 cux config set strategy.kind balanced
 cux config set strategy.order alice@x,bob@x      # drain mode priority
 cux config set auto_message ""                    # silent resume
+cux config set update_check.enabled true          # opt in to update checks
 ```
 
 Config file: `~/.config/cux/config.json`
@@ -129,6 +131,8 @@ Config file: `~/.config/cux/config.json`
 | `auto_message`                | `Go continue.` | Sent as the first user turn after auto-swap; `""` = silent |
 | `notify`                      | `true`         | Reserved for v0.3 desktop notifications |
 | `poll_interval_seconds`       | `60`           | Reserved for v0.3 background usage monitor |
+| `update_check.enabled`        | `false`        | Opt-in daily startup check for newer cux releases |
+| `update_check.cadence_hours`  | `24`           | Minimum hours between GitHub update checks |
 
 `cux config keys` lists everything above with current values and
 descriptions, so you don't have to remember the exact names.
@@ -193,7 +197,7 @@ $ cux history
 - **Backup credentials** (per-account stash) live in the OS keystore
   on macOS and Windows under the service `cux-backup`. On Linux they
   go to
-  `~/.local/share/claude-switch/accounts/<N>-<email>/credentials.json`
+  `~/.local/share/cux/accounts/<N>-<email>/credentials.json`
   with mode 0600.
 - **The oauthAccount block** inside `~/.claude/.claude.json` is the
   *only* part of that file cux ever rewrites. Themes, MCP config and
@@ -211,7 +215,7 @@ $ cux history
 ## Data layout
 
 ```
-~/.local/share/claude-switch/        # ~/.claude-switch/ on macOS/Windows
+~/.local/share/cux/                  # ~/.cux/ on macOS/Windows
 ├── state.json                      # account index, sequence, active slot
 ├── .lock                           # flock target for state mutations
 ├── accounts/
@@ -220,6 +224,7 @@ $ cux history
 │       └── oauth.json              # the oauthAccount block, raw JSON
 └── runtime/
     ├── signals/                    # hook → wrapper signal files
+    ├── update-cache.json            # opt-in update-check cache
     ├── usage-cache.json            # per-account 5h / 7d snapshot
     └── swap-history.json           # capped at 1000 entries
 
@@ -248,8 +253,8 @@ $ cux history
 ## Building from source
 
 ```bash
-git clone https://github.com/inulute/claude-switch
-cd claude-switch/cux
+git clone https://github.com/inulute/cux
+cd cux
 go build -o cux ./cmd/cux
 ./cux help
 ```

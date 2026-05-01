@@ -1,0 +1,789 @@
+// cux — Run multiple Claude Code Pro/Max accounts as one.
+//
+// Daily-driver entry point: run `cux` instead of `claude`. cux wraps
+// the real `claude` binary and consumes the Stop / SessionStart /
+// PostToolUseFailure hooks so a `/switch <account>` slash command —
+// or a rate-limit error from the API — can swap the active account
+// and re-launch claude on the same conversation, without restarting
+// the terminal.
+//
+// Subcommands manage the local set of saved accounts. Anything that
+// isn't a known subcommand is passed straight through to `claude`.
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/inulute/cux/internal/branding"
+	"github.com/inulute/cux/internal/config"
+	"github.com/inulute/cux/internal/history"
+	"github.com/inulute/cux/internal/hookinstall"
+	"github.com/inulute/cux/internal/hooks"
+	"github.com/inulute/cux/internal/monitor"
+	"github.com/inulute/cux/internal/store"
+	"github.com/inulute/cux/internal/switcher"
+	"github.com/inulute/cux/internal/updater"
+	"github.com/inulute/cux/internal/usage"
+	"github.com/inulute/cux/internal/wrapper"
+)
+
+const (
+	version = "0.2.0"
+	// donateURL is shown only by `cux version --verbose`. Subtle by
+	// design — never printed during normal use, never injected into
+	// help output, never shown by the wrapper or the slash command.
+	donateURL = "https://support.inulute.com"
+)
+
+// knownSubcommands is the set of first-args cux handles itself.
+// Anything else (including `--resume`, `mcp`, `-c`, etc.) is forwarded
+// to the real claude binary via the wrapper.
+var knownSubcommands = map[string]bool{
+	"add":             true,
+	"list":            true,
+	"ls":              true,
+	"remove":          true,
+	"rm":              true,
+	"status":          true,
+	"switch":          true,
+	"setup":           true,
+	"install-hooks":   true,
+	"uninstall-hooks": true,
+	"hook":            true,
+	"history":         true,
+	"config":          true,
+	"usage":           true,
+	"upgrade":         true,
+	"run":             true,
+	"help":            true,
+	"--help":          true,
+	"-h":              true,
+	"version":         true,
+	"--version":       true,
+	"__slash-switch":  true,
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		runWrapper(nil)
+		return
+	}
+
+	cmd := os.Args[1]
+	rest := os.Args[2:]
+
+	if !knownSubcommands[cmd] {
+		runWrapper(os.Args[1:])
+		return
+	}
+
+	switch cmd {
+	case "add":
+		cmdAdd(rest)
+	case "list", "ls":
+		cmdList(rest)
+	case "remove", "rm":
+		cmdRemove(rest)
+	case "status":
+		cmdStatus(rest)
+	case "switch":
+		cmdSwitch(rest)
+	case "setup":
+		cmdSetup(rest)
+	case "install-hooks":
+		cmdInstallHooks(rest)
+	case "uninstall-hooks":
+		cmdUninstallHooks(rest)
+	case "hook":
+		cmdHook(rest)
+	case "history":
+		cmdHistory(rest)
+	case "config":
+		cmdConfig(rest)
+	case "usage":
+		cmdUsage(rest)
+	case "upgrade":
+		cmdUpgrade(rest)
+	case "run":
+		runWrapper(rest)
+	case "help", "--help", "-h":
+		printHelp()
+	case "version", "--version":
+		cmdVersion(rest)
+	case "__slash-switch":
+		cmdSlashSwitch(rest)
+	}
+}
+
+// --- Account-management subcommands --------------------------------------
+
+func cmdAdd(args []string) {
+	fs := flag.NewFlagSet("add", flag.ExitOnError)
+	slot := fs.Int("slot", 0, "specific slot number (default: next free)")
+	_ = fs.Parse(args)
+
+	acct, refreshed, err := switcher.AddCurrent(*slot)
+	if err != nil {
+		fail(err)
+	}
+	if refreshed {
+		fmt.Printf("Refreshed slot %d (%s).\n", acct.Slot, acct.Email)
+	} else {
+		fmt.Printf("Added slot %d (%s).\n", acct.Slot, acct.Email)
+	}
+}
+
+func cmdList(args []string) {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	refresh := fs.Bool("refresh", false, "fetch fresh usage before listing")
+	_ = fs.Parse(args)
+
+	state, err := store.Load()
+	if err != nil {
+		fail(err)
+	}
+	if len(state.Accounts) == 0 {
+		fmt.Println("No accounts managed yet. Run `cux add` while logged in.")
+		return
+	}
+
+	if *refresh {
+		_, errs := monitor.RefreshAll()
+		for _, e := range errs {
+			fmt.Fprintln(os.Stderr, "warning:", e)
+		}
+	}
+
+	cache, _ := usage.LoadCache()
+	if cache == nil {
+		cache = usage.Cache{}
+	}
+	liveEmail, _ := switcher.CurrentLiveEmail()
+
+	slots := state.SortedSlots()
+	sort.Ints(slots)
+	fmt.Println("Slot  Email                                  5h     7d     Resets         Status")
+	for _, slot := range slots {
+		a := state.Accounts[slot]
+		marker := ""
+		if a.Email == liveEmail {
+			marker = "active"
+		}
+		u := cache[a.Email]
+		five := windowPct(u.FiveHour)
+		seven := windowPct(u.SevenDay)
+		resets := nextReset(u)
+		expired := ""
+		if u.TokenExpired {
+			expired = "expired"
+			if marker != "" {
+				expired = "active+expired"
+			}
+		}
+		statusLabel := marker
+		if expired != "" {
+			statusLabel = expired
+		}
+		fmt.Printf("%-5d %-38s %-6s %-6s %-14s %s\n", slot, a.Email, five, seven, resets, statusLabel)
+	}
+
+	if !*refresh && len(cache) == 0 {
+		fmt.Println()
+		fmt.Println("(No usage data yet — run `cux list --refresh` or `cux usage refresh` to fetch.)")
+	}
+}
+
+func windowPct(w *usage.Window) string {
+	if w == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%.0f%%", w.Utilization)
+}
+
+// nextReset returns the soonest reset time across the populated
+// windows, formatted as a human-friendly relative duration. We render
+// "1h32m", "2d", or "—" for missing data.
+func nextReset(u usage.AccountUsage) string {
+	var soonest *time.Time
+	for _, w := range []*usage.Window{u.FiveHour, u.SevenDay} {
+		if w == nil || w.ResetsAt == nil {
+			continue
+		}
+		if soonest == nil || w.ResetsAt.Before(*soonest) {
+			t := *w.ResetsAt
+			soonest = &t
+		}
+	}
+	if soonest == nil {
+		return "—"
+	}
+	d := time.Until(*soonest)
+	if d <= 0 {
+		return "now"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+func cmdRemove(args []string) {
+	fs := flag.NewFlagSet("remove", flag.ExitOnError)
+	force := fs.Bool("force", false, "remove even if active")
+	_ = fs.Parse(args)
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: cux remove [--force] <slot|email>")
+		os.Exit(2)
+	}
+	acct, err := switcher.Remove(fs.Arg(0), *force)
+	if err != nil {
+		fail(err)
+	}
+	fmt.Printf("Removed slot %d (%s).\n", acct.Slot, acct.Email)
+}
+
+func cmdStatus(args []string) {
+	state, err := store.Load()
+	if err != nil {
+		fail(err)
+	}
+	liveEmail, liveErr := switcher.CurrentLiveEmail()
+	if liveErr != nil {
+		fmt.Println("Live login: (none — run `claude login`)")
+	} else {
+		fmt.Println("Live login:", liveEmail)
+	}
+	fmt.Println("Managed accounts:", len(state.Accounts))
+	if state.ActiveSlot != 0 {
+		if a, ok := state.Accounts[state.ActiveSlot]; ok {
+			fmt.Printf("Active slot:     %d (%s)\n", a.Slot, a.Email)
+		}
+	}
+}
+
+func cmdSwitch(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: cux switch <slot|email>")
+		os.Exit(2)
+	}
+	from, to, err := switcher.SwitchTo(args[0])
+	if err != nil {
+		fail(err)
+	}
+	if from.Email != "" {
+		fmt.Printf("Switched %s → %s.\n", from.Email, to.Email)
+	} else {
+		fmt.Printf("Switched to %s.\n", to.Email)
+	}
+	if os.Getenv("CUX_WRAPPED") == "" {
+		fmt.Println("Restart Claude Code to apply the change.")
+		fmt.Println("(For inline switching from inside Claude, run `cux setup` and use `/switch` next time.)")
+	}
+}
+
+func cmdSlashSwitch(args []string) {
+	target := strings.TrimSpace(strings.Join(args, " "))
+	if err := wrapper.SlashSwitch(target, os.Stdout); err != nil {
+		fail(err)
+	}
+}
+
+// --- Hook subcommands ----------------------------------------------------
+
+// cmdHook dispatches `cux hook {stop,session-start,rate-limit}`. These
+// are invoked by Claude Code itself via entries in
+// ~/.claude/settings.json. They read JSON from stdin and write a
+// signal file under the cux runtime directory; everything else is
+// done by the wrapper's poll loop.
+func cmdHook(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: cux hook {stop|session-start|rate-limit}")
+		os.Exit(2)
+	}
+	var err error
+	switch args[0] {
+	case "stop":
+		err = hooks.Stop(os.Stdin)
+	case "session-start":
+		err = hooks.SessionStart(os.Stdin)
+	case "rate-limit":
+		err = hooks.RateLimit(os.Stdin)
+	default:
+		fmt.Fprintf(os.Stderr, "cux: unknown hook %q\n", args[0])
+		os.Exit(2)
+	}
+	if err != nil {
+		// Hooks should not break Claude Code on a transient failure;
+		// log and exit 0 so the user's session keeps running.
+		fmt.Fprintf(os.Stderr, "cux hook %s: %v\n", args[0], err)
+	}
+}
+
+func cmdInstallHooks(args []string) {
+	resolved, perr := hookinstall.VerifyOnPATH()
+	if perr != nil {
+		fmt.Fprintln(os.Stderr, "warning:", perr)
+		fmt.Fprintln(os.Stderr, "         hooks installed in settings.json will only work once `cux` is on PATH.")
+	} else {
+		fmt.Println("cux on PATH:", resolved)
+	}
+	changed, err := hookinstall.Install()
+	if err != nil {
+		fail(err)
+	}
+	if len(changed) == 0 {
+		fmt.Println("All cux hooks already installed in ~/.claude/settings.json.")
+	} else {
+		fmt.Printf("Installed/updated hooks in ~/.claude/settings.json: %s\n", strings.Join(changed, ", "))
+		fmt.Println("Restart Claude Code for the new hooks to take effect.")
+	}
+}
+
+func cmdUninstallHooks(args []string) {
+	removed, err := hookinstall.Uninstall()
+	if err != nil {
+		fail(err)
+	}
+	if len(removed) == 0 {
+		fmt.Println("No cux hooks present in ~/.claude/settings.json.")
+	} else {
+		fmt.Printf("Removed cux hooks: %s\n", strings.Join(removed, ", "))
+	}
+}
+
+// cmdVersion prints the version. With --verbose it appends a single
+// gentle line about supporting development. We deliberately keep the
+// donate hint out of the default `cux version` output and out of every
+// other surface (help, list, status, slash command) — the user asked
+// for "subtle, not invasive" and that is what this hits.
+func cmdVersion(args []string) {
+	verbose := false
+	for _, a := range args {
+		if a == "-v" || a == "--verbose" {
+			verbose = true
+		}
+	}
+	fmt.Println("cux", version)
+	if verbose {
+		fmt.Println()
+		fmt.Println("If cux saves you time, you can support development at", donateURL)
+	}
+}
+
+// --- History / Config / Usage --------------------------------------------
+
+func cmdHistory(args []string) {
+	fs := flag.NewFlagSet("history", flag.ExitOnError)
+	n := fs.Int("n", 20, "show the last N entries")
+	clear := fs.Bool("clear", false, "delete the entire swap history")
+	jsonOut := fs.Bool("json", false, "emit entries as one JSON document")
+	_ = fs.Parse(args)
+
+	if *clear {
+		if err := history.Clear(); err != nil {
+			fail(err)
+		}
+		fmt.Println("Cleared swap history.")
+		return
+	}
+
+	entries, err := history.Tail(*n)
+	if err != nil {
+		fail(err)
+	}
+	if len(entries) == 0 {
+		fmt.Println("No swap history yet.")
+		return
+	}
+	if *jsonOut {
+		out, err := json.MarshalIndent(entries, "", "  ")
+		if err != nil {
+			fail(err)
+		}
+		fmt.Println(string(out))
+		return
+	}
+	for _, e := range entries {
+		fmt.Printf("%s  %s → %s  [%s]\n",
+			e.Timestamp.Local().Format("2006-01-02 15:04:05"),
+			e.From, e.To, e.Trigger)
+		if e.Reason != "" {
+			fmt.Printf("    reason: %s\n", e.Reason)
+		}
+		// Only show usage figures when at least one was nonzero —
+		// fresh installs would otherwise print a row of zeros that
+		// looks like real data.
+		if e.FromUsage5h+e.FromUsage7d+e.ToUsage5h+e.ToUsage7d > 0 {
+			fmt.Printf("    usage: %s 5h:%.0f%% 7d:%.0f%% → %s 5h:%.0f%% 7d:%.0f%%\n",
+				e.From, e.FromUsage5h, e.FromUsage7d,
+				e.To, e.ToUsage5h, e.ToUsage7d)
+		}
+		if e.SessionID != "" {
+			fmt.Printf("    session: %s\n", e.SessionID)
+		}
+	}
+}
+
+func cmdConfig(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: cux config show | cux config keys | cux config set <key> <value>")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "show":
+		c, err := config.Load()
+		if err != nil {
+			fail(err)
+		}
+		out, err := json.MarshalIndent(c, "", "  ")
+		if err != nil {
+			fail(err)
+		}
+		fmt.Println(string(out))
+	case "keys":
+		c, err := config.Load()
+		if err != nil {
+			fail(err)
+		}
+		keys := config.Keys(c)
+		// Compute column widths once so the output lines up.
+		var keyW, curW int
+		for _, k := range keys {
+			if l := len(k.Key); l > keyW {
+				keyW = l
+			}
+			if l := len(k.Current); l > curW {
+				curW = l
+			}
+		}
+		if curW > 30 {
+			curW = 30
+		}
+		fmt.Printf("%-*s  %-*s  %s\n", keyW, "KEY", curW, "CURRENT", "DESCRIPTION (default)")
+		for _, k := range keys {
+			cur := k.Current
+			if len(cur) > curW {
+				cur = cur[:curW-1] + "…"
+			}
+			fmt.Printf("%-*s  %-*s  %s (default: %s)\n", keyW, k.Key, curW, cur, k.Description, k.Default)
+		}
+	case "set":
+		if len(args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: cux config set <key> <value>")
+			os.Exit(2)
+		}
+		c, err := config.Load()
+		if err != nil {
+			fail(err)
+		}
+		c, err = config.Set(c, args[1], args[2])
+		if err != nil {
+			fail(err)
+		}
+		if err := config.Save(c); err != nil {
+			fail(err)
+		}
+		fmt.Printf("Set %s.\n", args[1])
+	default:
+		fmt.Fprintln(os.Stderr, "usage: cux config show | cux config keys | cux config set <key> <value>")
+		os.Exit(2)
+	}
+}
+
+func cmdUsage(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: cux usage refresh | cux usage show")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "refresh":
+		_, errs := monitor.RefreshAll()
+		for _, e := range errs {
+			fmt.Fprintln(os.Stderr, "warning:", e)
+		}
+		// Re-display so the user sees what was fetched.
+		cmdList(nil)
+	case "show":
+		cache, err := usage.LoadCache()
+		if err != nil {
+			fail(err)
+		}
+		out, err := json.MarshalIndent(cache, "", "  ")
+		if err != nil {
+			fail(err)
+		}
+		fmt.Println(string(out))
+	default:
+		fmt.Fprintln(os.Stderr, "usage: cux usage refresh | cux usage show")
+		os.Exit(2)
+	}
+}
+
+// --- Wrapper -------------------------------------------------------------
+
+func runWrapper(argv []string) {
+	updateDone := startUpdateCheck()
+	bin := os.Getenv("CUX_CLAUDE_BIN")
+	if bin == "" {
+		resolved, err := exec.LookPath("claude")
+		if err != nil {
+			fail(fmt.Errorf("`claude` not found on PATH — install Claude Code first, or set CUX_CLAUDE_BIN"))
+		}
+		bin = resolved
+	}
+	if bin == os.Args[0] || strings.HasSuffix(bin, "/cux") {
+		fail(fmt.Errorf("refusing to launch cux as the claude binary (loop)"))
+	}
+	exitCode, err := wrapper.Run(bin, argv, os.Stderr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cux:", err)
+	}
+	printUpdateResult(updateDone)
+	os.Exit(exitCode)
+}
+
+func startUpdateCheck() <-chan updater.Result {
+	cfg, err := config.Load()
+	if err != nil || !cfg.UpdateCheck.Enabled {
+		return nil
+	}
+	cadenceHours := cfg.UpdateCheck.CadenceHours
+	if cadenceHours < 1 {
+		cadenceHours = 24
+	}
+	done := make(chan updater.Result, 1)
+	go func() {
+		r, _, err := updater.CachedCheck(version, time.Duration(cadenceHours)*time.Hour)
+		if err == nil && r.HasUpdate() {
+			done <- r
+		}
+		close(done)
+	}()
+	return done
+}
+
+func printUpdateResult(done <-chan updater.Result) {
+	if done == nil {
+		return
+	}
+	select {
+	case r, ok := <-done:
+		if ok && r.HasUpdate() {
+			fmt.Fprintf(os.Stderr, "cux: %s available — run cux upgrade.\n", r.Latest)
+		}
+	default:
+	}
+}
+
+// cmdSetup is the one-time post-install ritual. It installs the
+// /switch slash command and the three Claude Code hooks. Both pieces
+// are needed for the inline-switch flow to work.
+func cmdSetup(args []string) {
+	branding.Print(os.Stdout)
+	if err := installSlashCommand(); err != nil {
+		fail(err)
+	}
+	fmt.Println("✓ Installed /switch slash command at ~/.claude/commands/switch.md")
+
+	if resolved, err := hookinstall.VerifyOnPATH(); err != nil {
+		fmt.Fprintln(os.Stderr, "  warning:", err)
+		fmt.Fprintln(os.Stderr, "          hooks will be inert until `cux` is on PATH.")
+	} else {
+		fmt.Println("✓ cux is on PATH:", resolved)
+	}
+	changed, err := hookinstall.Install()
+	if err != nil {
+		fail(err)
+	}
+	if len(changed) == 0 {
+		fmt.Println("✓ Hooks already installed in ~/.claude/settings.json")
+	} else {
+		fmt.Printf("✓ Installed hooks: %s\n", strings.Join(changed, ", "))
+	}
+	if err := offerUpdateCheckOptIn(); err != nil {
+		fail(err)
+	}
+	fmt.Println()
+	fmt.Println("Next steps:")
+	fmt.Println("  1. Run `cux add` while logged in to each account you want to manage.")
+	fmt.Println("  2. Restart Claude Code (or start a new session) so it picks up the hooks.")
+	fmt.Println("  3. Launch sessions with `cux` instead of `claude`, and use /switch inside.")
+}
+
+func offerUpdateCheckOptIn() error {
+	if !stdinIsTTY() {
+		return nil
+	}
+	fmt.Print("Check for cux updates daily on startup? [y/N] ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && len(line) == 0 {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	cfg.UpdateCheck.Enabled = answer == "y" || answer == "yes"
+	if cfg.UpdateCheck.CadenceHours < 1 {
+		cfg.UpdateCheck.CadenceHours = 24
+	}
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	if cfg.UpdateCheck.Enabled {
+		fmt.Println("✓ Daily update checks enabled")
+	} else {
+		fmt.Println("✓ Daily update checks disabled")
+	}
+	return nil
+}
+
+func stdinIsTTY() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+}
+
+func cmdUpgrade(args []string) {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "usage: cux upgrade")
+		os.Exit(2)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fail(err)
+	}
+	kind, installDir := detectInstall(exe)
+	switch kind {
+	case "npm":
+		runUpgradeCommand("npm", "install", "-g", "@inulute/cux@latest")
+	case "installer":
+		cmd := exec.Command("sh", "-c", "curl -fsSL https://raw.githubusercontent.com/inulute/cux/main/scripts/install.sh | sh")
+		cmd.Env = append(os.Environ(), "CUX_INSTALL_DIR="+installDir)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		if err := cmd.Run(); err != nil {
+			fail(err)
+		}
+	default:
+		fmt.Println("cux: could not detect how this binary was installed.")
+		fmt.Println()
+		fmt.Println("If you installed with npm, run:")
+		fmt.Println("  npm install -g @inulute/cux@latest")
+		fmt.Println()
+		fmt.Println("If you installed with the shell installer, run:")
+		fmt.Println("  curl -fsSL https://raw.githubusercontent.com/inulute/cux/main/scripts/install.sh | sh")
+	}
+}
+
+func runUpgradeCommand(name string, args ...string) {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		fail(err)
+	}
+}
+
+func detectInstall(exe string) (kind, installDir string) {
+	exe, _ = filepath.Abs(exe)
+	dir := filepath.Dir(exe)
+	if isNPMInstall(dir) {
+		return "npm", ""
+	}
+	if envDir := os.Getenv("CUX_INSTALL_DIR"); envDir != "" {
+		if sameDir(dir, envDir) {
+			return "installer", dir
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		localBin := filepath.Join(home, ".local", "bin")
+		if sameDir(dir, localBin) {
+			return "installer", dir
+		}
+	}
+	return "", ""
+}
+
+func isNPMInstall(binDir string) bool {
+	if filepath.Base(binDir) != "bin" {
+		return false
+	}
+	pkgPath := filepath.Join(filepath.Dir(binDir), "package.json")
+	b, err := os.ReadFile(pkgPath)
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Name string `json:"name"`
+	}
+	return json.Unmarshal(b, &pkg) == nil && pkg.Name == "@inulute/cux"
+}
+
+func sameDir(a, b string) bool {
+	aa, errA := filepath.Abs(a)
+	bb, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(aa, bb)
+	}
+	return aa == bb
+}
+
+// --- Helpers -------------------------------------------------------------
+
+func fail(err error) {
+	fmt.Fprintln(os.Stderr, "cux:", err)
+	os.Exit(1)
+}
+
+func printHelp() {
+	fmt.Println(`cux — Run multiple Claude Code Pro/Max accounts as one
+
+USAGE
+  cux [claude-args...]              run claude under the wrapper (default)
+  cux run [claude-args...]          same, explicit
+  cux add [--slot N]                add the currently logged-in account
+  cux list                          list managed accounts
+  cux switch <slot|email>           swap the active account (manual; requires
+                                    restart unless run from /switch inside)
+  cux remove [--force] <slot|email> remove an account from cux
+  cux status                        show live login + cux state
+  cux setup                         install /switch + Claude Code hooks
+  cux install-hooks                 install Claude Code hooks only
+  cux uninstall-hooks               remove cux's entries from settings.json
+  cux history [-n N] [--json]       show recent account swaps
+  cux history --clear               delete the swap history
+  cux config show                   print current configuration
+  cux config keys                   list every settable key
+  cux config set <key> <value>      update a single setting
+  cux usage refresh                 fetch fresh usage for every account
+  cux usage show                    print the on-disk usage cache (JSON)
+  cux upgrade                       update cux using npm or the installer
+  cux hook <event>                  internal: invoked by Claude Code
+  cux version                       print version
+
+INLINE SWITCHING
+  Once set up, type /switch [<slot|email>] from inside a Claude Code
+  session started via cux. The wrapper waits for the current turn to
+  finish (Stop hook), then swaps the account and reconnects with
+  --resume. Auto-swap on rate-limit errors works the same way.`)
+}

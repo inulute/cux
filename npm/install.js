@@ -19,6 +19,46 @@ const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(here, "package.json"), "utf8"));
 const version = pkg.version;
 
+// Banner. Mirrors internal/branding/branding.go and scripts/install.sh.
+// Suppressed by:
+//   - npm's --silent / loglevel < info (we go through console.error so
+//     it lands in postinstall output by default)
+//   - the user setting CUX_NO_BANNER=1
+//   - non-TTY stderr — we don't want this leaking into CI logs unprompted
+function printBanner() {
+  if (process.env.CUX_NO_BANNER) return;
+  if (!process.stderr.isTTY) return;
+  // Use ASCII fallback on Windows unless the user opted in: legacy
+  // conhost can mangle the Unicode box-drawing glyphs.
+  const unicode =
+    process.platform !== "win32" ||
+    (process.env.CUX_BANNER || "").toLowerCase() === "unicode";
+  const art = unicode
+    ? [
+        "",
+        "  ██████╗ ██╗   ██╗ ██╗  ██╗",
+        " ██╔════╝ ██║   ██║ ╚██╗██╔╝",
+        " ██║      ██║   ██║  ╚███╔╝",
+        " ██║      ██║   ██║  ██╔██╗",
+        " ╚██████╗ ╚██████╔╝ ██╔╝ ██╗",
+        "  ╚═════╝  ╚═════╝  ╚═╝  ╚═╝",
+        "",
+      ]
+    : [
+        "",
+        " ##### ##  ##  ##  ##",
+        "##     ##  ##   ####",
+        "##     ##  ##    ##",
+        "##     ##  ##   ####",
+        " #####  ####    ##  ##",
+        "",
+      ];
+  console.error(art.join("\n"));
+  console.error(" CUX: Run multiple Claude Code Pro/Max accounts as one\n");
+}
+
+printBanner();
+
 // Map Node's platform / arch identifiers to the Go release artefact
 // names produced by the cux release workflow.
 const targets = {
@@ -35,13 +75,13 @@ const asset = targets[key];
 if (!asset) {
   console.error(
     `cux: no prebuilt binary for ${key}. ` +
-    "Open an issue at https://github.com/inulute/claude-switch/issues, " +
-    "or build from source: https://github.com/inulute/claude-switch#building-from-source",
+    "Open an issue at https://github.com/inulute/cux/issues, " +
+    "or build from source: https://github.com/inulute/cux#building-from-source",
   );
   process.exit(0); // soft-fail; peers shouldn't break
 }
 
-const repo = process.env.CUX_RELEASE_REPO || "inulute/claude-switch";
+const repo = process.env.CUX_RELEASE_REPO || "inulute/cux";
 const baseURL = `https://github.com/${repo}/releases/download/v${version}`;
 
 const binDir = join(here, "bin");

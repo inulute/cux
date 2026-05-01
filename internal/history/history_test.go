@@ -10,17 +10,17 @@ import (
 // withTempBackup points the paths package at a temp dir for the duration
 // of one test by setting XDG_DATA_HOME (which paths.BackupRoot consults
 // on Linux). On macOS/Windows BackupRoot ignores XDG, so the tests run
-// against the real ~/.claude-switch — they still work because they
-// clear what they create, but if you're running them on those
-// platforms during local dev, expect a one-time `swap-history.json`
-// file to appear under your home.
+// against the real ~/.cux — they still work because they clear what
+// they create, but if you're running them on those platforms during
+// local dev, expect a one-time `swap-history.json` file to appear
+// under your home.
 func withTempBackup(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)
 	// Make sure no stale file from a prior run exists at the path
 	// paths.BackupRoot will compute under our temp XDG_DATA_HOME.
-	_ = os.RemoveAll(filepath.Join(dir, "claude-switch"))
+	_ = os.RemoveAll(filepath.Join(dir, "cux"))
 	return dir
 }
 

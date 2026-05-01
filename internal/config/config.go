@@ -11,12 +11,12 @@
 //   - strategy: drain, no fixed order (auto by highest 7d)
 //   - auto_resume: true
 //   - auto_message: "Go continue."   (set to "" to skip the prompt
-//                                     and just resume silently)
+//     and just resume silently)
 //   - notify: true                    (no-op in v0.2; reserved for v0.3
-//                                     when desktop notifications land)
+//     when desktop notifications land)
 //   - poll_interval_seconds: 60       (no-op until the monitor lands;
-//                                     kept here so users can tune it
-//                                     ahead of v0.3)
+//     kept here so users can tune it
+//     ahead of v0.3)
 package config
 
 import (
@@ -47,8 +47,8 @@ type StrategyConfig struct {
 // it interactively. The cadence cap means we ping GitHub at most once
 // per CadenceHours regardless of how often `cux` runs.
 type UpdateCheckConfig struct {
-	Enabled       bool `json:"enabled"`
-	CadenceHours  int  `json:"cadence_hours"`
+	Enabled      bool `json:"enabled"`
+	CadenceHours int  `json:"cadence_hours"`
 }
 
 // Config is the full preferences shape.
@@ -59,15 +59,15 @@ type UpdateCheckConfig struct {
 // the right knobs when you want auto-swap off but `/switch` rotation
 // to keep working.
 type Config struct {
-	Thresholds              usage.Thresholds  `json:"thresholds"`
-	Strategy                StrategyConfig    `json:"strategy"`
-	AutoSwitchOnThreshold   bool              `json:"auto_switch_on_threshold"`
-	AutoSwitchOnRateLimit   bool              `json:"auto_switch_on_rate_limit"`
-	AutoResume              bool              `json:"auto_resume"`
-	AutoMessage             string            `json:"auto_message"`
-	Notify                  bool              `json:"notify"`
-	PollIntervalSeconds     int               `json:"poll_interval_seconds"`
-	UpdateCheck             UpdateCheckConfig `json:"update_check"`
+	Thresholds            usage.Thresholds  `json:"thresholds"`
+	Strategy              StrategyConfig    `json:"strategy"`
+	AutoSwitchOnThreshold bool              `json:"auto_switch_on_threshold"`
+	AutoSwitchOnRateLimit bool              `json:"auto_switch_on_rate_limit"`
+	AutoResume            bool              `json:"auto_resume"`
+	AutoMessage           string            `json:"auto_message"`
+	Notify                bool              `json:"notify"`
+	PollIntervalSeconds   int               `json:"poll_interval_seconds"`
+	UpdateCheck           UpdateCheckConfig `json:"update_check"`
 }
 
 // ResolvedStrategy returns the parsed strategy.Kind.

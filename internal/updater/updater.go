@@ -2,7 +2,7 @@
 // unless config.UpdateCheck.Enabled is true; cux makes no network call
 // out of the box.
 //
-// The check hits the GitHub Releases API for the inulute/claude-switch
+// The check hits the GitHub Releases API for the inulute/cux
 // repo, compares the latest tag to the running binary's version, and
 // returns either nothing or a Result describing the newer version.
 // Results are cached on disk so we ping GitHub at most once per the
@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	defaultRepo    = "inulute/claude-switch"
+	defaultRepo    = "inulute/cux"
 	envRepo        = "CUX_RELEASE_REPO"
 	releasesAPIFmt = "https://api.github.com/repos/%s/releases/latest"
 	cacheFileName  = "update-cache.json"
@@ -34,14 +34,16 @@ const (
 
 // Result describes a newer release. Empty Latest means "no update".
 type Result struct {
-	Current  string    // version cux was built as, no leading "v"
-	Latest   string    // GitHub tag minus leading "v"
-	HTMLURL  string    // browser-friendly link to the release
-	Polled   time.Time // when we last hit the API
+	Current string    // version cux was built as, no leading "v"
+	Latest  string    // GitHub tag minus leading "v"
+	HTMLURL string    // browser-friendly link to the release
+	Polled  time.Time // when we last hit the API
 }
 
-// HasUpdate is true when Latest is set and lexically newer than Current.
-func (r Result) HasUpdate() bool { return r.Latest != "" && IsNewer(r.Latest, r.Current) }
+// HasUpdate is true when Latest is set and semantically newer than Current.
+func (r Result) HasUpdate() bool {
+	return r.Latest != "" && IsNewer(stripV(r.Latest), stripV(r.Current))
+}
 
 // Cache is the on-disk shape persisted between runs.
 type Cache struct {

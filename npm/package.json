@@ -11,13 +11,13 @@
     "switcher",
     "oauth"
   ],
-  "homepage": "https://github.com/inulute/claude-switch",
+  "homepage": "https://github.com/inulute/cux",
   "bugs": {
-    "url": "https://github.com/inulute/claude-switch/issues"
+    "url": "https://github.com/inulute/cux/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/inulute/claude-switch.git"
+    "url": "git+https://github.com/inulute/cux.git"
   },
   "license": "MIT",
   "author": "inulute",

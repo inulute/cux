@@ -18,7 +18,7 @@ if (!existsSync(binPath)) {
     `cux: binary not found at ${binPath}.\n` +
     "Postinstall may have failed; try `npm install -g @inulute/cux --force`, " +
     "or download the binary manually from " +
-    "https://github.com/inulute/claude-switch/releases",
+    "https://github.com/inulute/cux/releases",
   );
   process.exit(1);
 }

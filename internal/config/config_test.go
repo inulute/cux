@@ -30,6 +30,12 @@ func TestDefaultsLoaded_WhenFileMissing(t *testing.T) {
 	if c.AutoMessage != def.AutoMessage {
 		t.Errorf("auto_message: got %q, want %q", c.AutoMessage, def.AutoMessage)
 	}
+	if c.UpdateCheck.Enabled {
+		t.Error("update_check.enabled should default to false")
+	}
+	if c.UpdateCheck.CadenceHours != 24 {
+		t.Errorf("update_check.cadence_hours = %d, want 24", c.UpdateCheck.CadenceHours)
+	}
 }
 
 func TestPartialFileMergesWithDefaults(t *testing.T) {
@@ -106,6 +112,22 @@ func TestSetAndSave(t *testing.T) {
 		t.Fatalf("auto_message = %q, want empty", c.AutoMessage)
 	}
 
+	c, err = Set(c, "update_check.enabled", "yes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.UpdateCheck.Enabled {
+		t.Fatal("update_check.enabled should be true")
+	}
+
+	c, err = Set(c, "update_check.cadence_hours", "12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UpdateCheck.CadenceHours != 12 {
+		t.Fatalf("update_check.cadence_hours = %d, want 12", c.UpdateCheck.CadenceHours)
+	}
+
 	if err := Save(c); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +136,7 @@ func TestSetAndSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Thresholds.SevenDay != 80 || got.Strategy.Kind != "manual" || got.AutoResume || got.AutoMessage != "" {
+	if got.Thresholds.SevenDay != 80 || got.Strategy.Kind != "manual" || got.AutoResume || got.AutoMessage != "" || !got.UpdateCheck.Enabled || got.UpdateCheck.CadenceHours != 12 {
 		t.Fatalf("round-trip lost data: %+v", got)
 	}
 }
@@ -126,6 +148,8 @@ func TestSetRejectsBadInput(t *testing.T) {
 		{"thresholds.seven_day", "abc"},
 		{"strategy.kind", "raid"},
 		{"auto_resume", "maybe"},
+		{"update_check.enabled", "maybe"},
+		{"update_check.cadence_hours", "0"},
 		{"poll_interval_seconds", "-5"},
 		{"unknown.thing", "x"},
 	}
