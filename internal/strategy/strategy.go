@@ -104,7 +104,7 @@ func PickNext(
 	case KindManual:
 		return Pick{}, false
 	case KindBalanced:
-		return pickBalanced(accounts, current, cache)
+		return pickBalanced(accounts, current, cache, thresholds)
 	default:
 		return pickDrain(order, accounts, current, cache, thresholds)
 	}
@@ -200,11 +200,15 @@ func pickDrain(
 	if cap7 == 0 || cap7 == 100 {
 		cap7 = 95
 	}
+	cap5 := thresholds.FiveHour
+	if cap5 == 0 || cap5 == 100 {
+		cap5 = 90
+	}
 	for _, c := range ordered {
 		if !isAvailable(cache, c.Email) {
 			continue
 		}
-		if sevenDayUtil(cache, c.Email) < float64(cap7) {
+		if fiveHourUtil(cache, c.Email) < float64(cap5) && sevenDayUtil(cache, c.Email) < float64(cap7) {
 			return Pick{Email: c.Email, Reason: "drain: 7d under cap"}, true
 		}
 	}
@@ -212,10 +216,6 @@ func pickDrain(
 	// Pass 2: 5h has any room (revolver picks anything below 90 here —
 	// it's the "we already failed pass 1, take whatever has even a bit
 	// of 5h budget" fallback).
-	cap5 := thresholds.FiveHour
-	if cap5 == 0 || cap5 == 100 {
-		cap5 = 90
-	}
 	for _, c := range ordered {
 		if !isAvailable(cache, c.Email) {
 			continue
@@ -228,13 +228,16 @@ func pickDrain(
 	return Pick{}, false
 }
 
-func pickBalanced(accounts []Candidate, current Candidate, cache usage.Cache) (Pick, bool) {
+func pickBalanced(accounts []Candidate, current Candidate, cache usage.Cache, thresholds usage.Thresholds) (Pick, bool) {
 	candidates := make([]Candidate, 0, len(accounts))
 	for _, c := range accounts {
 		if c.Email == current.Email {
 			continue
 		}
 		if !isAvailable(cache, c.Email) {
+			continue
+		}
+		if !hasFiveHourCapacity(cache, c.Email, thresholds) {
 			continue
 		}
 		candidates = append(candidates, c)
@@ -304,6 +307,18 @@ func fiveHourUtil(cache usage.Cache, email string) float64 {
 		return u.FiveHour.Utilization
 	}
 	return 0
+}
+
+func hasFiveHourCapacity(cache usage.Cache, email string, thresholds usage.Thresholds) bool {
+	u, ok := cache[email]
+	if !ok || u.FiveHour == nil {
+		return true
+	}
+	cap5 := thresholds.FiveHour
+	if cap5 == 0 || cap5 == 100 {
+		cap5 = 90
+	}
+	return u.FiveHour.Utilization < float64(cap5)
 }
 
 func findByEmail(accounts []Candidate, email string) *Candidate {

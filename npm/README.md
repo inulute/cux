@@ -11,7 +11,7 @@ and exposes it as the `cux` command on your `PATH`.
 ```bash
 npm install -g @inulute/cux
 cux setup
-cux add        # while logged in to each Claude account you want to manage
+cux add        # or /cux:add inside Claude while logged in
 ```
 
 For full documentation (auto-swap on rate-limit, threshold-based
@@ -25,6 +25,8 @@ swaps, strategies, history, configuration), see the main repository:
 
 - `/switch` from inside a Claude session to swap accounts and resume
   the same conversation.
+- `/cux:switch`, `/cux:add`, `/cux:list`, `/cux:config`, and related commands for in-session
+  account management.
 - Automatic swap when an account hits a rate limit, with auto-resume.
 - Threshold-based pre-emptive swap before a window caps.
 - One Go binary, no Python, no Bash version requirement, no `jq`.

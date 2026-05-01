@@ -14,13 +14,16 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +38,7 @@ import (
 	"github.com/inulute/cux/internal/updater"
 	"github.com/inulute/cux/internal/usage"
 	"github.com/inulute/cux/internal/wrapper"
+	"golang.org/x/term"
 )
 
 const (
@@ -56,6 +60,8 @@ var knownSubcommands = map[string]bool{
 	"rm":              true,
 	"status":          true,
 	"switch":          true,
+	"force-switch":    true,
+	"rescue-switch":   true,
 	"setup":           true,
 	"install-hooks":   true,
 	"uninstall-hooks": true,
@@ -98,6 +104,8 @@ func main() {
 		cmdStatus(rest)
 	case "switch":
 		cmdSwitch(rest)
+	case "force-switch", "rescue-switch":
+		cmdForceSwitch(rest)
 	case "setup":
 		cmdSetup(rest)
 	case "install-hooks":
@@ -301,20 +309,33 @@ func cmdSlashSwitch(args []string) {
 	}
 }
 
+func cmdForceSwitch(args []string) {
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: cux force-switch [slot|email]")
+		os.Exit(2)
+	}
+	target := strings.TrimSpace(strings.Join(args, " "))
+	if err := wrapper.ForceSwitch(target, os.Stdout); err != nil {
+		fail(err)
+	}
+}
+
 // --- Hook subcommands ----------------------------------------------------
 
-// cmdHook dispatches `cux hook {stop,session-start,rate-limit}`. These
+// cmdHook dispatches `cux hook {prompt-submit,stop,session-start,rate-limit}`. These
 // are invoked by Claude Code itself via entries in
 // ~/.claude/settings.json. They read JSON from stdin and write a
 // signal file under the cux runtime directory; everything else is
 // done by the wrapper's poll loop.
 func cmdHook(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: cux hook {stop|session-start|rate-limit}")
+		fmt.Fprintln(os.Stderr, "usage: cux hook {prompt-submit|stop|session-start|rate-limit}")
 		os.Exit(2)
 	}
 	var err error
 	switch args[0] {
+	case "prompt-submit":
+		err = hooks.UserPromptSubmit(os.Stdin, os.Stdout)
 	case "stop":
 		err = hooks.Stop(os.Stdin)
 	case "session-start":
@@ -439,7 +460,7 @@ func cmdHistory(args []string) {
 
 func cmdConfig(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: cux config show | cux config keys | cux config set <key> <value>")
+		fmt.Fprintln(os.Stderr, "usage: cux config show | cux config keys | cux config edit | cux config set <key> <value>")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -480,6 +501,10 @@ func cmdConfig(args []string) {
 			}
 			fmt.Printf("%-*s  %-*s  %s (default: %s)\n", keyW, k.Key, curW, cur, k.Description, k.Default)
 		}
+	case "edit":
+		if err := editConfigInteractive(); err != nil {
+			fail(err)
+		}
 	case "set":
 		if len(args) != 3 {
 			fmt.Fprintln(os.Stderr, "usage: cux config set <key> <value>")
@@ -498,9 +523,348 @@ func cmdConfig(args []string) {
 		}
 		fmt.Printf("Set %s.\n", args[1])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: cux config show | cux config keys | cux config set <key> <value>")
+		fmt.Fprintln(os.Stderr, "usage: cux config show | cux config keys | cux config edit | cux config set <key> <value>")
 		os.Exit(2)
 	}
+}
+
+func editConfigInteractive() error {
+	reader := bufio.NewReader(os.Stdin)
+	raw, err := newRawMenu()
+	if err != nil {
+		return err
+	}
+	defer raw.Close()
+	for {
+		c, err := config.Load()
+		if err != nil {
+			return err
+		}
+		printConfigEditor(c)
+		fmt.Print("Select setting, Esc/q=exit: ")
+		choice, err := readEditorChoice(raw, reader)
+		if err != nil {
+			return err
+		}
+		choice = normalizeEditorChoice(choice)
+		switch choice {
+		case "", "s", "save", "q", "quit":
+			fmt.Println("Settings saved.")
+			return nil
+		case "1":
+			v, ok, err := promptValue(raw, reader, "5h threshold %", strconv.Itoa(c.Thresholds.FiveHour))
+			if err != nil || !ok {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			if err := setAndSaveConfig("thresholds.five_hour", v); err != nil {
+				fmt.Printf("error: %v\r\n", err)
+				waitEnter(reader)
+			}
+		case "2":
+			v, ok, err := promptValue(raw, reader, "7d threshold %", strconv.Itoa(c.Thresholds.SevenDay))
+			if err != nil || !ok {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			if err := setAndSaveConfig("thresholds.seven_day", v); err != nil {
+				fmt.Printf("error: %v\r\n", err)
+				waitEnter(reader)
+			}
+		case "3":
+			next := map[string]string{"drain": "balanced", "balanced": "manual", "manual": "drain"}[strings.ToLower(c.Strategy.Kind)]
+			if next == "" {
+				next = "drain"
+			}
+			if err := setAndSaveConfig("strategy.kind", next); err != nil {
+				return err
+			}
+		case "4":
+			v, ok, err := promptValue(raw, reader, "drain order (comma-separated emails, blank = auto)", strings.Join(c.Strategy.Order, ","))
+			if err != nil || !ok {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			if err := setAndSaveConfig("strategy.order", v); err != nil {
+				fmt.Printf("error: %v\r\n", err)
+				waitEnter(reader)
+			}
+		case "5":
+			if err := setAndSaveConfig("auto_switch_on_threshold", strconv.FormatBool(!c.AutoSwitchOnThreshold)); err != nil {
+				return err
+			}
+		case "6":
+			if err := setAndSaveConfig("auto_switch_on_rate_limit", strconv.FormatBool(!c.AutoSwitchOnRateLimit)); err != nil {
+				return err
+			}
+		case "7":
+			if err := setAndSaveConfig("auto_resume", strconv.FormatBool(!c.AutoResume)); err != nil {
+				return err
+			}
+		case "8":
+			v, ok, err := promptValue(raw, reader, `resume message (blank = no auto prompt)`, c.AutoMessage)
+			if err != nil || !ok {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			if v == "" {
+				v = `""`
+			}
+			if err := setAndSaveConfig("auto_message", v); err != nil {
+				fmt.Printf("error: %v\r\n", err)
+				waitEnter(reader)
+			}
+		case "9":
+			if err := setAndSaveConfig("update_check.enabled", strconv.FormatBool(!c.UpdateCheck.Enabled)); err != nil {
+				return err
+			}
+		case "10":
+			v, ok, err := promptValue(raw, reader, "update cadence hours", strconv.Itoa(c.UpdateCheck.CadenceHours))
+			if err != nil || !ok {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			if err := setAndSaveConfig("update_check.cadence_hours", v); err != nil {
+				fmt.Printf("error: %v\r\n", err)
+				waitEnter(reader)
+			}
+		case "11":
+			if err := setAndSaveConfig("notify", strconv.FormatBool(!c.Notify)); err != nil {
+				return err
+			}
+		default:
+			fmt.Print("Unknown selection.\r\n")
+			waitEnter(reader)
+		}
+	}
+}
+
+func printConfigEditor(c config.Config) {
+	fmt.Print("\033[H\033[2J")
+	fmt.Printf("%s:: C U X   S E T T I N G S ::%s\r\n\r\n", colorBold, colorReset)
+	fmt.Printf("%sToggle booleans by selecting their number. Numeric/text settings prompt for a value.%s\r\n", colorGray, colorReset)
+	fmt.Printf("%sPress Enter on an empty prompt to go back/cancel. Press Esc or q to exit.%s\r\n\r\n", colorGray, colorReset)
+
+	fmt.Printf("%s┌────┬────────────────────────────┬────────────────────────────┬────────────────────────────────────┐%s\r\n", colorGray, colorReset)
+	fmt.Printf("%s│%s %sID%s %s│%s %sSETTING%s                   %s│%s %sVALUE%s                      %s│%s %sCONTROL%s                            %s│%s\r\n", colorGray, colorReset, colorBold, colorReset, colorGray, colorReset, colorBold, colorReset, colorGray, colorReset, colorBold, colorReset, colorGray, colorReset, colorBold, colorReset, colorGray, colorReset)
+	fmt.Printf("%s├────┼────────────────────────────┼────────────────────────────┼────────────────────────────────────┤%s\r\n", colorGray, colorReset)
+
+	row := func(id int, label, value, control string) {
+		fmt.Printf("%s│%s %s%02d%s %s│%s %s%-26s%s %s│%s %s%-26s%s %s│%s %-34s %s│%s\r\n",
+			colorGray, colorReset, colorTeal, id, colorReset, colorGray, colorReset, colorTeal, label, colorReset, colorGray, colorReset, colorTeal, value, colorReset, colorGray, control, colorGray, colorReset)
+	}
+
+	row(1, "5h threshold", strconv.Itoa(c.Thresholds.FiveHour)+"%", "edit percent")
+	row(2, "7d threshold", strconv.Itoa(c.Thresholds.SevenDay)+"%", "edit percent")
+	row(3, "strategy", c.Strategy.Kind, "cycle drain/balanced/manual")
+	row(4, "drain order", clip(strings.Join(c.Strategy.Order, ","), 26), "edit comma-separated emails")
+	row(5, "threshold auto-switch", checkbox(c.AutoSwitchOnThreshold), "toggle")
+	row(6, "rate-limit auto-switch", checkbox(c.AutoSwitchOnRateLimit), "toggle")
+	row(7, "auto resume", checkbox(c.AutoResume), "toggle")
+	row(8, "resume message", clip(displayEmpty(c.AutoMessage), 26), "edit text")
+	row(9, "update check", checkbox(c.UpdateCheck.Enabled), "toggle")
+	row(10, "update cadence", strconv.Itoa(c.UpdateCheck.CadenceHours)+"h", "edit hours")
+	row(11, "notifications", checkbox(c.Notify), "toggle")
+
+	fmt.Printf("%s└────┴────────────────────────────┴────────────────────────────┴────────────────────────────────────┘%s\r\n\r\n", colorGray, colorReset)
+}
+
+func setAndSaveConfig(key, value string) error {
+	c, err := config.Load()
+	if err != nil {
+		return err
+	}
+	c, err = config.Set(c, key, value)
+	if err != nil {
+		return err
+	}
+	return config.Save(c)
+}
+
+// ANSI colors
+const (
+	colorReset  = "\033[0m"
+	colorBold   = "\033[1m"
+	colorTeal   = "\033[36m"
+	colorGray   = "\033[90m"
+	colorYellow = "\033[33m"
+)
+
+func promptValue(raw *rawMenu, reader *bufio.Reader, label, current string) (string, bool, error) {
+	fmt.Printf("%s%s%s\r\n", colorBold, label, colorReset)
+	fmt.Printf("%sCurrent:%s %s%s%s\r\n", colorGray, colorReset, colorTeal, displayEmpty(current), colorReset)
+	fmt.Printf("%sNew value:%s ", colorYellow, colorReset)
+	val, ok, err := readRawInput(raw, reader)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	if val == "" || strings.EqualFold(val, "cancel") {
+		return "", false, nil
+	}
+	return val, true, nil
+}
+
+func normalizeEditorChoice(choice string) string {
+	choice = strings.TrimSpace(choice)
+	if choice == "\x1b" {
+		return "q"
+	}
+	choice = strings.ToLower(choice)
+	if n, err := strconv.Atoi(choice); err == nil {
+		return strconv.Itoa(n)
+	}
+	return choice
+}
+
+type rawMenu struct {
+	enabled bool
+	state   *term.State
+}
+
+func newRawMenu() (*rawMenu, error) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return &rawMenu{}, nil
+	}
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		return nil, err
+	}
+	return &rawMenu{enabled: true, state: state}, nil
+}
+
+func (r *rawMenu) Close() {
+	r.Suspend()
+}
+
+func (r *rawMenu) Suspend() {
+	if r == nil || !r.enabled || r.state == nil {
+		return
+	}
+	_ = term.Restore(int(os.Stdin.Fd()), r.state)
+}
+
+func (r *rawMenu) Resume() {
+	if r == nil || !r.enabled {
+		return
+	}
+	state, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err == nil {
+		r.state = state
+	}
+}
+
+func readEditorChoice(raw *rawMenu, reader *bufio.Reader) (string, error) {
+	val, ok, err := readRawInput(raw, reader)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "q", nil
+	}
+	return val, nil
+}
+
+func readRawInput(raw *rawMenu, reader *bufio.Reader) (string, bool, error) {
+	if raw == nil || !raw.enabled {
+		choice, err := reader.ReadString('\n')
+		if err != nil && len(choice) == 0 {
+			if errors.Is(err, io.EOF) {
+				fmt.Print("\r\n")
+				return "", false, nil
+			}
+			return "", false, err
+		}
+		return strings.TrimSpace(choice), true, nil
+	}
+	var buf []byte
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Print("\r\n")
+				return "", false, nil
+			}
+			return "", false, err
+		}
+		switch b {
+		case 0x03, 0x04: // Ctrl-C, Ctrl-D
+			fmt.Print("\r\n")
+			return "", false, nil
+		case 0x1b: // Esc
+			// Check if there are more bytes in the buffer (escape sequence like arrows)
+			if reader.Buffered() > 0 {
+				peek, _ := reader.Peek(1)
+				if peek[0] == '[' {
+					// It's an escape sequence (e.g. arrow keys ^[[A).
+					// Read until a terminator (usually a letter or ~).
+					_, _ = reader.ReadByte() // consume '['
+					for {
+						next, err := reader.ReadByte()
+						if err != nil || (next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') || next == '~' {
+							break
+						}
+					}
+					continue // Ignore the sequence
+				}
+			}
+			// Just a single Esc key
+			fmt.Print("\r\n")
+			return "", false, nil
+		case '\r', '\n':
+			fmt.Print("\r\n")
+			return string(buf), true, nil
+		case 0x7f, 0x08:
+			if len(buf) > 0 {
+				buf = buf[:len(buf)-1]
+				fmt.Print("\b \b")
+			}
+		default:
+			if b >= 32 && b < 127 {
+				buf = append(buf, b)
+				fmt.Printf("%c", b)
+			}
+		}
+	}
+}
+
+func waitEnter(reader *bufio.Reader) {
+	fmt.Print("Press Enter to continue...")
+	_, _ = reader.ReadString('\n')
+}
+
+func checkbox(v bool) string {
+	if v {
+		return "[\033[32mx\033[0m] enabled"
+	}
+	return "[\033[90m \033[0m] disabled"
+}
+
+func displayEmpty(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
+}
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return s[:n]
+	}
+	return s[:n-1] + "…"
 }
 
 func cmdUsage(args []string) {
@@ -589,14 +953,14 @@ func printUpdateResult(done <-chan updater.Result) {
 }
 
 // cmdSetup is the one-time post-install ritual. It installs the
-// /switch slash command and the three Claude Code hooks. Both pieces
-// are needed for the inline-switch flow to work.
+// /switch and /cux:* slash commands plus the Claude Code hooks. Both
+// pieces are needed for the inline-switch flow to work.
 func cmdSetup(args []string) {
 	branding.Print(os.Stdout)
 	if err := installSlashCommand(); err != nil {
 		fail(err)
 	}
-	fmt.Println("✓ Installed /switch slash command at ~/.claude/commands/switch.md")
+	fmt.Println("✓ Installed /switch and /cux:* slash commands under ~/.claude/commands")
 
 	if resolved, err := hookinstall.VerifyOnPATH(); err != nil {
 		fmt.Fprintln(os.Stderr, "  warning:", err)
@@ -618,9 +982,9 @@ func cmdSetup(args []string) {
 	}
 	fmt.Println()
 	fmt.Println("Next steps:")
-	fmt.Println("  1. Run `cux add` while logged in to each account you want to manage.")
+	fmt.Println("  1. Run `cux add` or `/cux:add` while logged in to each account you want to manage.")
 	fmt.Println("  2. Restart Claude Code (or start a new session) so it picks up the hooks.")
-	fmt.Println("  3. Launch sessions with `cux` instead of `claude`, and use /switch inside.")
+	fmt.Println("  3. Launch sessions with `cux` instead of `claude`, then use /switch and /cux:* inside.")
 }
 
 func offerUpdateCheckOptIn() error {
@@ -765,15 +1129,18 @@ USAGE
   cux list                          list managed accounts
   cux switch <slot|email>           swap the active account (manual; requires
                                     restart unless run from /switch inside)
+  cux force-switch [slot|email]     emergency swap for an active cux session
+                                    when Claude will not run /switch
   cux remove [--force] <slot|email> remove an account from cux
   cux status                        show live login + cux state
-  cux setup                         install /switch + Claude Code hooks
+  cux setup                         install /switch, /cux:* + Claude Code hooks
   cux install-hooks                 install Claude Code hooks only
   cux uninstall-hooks               remove cux's entries from settings.json
   cux history [-n N] [--json]       show recent account swaps
   cux history --clear               delete the swap history
   cux config show                   print current configuration
   cux config keys                   list every settable key
+  cux config edit                   interactive settings editor
   cux config set <key> <value>      update a single setting
   cux usage refresh                 fetch fresh usage for every account
   cux usage show                    print the on-disk usage cache (JSON)
@@ -783,7 +1150,8 @@ USAGE
 
 INLINE SWITCHING
   Once set up, type /switch [<slot|email>] from inside a Claude Code
-  session started via cux. The wrapper waits for the current turn to
-  finish (Stop hook), then swaps the account and reconnects with
-  --resume. Auto-swap on rate-limit errors works the same way.`)
+  session started via cux. You can also use /cux:switch, /cux:add,
+  /cux:list, /cux:status, /cux:config, /cux:remove, and
+  /cux:usage-refresh from inside the
+  session. Manual and rate-limit swaps reconnect with --resume.`)
 }

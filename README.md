@@ -32,10 +32,9 @@
 
 **`cux`** is a CLI for Claude Code that pools multiple Pro/Max
 accounts behind a single live session. When the active account hits
-a rate limit — or crosses a usage threshold you set — `cux` waits
-for the current turn to finish, switches to a healthy account, and
-continues the same conversation. No logout, no reload, no lost
-context.
+a rate limit, `cux` switches to a healthy account and continues the
+same conversation. For proactive threshold swaps, it waits for the
+current turn to finish first. No logout, no reload, no lost context.
 
 
 ```text
@@ -107,9 +106,9 @@ shell scripts (e.g. native Windows PowerShell or cmd.exe).
 
 ### After install
 
-Run `cux setup` once. That installs the `/switch` slash command and
-the three Claude Code hooks. Restart Claude Code afterwards so it
-picks them up.
+Run `cux setup` once. That installs the `/switch` and `/cux:*` slash
+commands plus the three Claude Code hooks. Restart Claude Code
+afterwards so it picks them up.
 
 ### What works on which platform
 
@@ -117,7 +116,7 @@ picks them up.
 |---|:---:|:---:|:---:|:---:|
 | Account commands (`add`, `list`, `switch`, `status`, …) | ✅ | ✅ | ✅ | ✅ |
 | Credential storage | file (0600) | Keychain | file (0600) | Credential Manager |
-| Hooks + `/switch` slash command | ✅ | ✅ | ✅ | ✅ |
+| Hooks + `/switch` and `/cux:*` slash commands | ✅ | ✅ | ✅ | ✅ |
 | Auto-resume on swap | ✅ | ✅ | ✅ | ✅ † |
 | `npm install -g @inulute/cux` | ✅ | ✅ | ✅ | ✅ |
 | `curl … \| sh` shell installer | ✅ | ✅ | ✅ | ❌ |
@@ -132,7 +131,7 @@ conversation is intact — but if you see anything unexpected, please
 ## Quick start
 
 ```bash
-cux setup           # install the /switch slash command + Claude Code hooks
+cux setup           # install /switch, /cux:* + Claude Code hooks
 cux add             # register the currently-logged-in account
 claude logout && claude login   # log into your second account
 cux add             # register it
@@ -144,7 +143,11 @@ installed hooks. From then on:
 
 - `/switch` from inside a Claude Code session rotates accounts.
 - `/switch <slot|email>` switches to a specific one.
-- A rate-limit response from the API auto-triggers the same flow.
+- `/cux:add`, `/cux:list`, `/cux:status`, `/cux:remove`, and
+  `/cux:switch`, `/cux:config`, `/cux:usage-refresh` run
+  account-management commands in-session.
+- A rate-limit response from the API auto-triggers the same flow and
+  does not wait for another Stop hook before reconnecting.
 
 ### Verify your setup once
 
@@ -161,8 +164,8 @@ If the answer is `4729`, swap-and-resume is working.
 
 ```
    user types     ┌────── claude (running, account A) ──────┐
-   /switch ──────►│  hooks: Stop, SessionStart,             │
-   or rate-limit  │         PostToolUseFailure              │
+   /switch ──────►│  hooks: UserPromptSubmit, Stop,         │
+   or rate-limit  │         SessionStart, PostToolUseFailure│
    ───────────────┴──┬──────────────────────────────────────┘
                      │ writes signal files
                      │ runtime/signals/{wrapperPID}-{name}
@@ -171,7 +174,8 @@ If the answer is `4729`, swap-and-resume is working.
              │  cux wrapper                         │  polls signals
              │   on rate-limit OR threshold OR      │  every 100 ms
              │   /switch:                           │
-             │     wait for next Stop signal        │  ← guarantees flush
+             │     rate-limit/manual: exit now      │  avoids hard-limit stall
+             │     threshold: wait for Stop signal  │  guarantees flush
              │     ask claude to exit cleanly       │
              │     swap creds (transactional)       │
              │     append history.Entry             │
@@ -198,6 +202,7 @@ cux remove <slot|email>      # forget an account
 cux history                  # recent swaps with reasons
 cux usage refresh            # poll all account usage
 cux config show              # current settings
+cux config edit              # interactive settings editor
 cux upgrade                  # update cux (npm or installer; auto-detects)
 ```
 
@@ -207,6 +212,23 @@ From inside a session started with `cux`:
 /switch                      # rotate per the configured strategy
 /switch 2                    # by slot number
 /switch alt@example.com      # by email
+/cux:switch 2                # same switch flow under the /cux namespace
+/cux:add                     # add/refresh the current login
+/cux:list --refresh          # list accounts from inside Claude Code
+/cux:status                  # show live login + cux state
+/cux:config show             # show cux configuration
+/cux:remove 2                # remove an account
+/cux:usage-refresh           # refresh account usage
+```
+
+If Claude is already hard-blocked, `/switch` is handled by cux's
+`UserPromptSubmit` hook before Claude processes the prompt. If you are
+on an older session that was started before that hook was installed,
+run this from another terminal:
+
+```bash
+cux force-switch             # rotate the active cux-wrapped session
+cux force-switch 2           # force a specific slot/email
 ```
 
 ## Configuration
@@ -281,6 +303,7 @@ $ cux history
 ~/.config/cux/config.json           # XDG_CONFIG_HOME-aware
 ~/.claude/settings.json             # hooks upserted here
 ~/.claude/commands/switch.md        # /switch slash command
+~/.claude/commands/cux/*.md         # /cux:* account commands
 ```
 
 ## Security

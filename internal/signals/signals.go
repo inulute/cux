@@ -3,7 +3,7 @@
 //
 // Each signal lives at:
 //
-//   $BACKUP_ROOT/runtime/signals/{wrapperPID}-{name}
+//	$BACKUP_ROOT/runtime/signals/{wrapperPID}-{name}
 //
 // Hooks write a signal as a JSON document (atomically, mode 0600).
 // The wrapper polls the directory every ~250 ms; the *presence* of a
@@ -61,8 +61,9 @@ type RateLimitedPayload struct {
 // SwitchRequestedPayload carries an optional explicit target. An empty
 // Target means "rotate to the next account per the configured strategy."
 type SwitchRequestedPayload struct {
-	Target    string    `json:"target,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	Target        string    `json:"target,omitempty"`
+	ResumeMessage string    `json:"resumeMessage,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
 }
 
 // Dir returns the absolute signal directory. Callers that intend to

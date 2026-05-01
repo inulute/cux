@@ -4,16 +4,18 @@
 //   - Claude Code's Stop / SessionStart / PostToolUseFailure hooks
 //     write per-wrapper signal files via the `signals` package.
 //   - The wrapper polls those signals while claude is alive.
-//   - When a swap trigger is observed (rate-limit, threshold, or
-//     manual /switch), the wrapper waits for the next Stop signal —
-//     which fires only after the turn's transcript has been flushed —
-//     and then signals claude to exit cleanly.
+//   - Threshold swaps wait for the next Stop signal, which fires only
+//     after the turn's transcript has been flushed.
+//   - Manual /switch and rate-limit swaps request a clean Claude exit
+//     as soon as their signal is observed; at hard usage limits Claude
+//     may not produce another Stop event.
 //   - On exit the wrapper performs the swap and relaunches claude
 //     with `--resume <session_id>`, so the conversation continues on
 //     the new account.
 //
-// The wait-for-Stop gating is the load-bearing piece: it removes the
-// SIGTERM-mid-turn flush race that v0.1 had to caveat in its README.
+// Stop gating remains the right behavior for proactive threshold swaps,
+// while rate-limit and manual slash-command swaps must not depend on a
+// future model turn that may never happen.
 package wrapper
 
 import (
@@ -24,10 +26,12 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/inulute/cux/internal/atomicfile"
 	"github.com/inulute/cux/internal/config"
 	"github.com/inulute/cux/internal/history"
 	"github.com/inulute/cux/internal/monitor"
@@ -58,6 +62,7 @@ type pending struct {
 	trigger        history.Trigger
 	reason         string
 	explicitTarget string
+	resumeMessage  string
 	fromUsage      usage.AccountUsage // best-effort snapshot
 }
 
@@ -77,6 +82,10 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	// happened to have the same PID. PIDs recycle.
 	signals.CleanupForPID(pid)
 	defer signals.CleanupForPID(pid)
+	if err := writeWrapperPID(pid); err != nil {
+		fmt.Fprintf(w, "cux: warning: cannot publish wrapper pid: %v\n", err)
+	}
+	defer cleanupWrapperPID(pid)
 
 	// One-shot background refresh so threshold checks have something
 	// to work with on the first turn. Errors are ignored — a fresh
@@ -147,7 +156,9 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 
 		if sessionID != "" && cfg.AutoResume {
 			currentArgv = []string{"--resume", sessionID}
-			if cfg.AutoMessage != "" {
+			if p.resumeMessage != "" {
+				currentArgv = append(currentArgv, p.resumeMessage)
+			} else if cfg.AutoMessage != "" {
 				currentArgv = append(currentArgv, cfg.AutoMessage)
 			}
 		} else {
@@ -161,6 +172,23 @@ func utilizationOrZero(w *usage.Window) float64 {
 		return 0
 	}
 	return w.Utilization
+}
+
+func writeWrapperPID(pid int) error {
+	if err := os.MkdirAll(paths.RuntimeDir(), 0o700); err != nil {
+		return err
+	}
+	return atomicfile.Write(paths.ClaudePIDFile(), []byte(strconv.Itoa(pid)+"\n"), 0o600)
+}
+
+func cleanupWrapperPID(pid int) {
+	b, err := os.ReadFile(paths.ClaudePIDFile())
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(string(b)) == strconv.Itoa(pid) {
+		_ = os.Remove(paths.ClaudePIDFile())
+	}
 }
 
 // launch runs claude once, polling for signals until the child exits.
@@ -259,15 +287,16 @@ func step(
 		}
 	}
 
-	// 2. Rate limit ⇒ mark a swap pending. The actual exit waits for
-	//    the next Stop signal (which is imminent once a tool error
-	//    surfaces — claude renders an error and the turn ends). We
-	//    consume the signal even when AutoSwitchOnRateLimit is false,
-	//    so a stale signal doesn't trigger a swap once the user
+	// 2. Rate limit ⇒ mark a swap pending and ask Claude to exit now.
+	//    At a hard usage cap there may be no later Stop event, so
+	//    waiting for one can strand the user on the exhausted account.
+	//    We consume the signal even when AutoSwitchOnRateLimit is
+	//    false, so a stale signal doesn't trigger a swap once the user
 	//    re-enables it.
 	if b, ok, _ := signals.Read(wrapperPID, signals.RateLimited); ok {
 		_ = signals.Consume(wrapperPID, signals.RateLimited)
 		if cfg.AutoSwitchOnRateLimit {
+			hasSwap := false
 			mu.Lock()
 			if *swap == nil {
 				msg := "rate-limit error from API"
@@ -276,21 +305,44 @@ func step(
 				}
 				*swap = &pending{trigger: history.TriggerRateLimit, reason: msg, fromUsage: snapshotActiveUsage()}
 			}
+			hasSwap = *swap != nil
 			mu.Unlock()
+			if hasSwap && stopRequested.CompareAndSwap(false, true) {
+				go gracefulExit(cmd, w)
+				return
+			}
 		} else {
 			fmt.Fprintln(w, "cux: rate-limit hook fired but auto_switch_on_rate_limit is off; staying on current account")
 		}
 	}
 
-	// 3. Manual /switch request from the slash command.
+	// 3. Manual /switch request from the slash command. Once the local
+	//    slash command has run, there is no need to wait for another
+	//    model turn before swapping.
 	if b, ok, _ := signals.Read(wrapperPID, signals.SwitchRequested); ok {
 		_ = signals.Consume(wrapperPID, signals.SwitchRequested)
 		p, _ := signals.DecodeSwitchRequested(b)
+		hasSwap := false
 		mu.Lock()
 		if *swap == nil {
-			*swap = &pending{trigger: history.TriggerManual, reason: "user requested via /switch", explicitTarget: p.Target, fromUsage: snapshotActiveUsage()}
+			reason := "user requested via /switch"
+			if p.ResumeMessage != "" {
+				reason = "prompt intercepted before threshold swap"
+			}
+			*swap = &pending{
+				trigger:        history.TriggerManual,
+				reason:         reason,
+				explicitTarget: p.Target,
+				resumeMessage:  p.ResumeMessage,
+				fromUsage:      snapshotActiveUsage(),
+			}
 		}
+		hasSwap = *swap != nil
 		mu.Unlock()
+		if hasSwap && stopRequested.CompareAndSwap(false, true) {
+			go gracefulExit(cmd, w)
+			return
+		}
 	}
 
 	// 4. Stop signal: a turn just ended cleanly.

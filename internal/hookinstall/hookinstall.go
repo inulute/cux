@@ -28,12 +28,13 @@ const CuxBinary = "cux"
 
 // hookSpec describes one hook ccux registers.
 type hookSpec struct {
-	Event   string // "Stop", "SessionStart", "PostToolUseFailure"
-	Subcmd  string // "stop", "session-start", "rate-limit"
+	Event   string // "Stop", "SessionStart", "PostToolUseFailure", "UserPromptSubmit"
+	Subcmd  string // "stop", "session-start", "rate-limit", "prompt-submit"
 	Timeout int    // seconds
 }
 
 var specs = []hookSpec{
+	{Event: "UserPromptSubmit", Subcmd: "prompt-submit", Timeout: 20},
 	{Event: "Stop", Subcmd: "stop", Timeout: 10},
 	{Event: "SessionStart", Subcmd: "session-start", Timeout: 5},
 	{Event: "PostToolUseFailure", Subcmd: "rate-limit", Timeout: 5},

@@ -100,6 +100,20 @@ func TestPickNextBalanced_SkipsExpired(t *testing.T) {
 	}
 }
 
+func TestPickNextBalanced_SkipsFull5h(t *testing.T) {
+	t.Parallel()
+	accts := threeAccounts()
+	cache := usage.Cache{
+		"a@x": u(20, 80),
+		"b@x": u(100, 10), // lowest 7d, but unusable now
+		"c@x": u(10, 60),
+	}
+	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds())
+	if !ok || pick.Email != "c@x" {
+		t.Fatalf("balanced should skip 5h-full b@x and pick c@x; got %+v ok=%v", pick, ok)
+	}
+}
+
 func TestPickNextBalanced_NoCacheTreatsAsAvailable(t *testing.T) {
 	t.Parallel()
 	// Fresh install: cache is empty. Balanced should still pick *some*
@@ -163,6 +177,21 @@ func TestPickNextDrain_SkipsAccountOver7dCap(t *testing.T) {
 	pick, ok := PickNext(KindDrain, order, accts, accts[0], cache, defaultThresholds())
 	if !ok || pick.Email != "c@x" {
 		t.Fatalf("drain should skip 7d-maxed b@x and pick c@x; got %+v ok=%v", pick, ok)
+	}
+}
+
+func TestPickNextDrain_SkipsAccountFull5hEvenWhenUnder7dCap(t *testing.T) {
+	t.Parallel()
+	accts := threeAccounts()
+	cache := usage.Cache{
+		"a@x": u(20, 40),  // current
+		"b@x": u(100, 10), // under 7d cap but cannot take work
+		"c@x": u(10, 20),
+	}
+	order := []string{"b@x", "c@x"}
+	pick, ok := PickNext(KindDrain, order, accts, accts[0], cache, defaultThresholds())
+	if !ok || pick.Email != "c@x" {
+		t.Fatalf("drain should skip 5h-full b@x and pick c@x; got %+v ok=%v", pick, ok)
 	}
 }
 
