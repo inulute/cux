@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 84" width="480" height="336" fill="none" role="img" aria-label="cux mark">
+  <title>cux</title>
+
+  <!-- Routing dotted lines from terminal exit to the three account
+       cards. The active path gets full-strength orange; the others
+       fade so the mark reads "one of these is the live one." -->
+  <path d="M 70 42 C 84 42, 84 20.5, 97 20.5"
+        stroke="#c8763a" stroke-width="2.75" stroke-linecap="round"
+        stroke-dasharray="0.1 4.2" fill="none"/>
+  <path d="M 70 42 C 84 42, 84 42, 97 42"
+        stroke="#f0ead6" stroke-width="2.75" stroke-linecap="round"
+        stroke-dasharray="0.1 4.2" fill="none" opacity="0.92"/>
+  <path d="M 70 42 C 84 42, 84 63.5, 97 63.5"
+        stroke="#5a564f" stroke-width="2.75" stroke-linecap="round"
+        stroke-dasharray="0.1 4.2" fill="none" opacity="0.82"/>
+
+  <!-- Terminal frame, prompt chevron, caret bar. -->
+  <rect x="6" y="10" width="64" height="64" rx="10" ry="10"
+        stroke="#f0ead6" stroke-width="2.875" fill="none"/>
+  <polyline points="23.28,31 37.28,42 23.28,53"
+            stroke="#f0ead6" stroke-width="3.25"
+            stroke-linejoin="miter" stroke-linecap="round" fill="none"/>
+  <rect x="41.28" y="51.2" width="12" height="3.6" rx="1.8" ry="1.8"
+        fill="#c8763a"/>
+  <circle cx="70" cy="42" r="1.8" fill="#f0ead6" opacity="0.65"/>
+
+  <!-- Stacked account cards. -->
+  <g>
+    <rect x="98" y="11.5" width="18" height="18" rx="4.5" ry="4.5"
+          stroke="#c8763a" stroke-width="2.625" fill="none"/>
+    <circle cx="107" cy="18.43" r="2.43" fill="#c8763a"/>
+    <path d="M 102.32 26.62 C 102.32 21.76, 104.66 21.46, 107 21.46
+             C 109.34 21.46, 111.68 21.76, 111.68 26.62 Z" fill="#c8763a"/>
+  </g>
+  <g>
+    <rect x="98" y="33" width="18" height="18" rx="4.5" ry="4.5"
+          stroke="#f0ead6" stroke-width="2.625" fill="none"/>
+    <circle cx="107" cy="39.93" r="2.43" fill="#f0ead6"/>
+    <path d="M 102.32 48.12 C 102.32 43.26, 104.66 42.96, 107 42.96
+             C 109.34 42.96, 111.68 43.26, 111.68 48.12 Z" fill="#f0ead6"/>
+  </g>
+  <g>
+    <rect x="98" y="54.5" width="18" height="18" rx="4.5" ry="4.5"
+          stroke="#5a564f" stroke-width="2.625" fill="none"/>
+    <circle cx="107" cy="61.43" r="2.43" fill="#5a564f"/>
+    <path d="M 102.32 69.62 C 102.32 64.76, 104.66 64.46, 107 64.46
+             C 109.34 64.46, 111.68 64.76, 111.68 69.62 Z" fill="#5a564f"/>
+  </g>
+</svg>

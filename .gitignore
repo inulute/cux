@@ -1,6 +1,6 @@
-# compiled binary
+# compiled binary release artefacts (root-only — assets/cux-*.svg are tracked)
 /cux
-cux-*
+/cux-*
 *.exe
 *.sha256
 

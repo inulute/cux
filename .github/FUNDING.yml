@@ -1,5 +1,6 @@
-# GitHub uses this file to render the "Sponsor" button on the repo
-# page. We point at the inulute landing page rather than a single
-# payment provider so the project can grow channels without rotating
-# the URL embedded in users' browsers, READMEs and stars.
+# Renders the "Sponsor" button on the repo page. GitHub Sponsors is
+# the primary channel; the custom landing page stays as a fallback so
+# new payment options can be added without rotating any URL embedded
+# in users' browsers, READMEs or stars.
+github: [inulute]
 custom: ["https://support.inulute.com"]

@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" width="1280" height="320" role="img" aria-label="cux — Run multiple Claude Code Pro/Max accounts as one">
+  <title>cux</title>
+
+  <!-- Background. Warm dark navy that keeps the cream / orange / grey
+       palette legible on both light and dark GitHub themes — GitHub
+       renders raw SVGs against a fixed background, so we pick one and
+       commit to it rather than try to be theme-adaptive. -->
+  <rect width="1280" height="320" fill="#0E1116"/>
+
+  <!-- Subtle ambient rings at lower-right so the composition has
+       somewhere to breathe without competing with the mark. -->
+  <circle cx="1180" cy="280" r="160" fill="none" stroke="#f0ead6"
+          stroke-width="1" opacity="0.06"/>
+  <circle cx="1180" cy="280" r="220" fill="none" stroke="#c8763a"
+          stroke-width="1" opacity="0.08"/>
+
+  <!-- The mark: a terminal frame on the left routed via dotted lines
+       to three stacked account cards, painted in the three accent
+       colours (orange, cream, grey) so the "many accounts behind one
+       terminal" idea reads at a glance.
+
+       Geometry comes from a 120x84 mark canvas, drawn at 4× here so
+       the mark fills the left column with vertical breathing room. -->
+  <g transform="translate(64, -8) scale(4)">
+    <!-- routing dotted lines from the terminal exit point to each card -->
+    <path d="M 70 42 C 84 42, 84 20.5, 97 20.5"
+          stroke="#c8763a" stroke-width="2.75" stroke-linecap="round"
+          stroke-dasharray="0.1 4.2" fill="none"/>
+    <path d="M 70 42 C 84 42, 84 42, 97 42"
+          stroke="#f0ead6" stroke-width="2.75" stroke-linecap="round"
+          stroke-dasharray="0.1 4.2" fill="none" opacity="0.92"/>
+    <path d="M 70 42 C 84 42, 84 63.5, 97 63.5"
+          stroke="#5a564f" stroke-width="2.75" stroke-linecap="round"
+          stroke-dasharray="0.1 4.2" fill="none" opacity="0.82"/>
+
+    <!-- terminal frame -->
+    <rect x="6" y="10" width="64" height="64" rx="10" ry="10"
+          stroke="#f0ead6" stroke-width="2.875" fill="none"/>
+    <!-- prompt chevron -->
+    <polyline points="23.28,31 37.28,42 23.28,53"
+              stroke="#f0ead6" stroke-width="3.25"
+              stroke-linejoin="miter" stroke-linecap="round" fill="none"/>
+    <!-- caret bar (the one orange accent inside the terminal) -->
+    <rect x="41.28" y="51.2" width="12" height="3.6" rx="1.8" ry="1.8"
+          fill="#c8763a"/>
+    <!-- routing dot at the terminal exit -->
+    <circle cx="70" cy="42" r="1.8" fill="#f0ead6" opacity="0.65"/>
+
+    <!-- account cards: orange (active), cream (idle), grey (drained) -->
+    <g>
+      <rect x="98" y="11.5" width="18" height="18" rx="4.5" ry="4.5"
+            stroke="#c8763a" stroke-width="2.625" fill="none"/>
+      <circle cx="107" cy="18.43" r="2.43" fill="#c8763a"/>
+      <path d="M 102.32 26.62 C 102.32 21.76, 104.66 21.46, 107 21.46
+               C 109.34 21.46, 111.68 21.76, 111.68 26.62 Z" fill="#c8763a"/>
+    </g>
+    <g>
+      <rect x="98" y="33" width="18" height="18" rx="4.5" ry="4.5"
+            stroke="#f0ead6" stroke-width="2.625" fill="none"/>
+      <circle cx="107" cy="39.93" r="2.43" fill="#f0ead6"/>
+      <path d="M 102.32 48.12 C 102.32 43.26, 104.66 42.96, 107 42.96
+               C 109.34 42.96, 111.68 43.26, 111.68 48.12 Z" fill="#f0ead6"/>
+    </g>
+    <g>
+      <rect x="98" y="54.5" width="18" height="18" rx="4.5" ry="4.5"
+            stroke="#5a564f" stroke-width="2.625" fill="none"/>
+      <circle cx="107" cy="61.43" r="2.43" fill="#5a564f"/>
+      <path d="M 102.32 69.62 C 102.32 64.76, 104.66 64.46, 107 64.46
+               C 109.34 64.46, 111.68 64.76, 111.68 69.62 Z" fill="#5a564f"/>
+    </g>
+  </g>
+
+  <!-- Wordmark + tagline anchored to the right of the mark. -->
+  <g>
+    <text x="600" y="160"
+          font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
+          font-size="148" font-weight="700" letter-spacing="-4"
+          fill="#f0ead6">cux</text>
+    <text x="600" y="220"
+          font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+          font-size="24" font-weight="500" letter-spacing="0.3"
+          fill="#c8763a">Run multiple Claude Code Pro/Max accounts as one</text>
+  </g>
+</svg>

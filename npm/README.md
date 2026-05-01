@@ -47,7 +47,7 @@ maintain a fork. To skip the network entirely, install with
 
 ## License
 
-MIT — see https://github.com/inulute/cux/blob/main/LICENSE.
+GPL-3.0-only — see https://github.com/inulute/cux/blob/main/LICENSE.
 
 ---
 

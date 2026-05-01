@@ -19,7 +19,7 @@
     "type": "git",
     "url": "git+https://github.com/inulute/cux.git"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "author": "inulute",
   "type": "module",
   "bin": {

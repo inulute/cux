@@ -1,158 +1,252 @@
 <p align="center">
-  <img src="assets/cux-banner.svg" alt="cux — Run multiple Claude Code Pro/Max accounts as one" width="100%"/>
+  <img src="./assets/cux-banner.svg" alt="cux — Run multiple Claude Code Pro/Max accounts as one" width="100%">
 </p>
 
-# cux — Run multiple Claude Code Pro/Max accounts as one
+<p align="center">
+  Run multiple Claude Code Pro/Max accounts as one.
+</p>
 
-Run multiple Claude Code Pro/Max accounts as one. cux wraps `claude`,
-listens to its `Stop` / `SessionStart` / `PostToolUseFailure` hooks,
-and when an account hits its rate limit (or crosses a configurable
-threshold), automatically swaps to a healthy account and continues
-the same conversation with `claude --resume`. Manual `/switch` from
-inside Claude is supported too. One ~5 MB Go binary — no Python, no
-`jq`, no Bash version requirements.
+<p align="center">
+  <a href="https://github.com/inulute/cux/releases/latest">
+    <img alt="latest release"
+         src="https://img.shields.io/github/v/release/inulute/cux?style=for-the-badge&label=Release&color=c8763a&labelColor=0e1116&logo=github&logoColor=f0ead6">
+  </a>
+  &nbsp;
+  <a href="https://www.npmjs.com/package/@inulute/cux">
+    <img alt="npm version"
+         src="https://img.shields.io/npm/v/@inulute/cux?style=for-the-badge&label=npm&color=c8763a&labelColor=0e1116&logo=npm&logoColor=f0ead6">
+  </a>
+  &nbsp;
+  <a href="https://github.com/inulute/cux/blob/main/LICENSE">
+    <img alt="license"
+         src="https://img.shields.io/badge/License-GPL--3.0-c8763a?style=for-the-badge&labelColor=0e1116&logo=gnu&logoColor=f0ead6">
+  </a>
+  &nbsp;
+  <a href="https://support.inulute.com">
+    <img alt="support"
+         src="https://img.shields.io/badge/Support-%E2%99%A5-c8763a?style=for-the-badge&labelColor=0e1116&logo=githubsponsors&logoColor=f0ead6">
+  </a>
+</p>
 
-> **Platform support today.** Linux and macOS, plus Windows under WSL
-> or Git Bash. A native Windows port of the inline-switch flow is
-> planned for v0.3.
+---
 
-## What's in v0.2
+**`cux`** is a CLI for Claude Code that pools multiple Pro/Max
+accounts behind a single live session. When the active account hits
+a rate limit — or crosses a usage threshold you set — `cux` waits
+for the current turn to finish, switches to a healthy account, and
+continues the same conversation. No logout, no reload, no lost
+context.
 
-- **Auto-swap on rate limit.** When Claude Code reports a rate-limit
-  error, cux waits for the current turn to flush, swaps accounts, and
-  resumes the conversation with the configured prompt (default:
-  `"Go continue."`). No manual intervention.
-- **Threshold-based pre-emptive swap.** Configurable: e.g. swap when
-  the active account passes 90% on its 5-hour window or 95% on its
-  7-day window. cux polls
-  `https://api.anthropic.com/api/oauth/usage` for live numbers.
-- **Strategy-driven account selection.** `drain` (use one until full,
-  ordered or auto-by-highest-7d), `balanced` (always pick the
-  freshest), or `manual` (only swap when the user does).
-- **Hook-driven shutdown.** cux only asks claude to exit *after* a
-  `Stop` hook fires — i.e. only after the transcript has been flushed
-  to disk. The flush race v0.1 had to caveat is gone.
-- **Persistent swap history**, capped at 1000 entries, with timestamps,
-  reasons, and per-account usage at swap time.
-- **`cux list`** shows 5h / 7d utilization and reset time per account
-  at a glance.
+
+```text
+$ cux
+cux: rate limit on alice@example.com → swapped to bob@example.com, resuming…
+> What number did I tell you to remember?
+4729.
+```
+
+---
+
+## Contents
+
+- [Contents](#contents)
+- [Install](#install)
+  - [Option 1 — npm](#option-1--npm)
+  - [Option 2 — shell installer](#option-2--shell-installer)
+  - [Option 3 — manual binary](#option-3--manual-binary)
+  - [After install](#after-install)
+  - [What works on which platform](#what-works-on-which-platform)
+- [Quick start](#quick-start)
+  - [Verify your setup once](#verify-your-setup-once)
+- [How it works](#how-it-works)
+- [Daily usage](#daily-usage)
+- [Configuration](#configuration)
+  - [Strategies](#strategies)
+- [Swap history](#swap-history)
+- [Data layout](#data-layout)
+- [Security](#security)
+- [Building from source](#building-from-source)
+- [License](#license)
+- [Socials](#socials)
 
 ## Install
 
-One-line installer (Linux / macOS / WSL / Git Bash):
+Three install methods. Pick the one that fits your platform — they
+all install the same `cux` binary.
+
+### Option 1 — npm
+
+Works on Linux, macOS and Windows. Requires Node.js 18 or newer.
+
+```bash
+npm install -g @inulute/cux
+```
+
+### Option 2 — shell installer
+
+Works on Linux, macOS, WSL and Git Bash on Windows.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/inulute/cux/main/scripts/install.sh | sh
 ```
 
-Or download a binary directly from the
-[releases page](https://github.com/inulute/cux/releases),
-`chmod +x cux-<os>-<arch>`, and put it on your `PATH`.
+### Option 3 — manual binary
 
-After install, run once:
+Works everywhere. Useful if you don't want Node.js and can't run
+shell scripts (e.g. native Windows PowerShell or cmd.exe).
+
+1. Download the matching artefact from the
+   [releases page](https://github.com/inulute/cux/releases):
+   - `cux-linux-amd64`, `cux-linux-arm64`
+   - `cux-darwin-amd64`, `cux-darwin-arm64`
+   - `cux-windows-amd64.exe`
+2. On Linux/macOS, `chmod +x cux-<os>-<arch>` and rename to `cux`.
+3. Move it somewhere on your `PATH`:
+   - Linux/macOS: `~/.local/bin/cux`
+   - Windows: any directory listed in your `Path` environment variable.
+
+### After install
+
+Run `cux setup` once. That installs the `/switch` slash command and
+the three Claude Code hooks. Restart Claude Code afterwards so it
+picks them up.
+
+### What works on which platform
+
+| | Linux | macOS | WSL / Git Bash | native Windows |
+|---|:---:|:---:|:---:|:---:|
+| Account commands (`add`, `list`, `switch`, `status`, …) | ✅ | ✅ | ✅ | ✅ |
+| Credential storage | file (0600) | Keychain | file (0600) | Credential Manager |
+| Hooks + `/switch` slash command | ✅ | ✅ | ✅ | ✅ |
+| Auto-resume on swap | ✅ | ✅ | ✅ | ✅ † |
+| `npm install -g @inulute/cux` | ✅ | ✅ | ✅ | ✅ |
+| `curl … \| sh` shell installer | ✅ | ✅ | ✅ | ❌ |
+| Manual binary download | ✅ | ✅ | ✅ | ✅ |
+
+† On native Windows the wrapper hard-terminates `claude` on swap (Go
+can't send `SIGINT` cross-process there). The `Stop` hook still
+flushes the transcript before the wrapper acts, so the resumed
+conversation is intact — but if you see anything unexpected, please
+[open an issue](https://github.com/inulute/cux/issues).
+
+## Quick start
 
 ```bash
-cux setup        # installs the /switch slash command + Claude Code hooks
-cux add          # registers the currently logged-in account
+cux setup           # install the /switch slash command + Claude Code hooks
+cux add             # register the currently-logged-in account
+claude logout && claude login   # log into your second account
+cux add             # register it
+cux                 # launch claude under cux instead of `claude` directly
 ```
 
-Log in with another account (`claude logout && claude login`), then
-`cux add` again. Repeat for each account you want to manage.
+After `cux setup`, restart Claude Code so it picks up the newly
+installed hooks. From then on:
 
-> **Restart Claude Code after `cux setup`** so it picks up the newly
-> installed hooks.
+- `/switch` from inside a Claude Code session rotates accounts.
+- `/switch <slot|email>` switches to a specific one.
+- A rate-limit response from the API auto-triggers the same flow.
 
-## Usage
+### Verify your setup once
 
-From any shell:
+A 30-second check that proves end-to-end context preservation:
+
+1. Send: *"Please remember the number 4729."*
+2. Wait for the reply.
+3. Send `/switch`.
+4. After the ~2-second reconnect, ask: *"What number did I tell you?"*
+
+If the answer is `4729`, swap-and-resume is working.
+
+## How it works
+
+```
+   user types     ┌────── claude (running, account A) ──────┐
+   /switch ──────►│  hooks: Stop, SessionStart,             │
+   or rate-limit  │         PostToolUseFailure              │
+   ───────────────┴──┬──────────────────────────────────────┘
+                     │ writes signal files
+                     │ runtime/signals/{wrapperPID}-{name}
+                     ▼
+             ┌──────────────────────────────────────┐
+             │  cux wrapper                         │  polls signals
+             │   on rate-limit OR threshold OR      │  every 100 ms
+             │   /switch:                           │
+             │     wait for next Stop signal        │  ← guarantees flush
+             │     ask claude to exit cleanly       │
+             │     swap creds (transactional)       │
+             │     append history.Entry             │
+             │     relaunch claude --resume <id>    │
+             │       [optional auto_message]        │
+             └──────────────────────────────────────┘
+```
+
+`cux` writes its hooks into `~/.claude/settings.json` by signature,
+so it never modifies entries owned by other tools and
+`cux uninstall-hooks` removes only its own. Every cux-owned file goes
+through atomic writes (`tmp + fsync + rename`) and state mutations
+are serialised with file locks (`flock` / `LockFileEx`).
+
+## Daily usage
 
 ```bash
-cux                          # launches claude under the wrapper
-cux list                     # accounts with 5h / 7d utilization
-cux list --refresh           # refresh usage first
-cux status                   # current login and ccux state
-cux history                  # recent swaps with reasons
-cux config show              # current settings
-cux usage refresh            # poll all accounts
-cux upgrade                  # update cux via npm or the shell installer
+cux                          # launch claude under the wrapper
+cux list                     # accounts with 5h / 7d utilisation
+cux list --refresh           # refresh usage before listing
+cux status                   # current login + cux state
 cux switch <slot|email>      # manual swap (no auto-resume)
 cux remove <slot|email>      # forget an account
+cux history                  # recent swaps with reasons
+cux usage refresh            # poll all account usage
+cux config show              # current settings
+cux upgrade                  # update cux (npm or installer; auto-detects)
 ```
 
-From inside a Claude Code session started with `cux`:
+From inside a session started with `cux`:
 
 ```text
-/switch                       # rotate to next account per strategy
-/switch 2
-/switch alt@example.com
+/switch                      # rotate per the configured strategy
+/switch 2                    # by slot number
+/switch alt@example.com      # by email
 ```
-
-The slash command writes a switch-requested signal. The wrapper
-handles the rest — wait for the current turn to finish, swap, and
-relaunch with `--resume`.
-
-### Verification recipe
-
-Run this once to confirm context is preserved end-to-end:
-
-1. `cux add` while logged into account A.
-2. `claude logout && claude login` to account B; `cux add` again.
-3. `cux setup` and restart Claude Code.
-4. Start `cux`. Send: *"Please remember the number 4729."*
-5. Wait for claude's reply.
-6. Send `/switch`.
-7. After the ~2-second reconnect, ask: *"What number did I tell you?"*
-
-If the answer is `4729`, the swap-and-resume is preserving context as
-intended.
 
 ## Configuration
 
 ```bash
+cux config keys                                      # discover everything
 cux config show
 cux config set thresholds.five_hour 85
 cux config set strategy.kind balanced
-cux config set strategy.order alice@x,bob@x      # drain mode priority
-cux config set auto_message ""                    # silent resume
-cux config set update_check.enabled true          # opt in to update checks
+cux config set strategy.order alice@x,bob@x         # drain priority
+cux config set auto_message ""                      # silent resume
+cux config set update_check.enabled true            # opt in to update checks
 ```
-
-Config file: `~/.config/cux/config.json`
 
 | Key | Default | Description |
 |---|---|---|
 | `thresholds.five_hour`        | `90`           | Auto-swap when 5h utilisation hits this %. `100` = reactive only. |
 | `thresholds.seven_day`        | `95`           | Auto-swap when 7d utilisation hits this %. `100` = reactive only. |
 | `strategy.kind`               | `drain`        | `drain` / `balanced` / `manual` |
-| `strategy.order`              | `[]`           | Drain mode priority list (emails); empty = auto by highest 7d |
-| `auto_switch_on_threshold`    | `true`         | Master toggle for pre-emptive threshold-driven swap |
+| `strategy.order`              | `[]`           | Drain mode priority (emails); empty = auto by highest 7d |
+| `auto_switch_on_threshold`    | `true`         | Master toggle for pre-emptive threshold swap |
 | `auto_switch_on_rate_limit`   | `true`         | Master toggle for swap on rate-limit hook |
 | `auto_resume`                 | `true`         | Pass `--resume <id>` to the relaunched claude |
-| `auto_message`                | `Go continue.` | Sent as the first user turn after auto-swap; `""` = silent |
-| `notify`                      | `true`         | Reserved for v0.3 desktop notifications |
-| `poll_interval_seconds`       | `60`           | Reserved for v0.3 background usage monitor |
-| `update_check.enabled`        | `false`        | Opt-in daily startup check for newer cux releases |
-| `update_check.cadence_hours`  | `24`           | Minimum hours between GitHub update checks |
+| `auto_message`                | `Go continue.` | First user turn after auto-swap; `""` = silent |
+| `update_check.enabled`        | `false`        | Check GitHub for newer cux releases on startup |
+| `update_check.cadence_hours`  | `24`           | Minimum hours between update checks (cached locally) |
 
-`cux config keys` lists everything above with current values and
-descriptions, so you don't have to remember the exact names.
+Config file: `~/.config/cux/config.json` (XDG-aware).
 
 ### Strategies
 
 - **drain** — Use one account until its 7-day cap is near, then move
-  on. Set `order` for explicit priority, or leave empty for
-  auto-drain (highest-7d first, so the closest-to-limit account
-  drains first).
+  on. Set `order` for explicit priority, or leave empty to auto-drain
+  the highest-7d account first.
 - **balanced** — Always pick the account with the lowest 7-day
   utilisation (tiebreak by lowest 5h).
-- **manual** — Never swap automatically. /switch and `cux switch`
+- **manual** — Never swap automatically. `/switch` and `cux switch`
   still work.
 
 ## Swap history
-
-Every swap is logged with timestamp, trigger source (`manual`,
-`threshold`, `rate-limit`, `rebalance`), from/to accounts, reason,
-session id, cwd, and per-account usage at swap time:
 
 ```text
 $ cux history
@@ -165,58 +259,14 @@ $ cux history
     reason: user requested via /switch
 ```
 
-`cux history -n 5` for the last five; `cux history --json` to pipe;
-`cux history --clear` to wipe.
-
-## How it works
-
-```
-   user types     ┌────── claude (running, account A) ──────┐
-   /switch ──────►│  hooks: Stop, SessionStart,             │
-   or rate-limit  │         PostToolUseFailure               │
-   ───────────────┴──┬───────────────────────────────────────┘
-                     │ writes signal files
-                     │ runtime/signals/{wrapperPID}-{name}
-                     ▼
-             ┌──────────────────────────────────────┐
-             │  cux wrapper                         │  polls signals
-             │   on rate-limit OR threshold OR      │  every 100 ms
-             │   /switch:                           │
-             │     wait for next Stop signal        │  ← guarantees flush
-             │     ask claude to exit               │
-             │     swap creds (transactional)       │
-             │     append history.Entry             │
-             │     relaunch claude --resume <id>    │
-             │       [optional auto_message]        │
-             └──────────────────────────────────────┘
-```
-
-- **Live credentials** are written wherever Claude Code itself reads:
-  macOS Keychain (`Claude Code-credentials`) on Darwin,
-  `~/.claude/.credentials.json` on Linux and Windows.
-- **Backup credentials** (per-account stash) live in the OS keystore
-  on macOS and Windows under the service `cux-backup`. On Linux they
-  go to
-  `~/.local/share/cux/accounts/<N>-<email>/credentials.json`
-  with mode 0600.
-- **The oauthAccount block** inside `~/.claude/.claude.json` is the
-  *only* part of that file cux ever rewrites. Themes, MCP config and
-  history are untouched.
-- **Atomic writes** (`tmp + fsync + rename`), file locking
-  (`flock` / `LockFileEx`) on every state-modifying command.
-- **Hook installation** in `~/.claude/settings.json` is upserted by
-  signature — cux never modifies entries owned by other tools and
-  `cux uninstall-hooks` removes only its own.
-- **Process isolation**: each cux wrapper gets its own
-  `CUX_WRAPPER_PID` and writes signals namespaced to that PID, so
-  multiple cux sessions in different terminals never observe each
-  other's hook events.
+`cux history -n 5` for the last five, `cux history --json` to pipe,
+`cux history --clear` to wipe. History is capped at 1000 entries.
 
 ## Data layout
 
 ```
-~/.local/share/cux/                  # ~/.cux/ on macOS/Windows
-├── state.json                      # account index, sequence, active slot
+~/.local/share/cux/                  (~/.cux/ on macOS/Windows)
+├── state.json                      # accounts, sequence, active slot
 ├── .lock                           # flock target for state mutations
 ├── accounts/
 │   └── 01-user@example.com/
@@ -224,8 +274,8 @@ $ cux history
 │       └── oauth.json              # the oauthAccount block, raw JSON
 └── runtime/
     ├── signals/                    # hook → wrapper signal files
-    ├── update-cache.json            # opt-in update-check cache
     ├── usage-cache.json            # per-account 5h / 7d snapshot
+    ├── update-cache.json           # update-check cadence cache
     └── swap-history.json           # capped at 1000 entries
 
 ~/.config/cux/config.json           # XDG_CONFIG_HOME-aware
@@ -233,22 +283,19 @@ $ cux history
 ~/.claude/commands/switch.md        # /switch slash command
 ```
 
-## Security notes
+## Security
 
-- Tokens are never logged. The structured logging path treats
-  credential blobs as opaque and never crosses them into log fields;
-  the helper that pulls a token out of a blob (`creds.ExtractAccessToken`)
-  never surfaces it in error messages either.
-- All cux-owned directories and files are 0700 / 0600. The installer
-  refuses to run as root unless inside a container.
-- The `/switch` slash command refuses to operate when cux is *not* the
-  parent process — the `CUX_WRAPPED` env var must be set, so it
-  cannot accidentally try to act on an unrelated `claude` process.
-- The wrapper validates that a switch request originated in the same
-  working directory before acting on it.
-- The `~/.claude/settings.json` upsert only ever touches entries
-  whose `command` field contains the literal string `cux ` or
-  `/cux ` — every other tool's hooks are preserved.
+- **Tokens are never logged.** Credential blobs are opaque to
+  logging; the helper that extracts a token never surfaces it in any
+  error message.
+- **All cux-owned directories and files are 0700 / 0600.**
+- **The installer refuses to run as root** unless inside a container.
+- **`/switch` is gated by `CUX_WRAPPED`** — the slash command refuses
+  to act unless cux is the parent process, so it cannot accidentally
+  signal an unrelated `claude`.
+- **Hook upsert is signature-keyed.** `cux install-hooks` only ever
+  modifies entries whose `command` field contains the literal string
+  `cux ` or `/cux ` — every other tool's hooks are preserved.
 
 ## Building from source
 
@@ -263,10 +310,16 @@ Requires Go 1.21+.
 
 ## License
 
-MIT.
+[GPL-3.0-only](./LICENSE). Modifying and redistributing `cux` is
+welcome; if you do, your changes need to ship under GPL-3.0 too.
+
+## Socials
+
+All inulute social channels live at
+**[socials.inulute.com](https://socials.inulute.com)** — one place
+for updates, other projects, and how to reach me.
 
 ---
 
-If cux saves you time, you can support development at
-[support.inulute.com](https://support.inulute.com). Entirely optional —
-no nags, no telemetry, no postinstall messages. Thank you.
+If `cux` saves you time, you can support development at
+[support.inulute.com](https://support.inulute.com).
