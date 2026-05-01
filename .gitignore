@@ -23,3 +23,5 @@ npm/bin/*.sha256
 npm/node_modules/
 PLAN.md
 PROGRESS.md
+/.ccache
+/.gocache
