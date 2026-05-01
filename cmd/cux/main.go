@@ -655,28 +655,45 @@ func printConfigEditor(c config.Config) {
 	fmt.Printf("%sToggle booleans by selecting their number. Numeric/text settings prompt for a value.%s\r\n", colorGray, colorReset)
 	fmt.Printf("%sPress Enter on an empty prompt to go back/cancel. Press Esc or q to exit.%s\r\n\r\n", colorGray, colorReset)
 
-	fmt.Printf("%s┌────┬────────────────────────────┬────────────────────────────┬────────────────────────────────────┐%s\r\n", colorGray, colorReset)
-	fmt.Printf("%s│%s %sID%s %s│%s %sSETTING%s                   %s│%s %sVALUE%s                      %s│%s %sCONTROL%s                            %s│%s\r\n", colorGray, colorReset, colorBold, colorReset, colorGray, colorReset, colorBold, colorReset, colorGray, colorReset, colorBold, colorReset, colorGray, colorReset, colorBold, colorReset, colorGray, colorReset)
-	fmt.Printf("%s├────┼────────────────────────────┼────────────────────────────┼────────────────────────────────────┤%s\r\n", colorGray, colorReset)
+	g := colorGray
+	r := colorReset
+	t := colorTeal
+	b := colorBold
 
-	row := func(id int, label, value, control string) {
-		fmt.Printf("%s│%s %s%02d%s %s│%s %s%-26s%s %s│%s %s%-26s%s %s│%s %-34s %s│%s\r\n",
-			colorGray, colorReset, colorTeal, id, colorReset, colorGray, colorReset, colorTeal, label, colorReset, colorGray, colorReset, colorTeal, value, colorReset, colorGray, control, colorGray, colorReset)
+	fmt.Printf("%s┌────┬────────────────────────────┬────────────────────────────┬────────────────────────────────────┐%s\r\n", g, r)
+	fmt.Printf("%s│%s %sID%s %s│%s %sSETTING%s                    %s│%s %sVALUE%s                      %s│%s %sCONTROL%s                            %s│%s\r\n", g, r, b, r, g, r, b, r, g, r, b, r, g, r, b, r, g, r)
+	fmt.Printf("%s├────┼────────────────────────────┼────────────────────────────┼────────────────────────────────────┤%s\r\n", g, r)
+
+	row := func(id int, label, value, control string, isBool bool) {
+		fmt.Printf("%s│%s ", g, r)
+		fmt.Printf("%s%02d%s ", t, id, r)
+		fmt.Printf("%s│%s ", g, r)
+		fmt.Printf("%s%-26s%s ", t, label, r)
+		fmt.Printf("%s│%s ", g, r)
+		if isBool {
+			padding := strings.Repeat(" ", 26-12)
+			fmt.Printf("%s%s", value, padding)
+		} else {
+			fmt.Printf("%s%-26s%s", t, value, r)
+		}
+		fmt.Printf(" %s│%s ", g, r)
+		fmt.Printf("%-34s ", control)
+		fmt.Printf("%s│%s\r\n", g, r)
 	}
 
-	row(1, "5h threshold", strconv.Itoa(c.Thresholds.FiveHour)+"%", "edit percent")
-	row(2, "7d threshold", strconv.Itoa(c.Thresholds.SevenDay)+"%", "edit percent")
-	row(3, "strategy", c.Strategy.Kind, "cycle drain/balanced/manual")
-	row(4, "drain order", clip(strings.Join(c.Strategy.Order, ","), 26), "edit comma-separated emails")
-	row(5, "threshold auto-switch", checkbox(c.AutoSwitchOnThreshold), "toggle")
-	row(6, "rate-limit auto-switch", checkbox(c.AutoSwitchOnRateLimit), "toggle")
-	row(7, "auto resume", checkbox(c.AutoResume), "toggle")
-	row(8, "resume message", clip(displayEmpty(c.AutoMessage), 26), "edit text")
-	row(9, "update check", checkbox(c.UpdateCheck.Enabled), "toggle")
-	row(10, "update cadence", strconv.Itoa(c.UpdateCheck.CadenceHours)+"h", "edit hours")
-	row(11, "notifications", checkbox(c.Notify), "toggle")
+	row(1, "5h threshold", strconv.Itoa(c.Thresholds.FiveHour)+"%", "edit percent", false)
+	row(2, "7d threshold", strconv.Itoa(c.Thresholds.SevenDay)+"%", "edit percent", false)
+	row(3, "strategy", c.Strategy.Kind, "cycle drain/balanced/manual", false)
+	row(4, "drain order", clip(strings.Join(c.Strategy.Order, ","), 26), "edit comma-separated emails", false)
+	row(5, "threshold auto-switch", checkbox(c.AutoSwitchOnThreshold), "toggle", true)
+	row(6, "rate-limit auto-switch", checkbox(c.AutoSwitchOnRateLimit), "toggle", true)
+	row(7, "auto resume", checkbox(c.AutoResume), "toggle", true)
+	row(8, "resume message", clip(displayEmpty(c.AutoMessage), 26), "edit text", false)
+	row(9, "update check", checkbox(c.UpdateCheck.Enabled), "toggle", true)
+	row(10, "update cadence", strconv.Itoa(c.UpdateCheck.CadenceHours)+"h", "edit hours", false)
+	row(11, "notifications", checkbox(c.Notify), "toggle", true)
 
-	fmt.Printf("%s└────┴────────────────────────────┴────────────────────────────┴────────────────────────────────────┘%s\r\n\r\n", colorGray, colorReset)
+	fmt.Printf("%s└────┴────────────────────────────┴────────────────────────────┴────────────────────────────────────┘%s\r\n\r\n", g, r)
 }
 
 func setAndSaveConfig(key, value string) error {
@@ -845,7 +862,7 @@ func waitEnter(reader *bufio.Reader) {
 
 func checkbox(v bool) string {
 	if v {
-		return "[\033[32mx\033[0m] enabled"
+		return "[\033[32mx\033[0m] enabled "
 	}
 	return "[\033[90m \033[0m] disabled"
 }
