@@ -134,6 +134,11 @@ async function main() {
     chmodSync(binPath, 0o755);
   }
   console.error(`cux ${version} installed at ${binPath}`);
+  console.error("");
+  console.error("cux: next steps");
+  console.error("  1. Run `cux setup` to install /switch, /cux:* and Claude Code hooks.");
+  console.error("  2. Run `cux add` while logged in to each Claude account.");
+  console.error("  3. Start Claude with `cux` instead of `claude`.");
 }
 
 main().catch((e) => {

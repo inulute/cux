@@ -33,6 +33,7 @@ import (
 	"github.com/inulute/cux/internal/hookinstall"
 	"github.com/inulute/cux/internal/hooks"
 	"github.com/inulute/cux/internal/monitor"
+	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/switcher"
 	"github.com/inulute/cux/internal/updater"
@@ -42,7 +43,7 @@ import (
 )
 
 const (
-	version = "0.2.1"
+	version = "0.2.2"
 	// donateURL is shown only by `cux version --verbose`. Subtle by
 	// design — never printed during normal use, never injected into
 	// help output, never shown by the wrapper or the slash command.
@@ -953,6 +954,7 @@ func cmdUsage(args []string) {
 
 func runWrapper(argv []string) {
 	updateDone := startUpdateCheck()
+	warnIfSetupMissing()
 	bin := os.Getenv("CUX_CLAUDE_BIN")
 	if bin == "" {
 		resolved, err := exec.LookPath("claude")
@@ -970,6 +972,46 @@ func runWrapper(argv []string) {
 	}
 	printUpdateResult(updateDone)
 	os.Exit(exitCode)
+}
+
+func warnIfSetupMissing() {
+	installed, err := setupInstalled()
+	if err != nil || installed {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "cux: setup is not complete.")
+	fmt.Fprintln(os.Stderr, "     Run `cux setup` once to install /switch, /cux:* and Claude Code hooks.")
+}
+
+func setupInstalled() (bool, error) {
+	hooksInstalled, err := hookinstall.Installed()
+	if err != nil || !hooksInstalled {
+		return hooksInstalled, err
+	}
+	for _, p := range setupSlashCommandPaths() {
+		if _, err := os.Stat(p); err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func setupSlashCommandPaths() []string {
+	dir := filepath.Join(paths.ClaudeDir(), "commands")
+	cuxDir := filepath.Join(dir, "cux")
+	return []string{
+		filepath.Join(dir, "switch.md"),
+		filepath.Join(cuxDir, "add.md"),
+		filepath.Join(cuxDir, "config.md"),
+		filepath.Join(cuxDir, "list.md"),
+		filepath.Join(cuxDir, "remove.md"),
+		filepath.Join(cuxDir, "status.md"),
+		filepath.Join(cuxDir, "switch.md"),
+		filepath.Join(cuxDir, "usage-refresh.md"),
+	}
 }
 
 func startUpdateCheck() <-chan updater.Result {

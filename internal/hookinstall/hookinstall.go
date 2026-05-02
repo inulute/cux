@@ -64,6 +64,34 @@ func Install() ([]string, error) {
 	return changed, writeSettings(settings)
 }
 
+// Installed reports whether all cux hook events are present in Claude's
+// settings file. It is intentionally tolerant of older cux hook shapes:
+// if an event contains a cux-owned command, setup has at least been run.
+func Installed() (bool, error) {
+	settings, err := loadSettings(false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	hooks := getHooksMap(settings)
+	for _, s := range specs {
+		entries := hooks[s.Event]
+		found := false
+		for _, e := range entries {
+			if isCuxEntry(e) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // Uninstall removes only cux's hook entries. Other tools' entries and
 // any non-hook keys are preserved.
 func Uninstall() ([]string, error) {
