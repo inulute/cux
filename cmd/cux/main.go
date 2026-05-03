@@ -43,7 +43,7 @@ import (
 )
 
 const (
-	version = "0.2.2"
+	version = "0.2.3"
 	// donateURL is shown only by `cux version --verbose`. Subtle by
 	// design — never printed during normal use, never injected into
 	// help output, never shown by the wrapper or the slash command.
@@ -60,6 +60,7 @@ var knownSubcommands = map[string]bool{
 	"remove":          true,
 	"rm":              true,
 	"status":          true,
+	"support":         true,
 	"switch":          true,
 	"force-switch":    true,
 	"rescue-switch":   true,
@@ -81,6 +82,8 @@ var knownSubcommands = map[string]bool{
 }
 
 func main() {
+	initTerminalOutput()
+
 	if len(os.Args) < 2 {
 		runWrapper(nil)
 		return
@@ -103,6 +106,8 @@ func main() {
 		cmdRemove(rest)
 	case "status":
 		cmdStatus(rest)
+	case "support":
+		cmdSupport(rest)
 	case "switch":
 		cmdSwitch(rest)
 	case "force-switch", "rescue-switch":
@@ -391,6 +396,14 @@ func cmdVersion(args []string) {
 		fmt.Println()
 		fmt.Println("If cux saves you time, you can support development at", donateURL)
 	}
+}
+
+func cmdSupport(args []string) {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "usage: cux support")
+		os.Exit(2)
+	}
+	fmt.Print(renderSupport(ansiEnabled))
 }
 
 // --- History / Config / Usage --------------------------------------------
@@ -709,6 +722,7 @@ func setAndSaveConfig(key, value string) error {
 
 // ANSI colors (themed)
 var (
+	ansiEnabled = true
 	colorReset  = "\033[0m"
 	colorBold   = "\033[1m"
 	colorTeal   = "\033[36m"
@@ -716,6 +730,29 @@ var (
 	colorYellow = "\033[33m"
 	colorGreen  = "\033[32m"
 )
+
+func initTerminalOutput() {
+	if os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
+		disableANSI()
+		return
+	}
+	if runtime.GOOS == "windows" {
+		enableUnicodeOutput()
+		if !enableANSIOutput() {
+			disableANSI()
+		}
+	}
+}
+
+func disableANSI() {
+	ansiEnabled = false
+	colorReset = ""
+	colorBold = ""
+	colorTeal = ""
+	colorGray = ""
+	colorYellow = ""
+	colorGreen = ""
+}
 
 // UI layout geometry: visual character widths for the status/list view.
 // The box border width (boxBorder) equals the sum of all column widths
@@ -733,6 +770,11 @@ const (
 )
 
 func setTheme(name string) {
+	if !ansiEnabled {
+		disableANSI()
+		return
+	}
+
 	// Standard ANSI defaults
 	colorReset = "\033[0m"
 	colorBold = "\033[1m"
@@ -1142,9 +1184,9 @@ func printSetupConfigSummary(c config.Config) {
 
 	boolVal := func(v bool, onLabel, offLabel string) string {
 		if v {
-			return colorGreen + "✓ " + onLabel + colorReset
+			return "[" + colorGreen + "x" + colorReset + "] " + colorGreen + onLabel + colorReset
 		}
-		return colorGray + "✗ " + offLabel + colorReset
+		return "[" + colorGray + " " + colorReset + "] " + colorGray + offLabel + colorReset
 	}
 
 	fmt.Printf(" %s%s:: C O N F I G   P R E V I E W ::%s\n\n", g, b, r)
@@ -1194,6 +1236,7 @@ func offerUpdateCheckOptIn() error {
 	if !stdinIsTTY() {
 		return nil
 	}
+	fmt.Println()
 	fmt.Print("Check for cux updates daily on startup? [y/N] ")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && len(line) == 0 {
@@ -1518,6 +1561,15 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 	fmt.Fprintln(w, tableSep("└", "┴", "┘"))
 }
 
+func renderSupport(useANSI bool) string {
+	var b strings.Builder
+	b.WriteString(":: C U X   S U P P O R T ::\n\n")
+	b.WriteString("Support cux development:\n")
+	b.WriteString(donateURL)
+	b.WriteString("\n")
+	return b.String()
+}
+
 func printHelp() {
 	fmt.Println(`cux — Run multiple Claude Code Pro/Max accounts as one
 
@@ -1532,6 +1584,7 @@ USAGE
                                     when Claude will not run /switch
   cux remove [--force] <slot|email> remove an account from cux
   cux status                        show live login + cux state
+  cux support                       show support URL
   cux setup                         install /switch, /cux:* + Claude Code hooks
   cux install-hooks                 install Claude Code hooks only
   cux uninstall-hooks               remove cux's entries from settings.json
@@ -1550,7 +1603,7 @@ USAGE
 INLINE SWITCHING
   Once set up, type /switch [<slot|email>] from inside a Claude Code
   session started via cux. You can also use /cux:switch, /cux:add,
-  /cux:list, /cux:status, /cux:config, /cux:remove, and
-  /cux:usage-refresh from inside the
+  /cux:list, /cux:status, /cux:support, /cux:config, /cux:remove,
+  and /cux:usage-refresh from inside the
   session. Manual and rate-limit swaps reconnect with --resume.`)
 }

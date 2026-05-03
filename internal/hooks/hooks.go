@@ -198,6 +198,9 @@ func handleCuxPromptCommand(prompt string, stdout io.Writer) (bool, error) {
 		}
 		writePromptBlock(stdout, text)
 		return true, nil
+	case "support":
+		writePromptBlock(stdout, renderPromptSupport())
+		return true, nil
 	case "remove":
 		args = append([]string{"remove"}, fields[1:]...)
 	case "config":
@@ -217,7 +220,7 @@ func handleCuxPromptCommand(prompt string, stdout io.Writer) (bool, error) {
 		writePromptBlock(stdout, text)
 		return true, nil
 	case "help":
-		writePromptBlock(stdout, "cux commands: /switch, /cux:switch, /cux:add, /cux:list, /cux:status, /cux:remove, /cux:config, /cux:usage-refresh")
+		writePromptBlock(stdout, "cux commands: /switch, /cux:switch, /cux:add, /cux:list, /cux:status, /cux:support, /cux:remove, /cux:config, /cux:usage-refresh")
 		return true, nil
 	default:
 		writePromptBlock(stdout, "cux: unknown /cux command "+fields[0])
@@ -414,6 +417,10 @@ func renderPromptConfig(args []string) (string, error) {
 	default:
 		return "", fmt.Errorf("usage: /cux:config show | keys | set <key> <value>")
 	}
+}
+
+func renderPromptSupport() string {
+	return "CUX SUPPORT\n\nSupport cux development:\nhttps://support.inulute.com"
 }
 
 func displayConfigValue(v string) string {

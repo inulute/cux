@@ -130,6 +130,8 @@ conversation is intact — but if you see anything unexpected, please
 
 ## Quick start
 
+Website: https://cux.inulute.com
+
 ```bash
 cux setup           # install /switch, /cux:* + Claude Code hooks
 cux add             # register the currently-logged-in account
@@ -143,8 +145,8 @@ installed hooks. From then on:
 
 - `/switch` from inside a Claude Code session rotates accounts.
 - `/switch <slot|email>` switches to a specific one.
-- `/cux:add`, `/cux:list`, `/cux:status`, `/cux:remove`, and
-  `/cux:switch`, `/cux:config`, `/cux:usage-refresh` run
+- `/cux:add`, `/cux:list`, `/cux:status`, `/cux:support`,
+  `/cux:remove`, and `/cux:switch`, `/cux:config`, `/cux:usage-refresh` run
   account-management commands in-session.
 - A rate-limit response from the API auto-triggers the same flow and
   does not wait for another Stop hook before reconnecting.
@@ -216,6 +218,7 @@ From inside a session started with `cux`:
 /cux:add                     # add/refresh the current login
 /cux:list --refresh          # list accounts from inside Claude Code
 /cux:status                  # show live login + cux state
+/cux:support                 # show support URL
 /cux:config show             # show cux configuration
 /cux:remove 2                # remove an account
 /cux:usage-refresh           # refresh account usage

@@ -1,6 +1,6 @@
 {
   "name": "@inulute/cux",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Run multiple Claude Code accounts as one",
   "keywords": [
     "claude",
@@ -11,7 +11,7 @@
     "switcher",
     "oauth"
   ],
-  "homepage": "https://github.com/inulute/cux",
+  "homepage": "https://cux.inulute.com",
   "bugs": {
     "url": "https://github.com/inulute/cux/issues"
   },

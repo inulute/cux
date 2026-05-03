@@ -17,6 +17,7 @@ cux add        # or /cux:add inside Claude while logged in
 For full documentation (auto-swap on rate-limit, threshold-based
 swaps, strategies, history, configuration), see the main repository:
 
+- **Website:** https://cux.inulute.com
 - **README:** https://github.com/inulute/cux#readme
 - **Releases:** https://github.com/inulute/cux/releases
 - **Issues:** https://github.com/inulute/cux/issues
@@ -25,8 +26,9 @@ swaps, strategies, history, configuration), see the main repository:
 
 - `/switch` from inside a Claude session to swap accounts and resume
   the same conversation.
-- `/cux:switch`, `/cux:add`, `/cux:list`, `/cux:config`, and related commands for in-session
+- `/cux:switch`, `/cux:add`, `/cux:list`, `/cux:support`, `/cux:config`, and related commands for in-session
   account management.
+- `cux support` and `/cux:support` show the support URL.
 - Automatic swap when an account hits a rate limit, with auto-resume.
 - Threshold-based pre-emptive swap before a window caps.
 - One Go binary, no Python, no Bash version requirement, no `jq`.

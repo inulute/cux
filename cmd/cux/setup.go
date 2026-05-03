@@ -26,6 +26,9 @@ var cuxListSlashCommand []byte
 //go:embed slashcmd_cux_status.md
 var cuxStatusSlashCommand []byte
 
+//go:embed slashcmd_cux_support.md
+var cuxSupportSlashCommand []byte
+
 //go:embed slashcmd_cux_switch.md
 var cuxSwitchSlashCommand []byte
 
@@ -56,6 +59,7 @@ func installSlashCommand() error {
 		"config.md":        cuxConfigSlashCommand,
 		"list.md":          cuxListSlashCommand,
 		"status.md":        cuxStatusSlashCommand,
+		"support.md":       cuxSupportSlashCommand,
 		"switch.md":        cuxSwitchSlashCommand,
 		"remove.md":        cuxRemoveSlashCommand,
 		"usage-refresh.md": cuxUsageRefreshSlashCommand,
