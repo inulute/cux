@@ -60,10 +60,9 @@ type sessionStartHookInput struct {
 }
 
 type rateLimitHookInput struct {
-	Error *struct {
-		Type    string `json:"type,omitempty"`
-		Message string `json:"message,omitempty"`
-	} `json:"error,omitempty"`
+	// error is json.RawMessage so we can handle both string and object
+	// shapes that different Claude Code versions may emit.
+	Error json.RawMessage `json:"error,omitempty"`
 }
 
 type userPromptSubmitHookInput struct {
@@ -437,7 +436,7 @@ func renderAccountRow(slot int, email string, u usage.AccountUsage, stateLabel s
 		clipDisplay(strings.ToUpper(stateLabel), 6),
 		usageBlock(u.FiveHour),
 		usageBlock(u.SevenDay),
-		clipDisplay(resetForWindow(u.FiveHour), 6),
+		clipDisplay(resetForAccount(u), 6),
 	)
 	if u.TokenExpired {
 		line += fmt.Sprintf("│ %-96s │\n", "TOKEN EXPIRED: RE-LOGIN AND RUN /cux:add")
@@ -515,11 +514,21 @@ func resetForWindow(w *usage.Window) string {
 	return shortDuration(time.Until(*w.ResetsAt))
 }
 
+// resetForAccount returns the reset time of the binding capacity window.
+// When 7D is hard-full it is the binding constraint (5H resetting does not
+// restore capacity), so we surface the 7D reset time instead of 5H.
+func resetForAccount(u usage.AccountUsage) string {
+	if windowFull(u.SevenDay) {
+		return resetForWindow(u.SevenDay)
+	}
+	return resetForWindow(u.FiveHour)
+}
+
 func capacityLabel(u usage.AccountUsage) string {
 	if u.TokenExpired {
 		return "expired"
 	}
-	if windowFull(u.FiveHour) {
+	if windowFull(u.FiveHour) || windowFull(u.SevenDay) {
 		return "full"
 	}
 	return "usable"
@@ -531,7 +540,7 @@ func nextUsableSlot(state *store.State, cache usage.Cache) (slot int, email, res
 	for _, s := range slots {
 		acct := state.Accounts[s]
 		u := cache[acct.Email]
-		if u.TokenExpired || windowFull(u.FiveHour) {
+		if u.TokenExpired || windowFull(u.FiveHour) || windowFull(u.SevenDay) {
 			continue
 		}
 		return s, acct.Email, resetForWindow(u.FiveHour), true
@@ -679,10 +688,16 @@ func SessionStart(stdin io.Reader) error {
 }
 
 // RateLimit is `cux hook rate-limit`. Claude Code routes generic
-// PostToolUseFailure events through this; we filter the body for
-// rate-limit indicators before signalling. False positives here would
-// trigger spurious account swaps, so the filter is deliberately
-// conservative.
+// PostToolUseFailure events through this; we filter only the "error"
+// field for rate-limit indicators before signalling.
+//
+// We intentionally search only the error field — not tool_input or
+// the full payload — to avoid false positives when Claude generates or
+// executes code that happens to contain "rate_limit" as a variable
+// name or string literal.
+//
+// The "error" field can be a JSON string or a JSON object depending on
+// the Claude Code version; we extract its text from either shape.
 func RateLimit(stdin io.Reader) error {
 	if !isWrapped() {
 		return nil
@@ -691,25 +706,55 @@ func RateLimit(stdin io.Reader) error {
 	if err != nil {
 		return err
 	}
+
 	var in rateLimitHookInput
-	if err := decode(stdin, &in); err != nil {
-		return nil // malformed input is not our problem
-	}
-	if in.Error == nil {
+	if err := decode(stdin, &in); err != nil || len(in.Error) == 0 {
 		return nil
 	}
-	t := strings.ToLower(in.Error.Type)
-	m := strings.ToLower(in.Error.Message)
-	isRateLimit := strings.Contains(t, "rate_limit") ||
-		strings.Contains(m, "rate limit") ||
-		strings.Contains(m, "usage limit")
+
+	// Extract the error text from either JSON shape.
+	// Shape A — string:  "error": "rate limit exceeded"
+	// Shape B — object:  "error": {"type": "rate_limit_error", "message": "..."}
+	errText := extractErrorText(in.Error)
+	if errText == "" {
+		return nil
+	}
+
+	lower := strings.ToLower(errText)
+	isRateLimit := strings.Contains(lower, "rate_limit") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "usage limit") ||
+		strings.Contains(lower, "overloaded_error")
 	if !isRateLimit {
 		return nil
 	}
+
 	return signals.Write(pid, signals.RateLimited, signals.RateLimitedPayload{
 		Timestamp: time.Now().UTC(),
-		Message:   in.Error.Message,
+		Message:   errText,
 	})
+}
+
+// extractErrorText returns a plain string from a json.RawMessage that
+// is either a JSON string or a JSON object with "type"/"message" fields.
+func extractErrorText(raw json.RawMessage) string {
+	// Try string shape first.
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	// Try object shape.
+	var obj struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		if obj.Message != "" {
+			return obj.Message
+		}
+		return obj.Type
+	}
+	return ""
 }
 
 // decode reads stdin (with a deadline) and parses it as JSON. Empty

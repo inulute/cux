@@ -55,7 +55,7 @@ func TestPartialFileMergesWithDefaults(t *testing.T) {
 	if c.AutoMessage != Defaults().AutoMessage {
 		t.Errorf("auto_message lost defaults: got %q", c.AutoMessage)
 	}
-	if c.Thresholds.FiveHour != 90 {
+	if c.Thresholds.FiveHour != 100 {
 		t.Errorf("thresholds.five_hour lost defaults: got %d", c.Thresholds.FiveHour)
 	}
 }

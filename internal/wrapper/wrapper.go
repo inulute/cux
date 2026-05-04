@@ -161,18 +161,22 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			setManualSwitchState("")
 		}
 
-		switch p.trigger {
-		case history.TriggerRateLimit:
-			fmt.Fprintf(w, "cux: rate limit on %s → swapped to %s, resuming…\n", from.Email, to.Email)
-		case history.TriggerManual:
-			fmt.Fprintf(w, "cux: %s → %s, resuming…\n", from.Email, to.Email)
-		default:
-			fmt.Fprintf(w, "cux: %s → %s (%s), resuming…\n", from.Email, to.Email, p.reason)
-		}
-
-		if sessionID != "" && cfg.AutoResume && hadTurns {
-			// Only resume if at least one turn completed — an empty/just-started
-			// session has no transcript content, and claude rejects --resume for it.
+		canResume := sessionID != "" && cfg.AutoResume && (hadTurns || p.trigger == history.TriggerManual)
+		if canResume {
+			// Resume the existing session on the new account. For manual
+			// /switch we resume even when no turns have completed yet —
+			// the user explicitly requested a switch and expects to land
+			// back in the same session, not the welcome screen.
+			// For rate-limit and threshold swaps we require hadTurns so
+			// we don't pass --resume for an empty session that claude would reject.
+			switch p.trigger {
+			case history.TriggerRateLimit:
+				fmt.Fprintf(w, "cux: rate limit on %s → swapped to %s, resuming…\n", from.Email, to.Email)
+			case history.TriggerManual:
+				fmt.Fprintf(w, "cux: %s → %s, resuming…\n", from.Email, to.Email)
+			default:
+				fmt.Fprintf(w, "cux: %s → %s (%s), resuming…\n", from.Email, to.Email, p.reason)
+			}
 			currentArgv = []string{"--resume", sessionID}
 			if p.resumeMessage != "" {
 				currentArgv = append(currentArgv, p.resumeMessage)
@@ -180,6 +184,9 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 				currentArgv = append(currentArgv, cfg.AutoMessage)
 			}
 		} else {
+			// No session to resume — Claude will start fresh (welcome screen).
+			// Print the switch result so the user knows which account is now active.
+			fmt.Fprintf(w, "cux: switched to %s — now active\n", to.Email)
 			currentArgv = argv
 		}
 	}

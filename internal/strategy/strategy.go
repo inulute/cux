@@ -213,14 +213,14 @@ func pickDrain(
 		}
 	}
 
-	// Pass 2: 5h has any room (revolver picks anything below 90 here —
-	// it's the "we already failed pass 1, take whatever has even a bit
-	// of 5h budget" fallback).
+	// Pass 2: 5h has any room — but never pick a 7D-hard-full account.
+	// A 7D-at-100% account has no recoverable capacity in this window
+	// regardless of 5h utilisation.
 	for _, c := range ordered {
 		if !isAvailable(cache, c.Email) {
 			continue
 		}
-		if fiveHourUtil(cache, c.Email) < float64(cap5) {
+		if fiveHourUtil(cache, c.Email) < float64(cap5) && sevenDayUtil(cache, c.Email) < 100 {
 			return Pick{Email: c.Email, Reason: "drain: 5h has room"}, true
 		}
 	}
@@ -238,6 +238,9 @@ func pickBalanced(accounts []Candidate, current Candidate, cache usage.Cache, th
 			continue
 		}
 		if !hasFiveHourCapacity(cache, c.Email, thresholds) {
+			continue
+		}
+		if !hasSevenDayCapacity(cache, c.Email) {
 			continue
 		}
 		candidates = append(candidates, c)
@@ -319,6 +322,18 @@ func hasFiveHourCapacity(cache usage.Cache, email string, thresholds usage.Thres
 		cap5 = 90
 	}
 	return u.FiveHour.Utilization < float64(cap5)
+}
+
+// hasSevenDayCapacity returns false only when 7D utilisation is at the hard
+// 100% ceiling. Unlike hasFiveHourCapacity this uses the hard limit, not a
+// user-configured threshold, because a 7D-at-100% account has zero usable
+// capacity regardless of strategy thresholds.
+func hasSevenDayCapacity(cache usage.Cache, email string) bool {
+	u, ok := cache[email]
+	if !ok || u.SevenDay == nil {
+		return true
+	}
+	return u.SevenDay.Utilization < 100
 }
 
 func findByEmail(accounts []Candidate, email string) *Candidate {

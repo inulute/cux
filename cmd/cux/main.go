@@ -43,7 +43,7 @@ import (
 )
 
 const (
-	version = "0.2.3"
+	version = "0.2.4"
 	// donateURL is shown only by `cux version --verbose`. Subtle by
 	// design — never printed during normal use, never injected into
 	// help output, never shown by the wrapper or the slash command.
@@ -73,6 +73,7 @@ var knownSubcommands = map[string]bool{
 	"usage":           true,
 	"upgrade":         true,
 	"run":             true,
+	"docs":            true,
 	"help":            true,
 	"--help":          true,
 	"-h":              true,
@@ -130,6 +131,8 @@ func main() {
 		cmdUpgrade(rest)
 	case "run":
 		runWrapper(rest)
+	case "docs":
+		cmdDocs(rest)
 	case "help", "--help", "-h":
 		printHelp()
 	case "version", "--version":
@@ -404,6 +407,28 @@ func cmdSupport(args []string) {
 		os.Exit(2)
 	}
 	fmt.Print(renderSupport(ansiEnabled))
+}
+
+func cmdDocs(args []string) {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "usage: cux docs")
+		os.Exit(2)
+	}
+	fmt.Print(renderDocs(ansiEnabled))
+}
+
+func renderDocs(useANSI bool) string {
+	var b strings.Builder
+	b.WriteString(":: C U X   D O C S ::\n\n")
+	b.WriteString("Full documentation:\n")
+	b.WriteString("  https://cux.inulute.com/docs\n\n")
+	b.WriteString("Topics covered:\n")
+	b.WriteString("  · Installation (npm, shell, manual binary)\n")
+	b.WriteString("  · Windows, macOS, Linux edge cases\n")
+	b.WriteString("  · Troubleshooting (PATH fix, postinstall failures)\n")
+	b.WriteString("  · Configuration reference\n")
+	b.WriteString("  · Command reference\n")
+	return b.String()
 }
 
 // --- History / Config / Usage --------------------------------------------
@@ -1585,6 +1610,7 @@ USAGE
   cux remove [--force] <slot|email> remove an account from cux
   cux status                        show live login + cux state
   cux support                       show support URL
+  cux docs                          show documentation URL
   cux setup                         install /switch, /cux:* + Claude Code hooks
   cux install-hooks                 install Claude Code hooks only
   cux uninstall-hooks               remove cux's entries from settings.json

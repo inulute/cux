@@ -210,6 +210,35 @@ func TestPickNextDrain_FallsBackTo5hCapacity(t *testing.T) {
 	}
 }
 
+func TestPickNextDrain_NeverPicks7DayHardFull(t *testing.T) {
+	t.Parallel()
+	// b@x has 5h capacity but 7d is at the hard 100% ceiling.
+	// Pass 2 must not select it even though 5h has room.
+	accts := threeAccounts()
+	cache := usage.Cache{
+		"a@x": u(20, 96),  // current
+		"b@x": u(50, 100), // 5h has room but 7d hard-full
+		"c@x": u(95, 96),  // 5h maxed
+	}
+	if _, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds()); ok {
+		t.Fatal("drain should not pick 7d-hard-full b@x even with 5h room")
+	}
+}
+
+func TestPickNextBalanced_NeverPicks7DayHardFull(t *testing.T) {
+	t.Parallel()
+	accts := []Candidate{{Email: "a@x"}, {Email: "b@x"}, {Email: "c@x"}}
+	cache := usage.Cache{
+		"a@x": u(20, 40),  // current
+		"b@x": u(10, 100), // 7d hard-full
+		"c@x": u(30, 20),
+	}
+	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds())
+	if !ok || pick.Email != "c@x" {
+		t.Fatalf("balanced should skip 7d-hard-full b@x and pick c@x; got %+v ok=%v", pick, ok)
+	}
+}
+
 func TestPickNextDrain_NoCandidates(t *testing.T) {
 	t.Parallel()
 	// Everything is fully maxed.
@@ -258,7 +287,9 @@ func TestShouldRebalance_PriorityStillOverThreshold(t *testing.T) {
 		"a@x": u(92, 40), // 5h still over 90 cap
 		"b@x": u(30, 10),
 	}
-	if _, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[1], cache, defaultThresholds()); ok {
+	// Use explicit 90% FiveHour threshold so IsOverThreshold fires for a@x.
+	thresholds := usage.Thresholds{FiveHour: 90, SevenDay: 95}
+	if _, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[1], cache, thresholds); ok {
 		t.Fatal("priority a@x still over threshold → don't rebalance")
 	}
 }

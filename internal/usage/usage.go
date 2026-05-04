@@ -69,9 +69,9 @@ type Thresholds struct {
 	SevenDay int `json:"seven_day"`
 }
 
-// Default thresholds (mirror claude-revolver's defaults).
+// Default thresholds.
 func DefaultThresholds() Thresholds {
-	return Thresholds{FiveHour: 90, SevenDay: 95}
+	return Thresholds{FiveHour: 100, SevenDay: 100}
 }
 
 // Fetch hits the usage API with the given OAuth access token and

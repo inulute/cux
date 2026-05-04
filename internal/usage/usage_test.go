@@ -93,7 +93,7 @@ func TestIsOverThreshold(t *testing.T) {
 func TestDefaultThresholds(t *testing.T) {
 	t.Parallel()
 	d := DefaultThresholds()
-	if d.FiveHour != 90 || d.SevenDay != 95 {
+	if d.FiveHour != 100 || d.SevenDay != 100 {
 		t.Fatalf("unexpected defaults %+v", d)
 	}
 }

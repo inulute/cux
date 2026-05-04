@@ -248,8 +248,8 @@ cux config set update_check.enabled true            # opt in to update checks
 
 | Key | Default | Description |
 |---|---|---|
-| `thresholds.five_hour`        | `90`           | Auto-swap when 5h utilisation hits this %. `100` = reactive only. |
-| `thresholds.seven_day`        | `95`           | Auto-swap when 7d utilisation hits this %. `100` = reactive only. |
+| `thresholds.five_hour`        | `100`          | Auto-swap when 5h utilisation hits this %. `100` = reactive only. |
+| `thresholds.seven_day`        | `100`          | Auto-swap when 7d utilisation hits this %. `100` = reactive only. |
 | `strategy.kind`               | `drain`        | `drain` / `balanced` / `manual` |
 | `strategy.order`              | `[]`           | Drain mode priority (emails); empty = auto by highest 7d |
 | `auto_switch_on_threshold`    | `true`         | Master toggle for pre-emptive threshold swap |
