@@ -43,7 +43,7 @@ import (
 )
 
 const (
-	version = "0.2.4"
+	version = "0.2.5"
 	// donateURL is shown only by `cux version --verbose`. Subtle by
 	// design — never printed during normal use, never injected into
 	// help output, never shown by the wrapper or the slash command.
