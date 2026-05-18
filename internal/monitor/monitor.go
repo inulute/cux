@@ -119,7 +119,14 @@ func RefreshActive(email string) error {
 // refreshOne reads the account's stored credentials, refreshes the
 // access token if it is expired or near expiry, and queries the usage API.
 //
-// Token refresh priority:
+// Token source priority:
+//  0. If this account is the one Claude Code is currently running, use
+//     the live credentials file instead of the per-account backup. The
+//     backup is only rewritten on switch, so for the active account it
+//     can be hours stale; Claude Code keeps the live file continuously
+//     refreshed. A stale backup access token is routinely rejected by
+//     the usage API once Claude Code has rotated the refresh token,
+//     which previously left the active account's cache entry frozen.
 //  1. If IsTokenExpired: call RefreshBlob (standard OAuth refresh_token flow)
 //     and update the backup so the next call is already fresh.
 //  2. If the API still returns 401 (e.g. the refresh token itself expired):
@@ -129,6 +136,16 @@ func refreshOne(slot int, email, orgUUID string) (usage.AccountUsage, error) {
 	blob, err := creds.ReadBackup(slot, email)
 	if err != nil {
 		return usage.AccountUsage{}, err
+	}
+
+	// Prefer the live credentials for whichever account is currently
+	// active — see step 0 above. The backup still serves as the source
+	// for every inactive account, and as the fallback below if the live
+	// token is itself rejected.
+	usingLive := false
+	if liveBlob, ok := liveBlobFor(email, orgUUID); ok {
+		blob = liveBlob
+		usingLive = true
 	}
 
 	// Proactively refresh before we even try the API if the token is
@@ -157,6 +174,13 @@ func refreshOne(slot int, email, orgUUID string) (usage.AccountUsage, error) {
 	}
 	u, err := usage.Fetch(token)
 	if err == nil {
+		// When the token came from the live file, write it back to the
+		// per-account backup so the backup stops rotting and the next
+		// refresh has a fresh starting point even if Claude Code is not
+		// running.
+		if usingLive {
+			_ = creds.WriteBackup(slot, email, blob)
+		}
 		if _, writeErr := syncLiveIfActive(email, orgUUID, blob); writeErr != nil {
 			return usage.AccountUsage{}, fmt.Errorf("monitor: save active live token: %w", writeErr)
 		}
@@ -194,6 +218,33 @@ func refreshOne(slot int, email, orgUUID string) (usage.AccountUsage, error) {
 	// Best-effort: if this fails we still return the valid usage data.
 	_ = creds.WriteBackup(slot, email, liveBlob)
 	return u2, nil
+}
+
+// liveBlobFor returns the live credential blob when it belongs to the
+// given account — that is, when Claude Code is currently running this
+// account. Identity is confirmed against the oauthAccount block in the
+// Claude Code config (email, and orgUUID when known) so a different
+// account's token can never be returned. The boolean is false, with no
+// error, whenever the account is not the active one or the live file
+// cannot be read; callers fall back to the per-account backup.
+func liveBlobFor(email, orgUUID string) (string, bool) {
+	if email == "" {
+		return "", false
+	}
+	_, parsed, err := claudecfg.ReadOAuthBlock()
+	if err != nil || parsed.EmailAddress != email {
+		return "", false
+	}
+	// When orgUUID is known, also require the org to match so two
+	// accounts sharing an email address are never conflated.
+	if orgUUID != "" && parsed.OrganizationUUID != orgUUID {
+		return "", false
+	}
+	liveBlob, err := creds.ReadLive()
+	if err != nil || liveBlob == "" {
+		return "", false
+	}
+	return liveBlob, true
 }
 
 func syncLiveIfActive(email, orgUUID, blob string) (bool, error) {
