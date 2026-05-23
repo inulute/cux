@@ -7,7 +7,10 @@ package switcher
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/inulute/cux/internal/claudecfg"
 	"github.com/inulute/cux/internal/creds"
@@ -23,7 +26,11 @@ const lockTimeout = 10 * time.Second
 // managed, its credential and oauth backups are refreshed in place
 // rather than rejected — this is the natural way to refresh a stale
 // token (`claude login` again, then `cux add`).
-func AddCurrent(preferredSlot int) (added store.Account, refreshed bool, err error) {
+//
+// alias is optional: pass "" to auto-derive from the account's displayName.
+// Pass skipAutoAlias=true to store the account with no alias at all.
+// When alias is non-empty it must pass store.ValidateAlias and be unique.
+func AddCurrent(preferredSlot int, alias string, skipAutoAlias bool) (added store.Account, refreshed bool, err error) {
 	if err := ensureBackupRoot(); err != nil {
 		return store.Account{}, false, err
 	}
@@ -57,6 +64,17 @@ func AddCurrent(preferredSlot int) (added store.Account, refreshed bool, err err
 		return store.Account{}, false, err
 	}
 
+	// Validate alias early so we fail before touching any files.
+	// When no alias is explicitly provided, auto-derive one from the
+	// account's displayName so users get friendly names without extra steps.
+	if alias != "" {
+		if err := store.ValidateAlias(alias); err != nil {
+			return store.Account{}, false, err
+		}
+	} else if !skipAutoAlias && parsed.DisplayName != "" {
+		alias = SuggestAlias(state, parsed.DisplayName, parsed.OrganizationName)
+	}
+
 	if existing := state.FindByIdentity(parsed.EmailAddress, parsed.OrganizationUUID); existing != 0 {
 		// Refresh: overwrite backups for this slot, no state shape change.
 		acct := state.Accounts[existing]
@@ -67,6 +85,13 @@ func AddCurrent(preferredSlot int) (added store.Account, refreshed bool, err err
 			return store.Account{}, false, err
 		}
 		acct.LastUsed = time.Now().UTC()
+		// Update alias if provided (allows renaming on re-add).
+		if alias != "" {
+			if err := state.SetAlias(existing, alias); err != nil {
+				return store.Account{}, false, err
+			}
+			acct = state.Accounts[existing]
+		}
 		state.Accounts[existing] = acct
 		state.ActiveSlot = existing
 		if err := state.Save(); err != nil {
@@ -82,6 +107,12 @@ func AddCurrent(preferredSlot int) (added store.Account, refreshed bool, err err
 		return store.Account{}, false, fmt.Errorf("slot %d already in use", slot)
 	}
 
+	if alias != "" {
+		if existing := state.FindByAlias(alias); existing != 0 {
+			return store.Account{}, false, fmt.Errorf("store: alias %q is already used by slot %d (%s)", alias, existing, state.Accounts[existing].Email)
+		}
+	}
+
 	if err := creds.WriteBackup(slot, parsed.EmailAddress, liveCreds); err != nil {
 		return store.Account{}, false, err
 	}
@@ -94,6 +125,14 @@ func AddCurrent(preferredSlot int) (added store.Account, refreshed bool, err err
 		_ = creds.DeleteBackup(slot, parsed.EmailAddress)
 		_ = store.DeleteOAuthBlockBackup(slot, parsed.EmailAddress)
 		return store.Account{}, false, err
+	}
+	if alias != "" {
+		if err := state.SetAlias(slot, alias); err != nil {
+			_ = creds.DeleteBackup(slot, parsed.EmailAddress)
+			_ = store.DeleteOAuthBlockBackup(slot, parsed.EmailAddress)
+			_ = state.Remove(slot)
+			return store.Account{}, false, err
+		}
 	}
 	state.ActiveSlot = slot
 	if err := state.Save(); err != nil {
@@ -260,4 +299,105 @@ func ensureBackupRoot() error {
 		return err
 	}
 	return nil
+}
+
+// --- alias suggestion -------------------------------------------------------
+
+// nonAlphanumRE matches anything that isn't a lowercase letter or digit.
+var nonAlphanumRE = regexp.MustCompile(`[^a-z0-9]+`)
+
+// slugify converts a human display name into a valid alias candidate:
+//   - lower-case
+//   - spaces become hyphens
+//   - non-alphanumeric characters (except hyphens) are removed
+//   - leading digits get an "a" prefix (alias must start with a letter)
+//   - truncated to 20 characters
+//
+// Returns "" when the result is empty (e.g. the name was all symbols).
+func slugify(name string) string {
+	// Normalise: fold to ASCII lower-case, map spaces to hyphens.
+	var sb strings.Builder
+	prevHyphen := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		if unicode.IsSpace(r) {
+			if !prevHyphen {
+				sb.WriteRune('-')
+				prevHyphen = true
+			}
+		} else if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
+			sb.WriteRune(r)
+			prevHyphen = (r == '-')
+		}
+		// everything else is dropped
+	}
+	s := strings.Trim(sb.String(), "-")
+	// Collapse consecutive hyphens.
+	s = nonAlphanumRE.ReplaceAllLiteralString(s, "-")
+	// Aliases must start with a letter.
+	if len(s) > 0 && s[0] >= '0' && s[0] <= '9' {
+		s = "a" + s
+	}
+	// Truncate.
+	runes := []rune(s)
+	if len(runes) > 20 {
+		s = string(runes[:20])
+	}
+	s = strings.TrimRight(s, "-")
+	return s
+}
+
+// SuggestAlias returns a unique alias for an account being added, derived
+// from its displayName and (if needed for disambiguation) its
+// organizationName. The returned alias is always valid per store.ValidateAlias
+// and not already in use in state. Returns "" when no displayName is
+// available or a valid slug cannot be derived.
+//
+// Collision resolution order:
+//  1. slug(displayName)
+//  2. slug(displayName) + "-" + slug(orgName)   (if orgName yields a useful suffix)
+//  3. slug(displayName) + "-2", "-3", …
+func SuggestAlias(state *store.State, displayName, orgName string) string {
+	base := slugify(displayName)
+	if base == "" {
+		return ""
+	}
+	if store.ValidateAlias(base) != nil {
+		return ""
+	}
+
+	// Try bare slug first.
+	if state.FindByAlias(base) == 0 {
+		return base
+	}
+
+	// Try base + org suffix when the org name gives a truly distinct token.
+	// Skip when the org slug starts with the base (e.g. "Rishabh Anand" for
+	// a user named "Rishabh" — the org is just the person's own name and adds
+	// no disambiguation value).
+	orgSlug := slugify(orgName)
+	if orgSlug != "" && orgSlug != base && !strings.HasPrefix(orgSlug, base) {
+		candidate := base + "-" + orgSlug
+		if len([]rune(candidate)) > 20 {
+			candidate = string([]rune(candidate)[:20])
+			candidate = strings.TrimRight(candidate, "-")
+		}
+		if store.ValidateAlias(candidate) == nil && state.FindByAlias(candidate) == 0 {
+			return candidate
+		}
+	}
+
+	// Numeric suffix fallback.
+	for i := 2; i <= 99; i++ {
+		candidate := fmt.Sprintf("%s-%d", base, i)
+		if len([]rune(candidate)) > 20 {
+			// Trim base to make room for the suffix.
+			suffix := fmt.Sprintf("-%d", i)
+			trimmed := string([]rune(base)[:20-len([]rune(suffix))])
+			candidate = strings.TrimRight(trimmed, "-") + suffix
+		}
+		if store.ValidateAlias(candidate) == nil && state.FindByAlias(candidate) == 0 {
+			return candidate
+		}
+	}
+	return ""
 }

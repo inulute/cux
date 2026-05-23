@@ -25,6 +25,8 @@ type OAuthAccount struct {
 	EmailAddress     string `json:"emailAddress"`
 	AccountUUID      string `json:"accountUuid"`
 	OrganizationUUID string `json:"organizationUuid"`
+	DisplayName      string `json:"displayName"`
+	OrganizationName string `json:"organizationName"`
 }
 
 // ErrNoConfig is returned when Claude Code's config file does not exist

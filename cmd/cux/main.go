@@ -32,6 +32,7 @@ import (
 	"github.com/inulute/cux/internal/history"
 	"github.com/inulute/cux/internal/hookinstall"
 	"github.com/inulute/cux/internal/hooks"
+	"github.com/inulute/cux/internal/lockfile"
 	"github.com/inulute/cux/internal/monitor"
 	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/store"
@@ -49,7 +50,7 @@ import (
 // It must be a var (not const) so -ldflags can inject the real release
 // tag. The fallback "0.2.6" is the development/unreleased default;
 // released binaries always get the tag stamped in.
-var version = "0.2.7"
+var version = "0.2.8"
 
 const (
 	// donateURL is shown only by `cux version --verbose`. Subtle by
@@ -63,6 +64,7 @@ const (
 // to the real claude binary via the wrapper.
 var knownSubcommands = map[string]bool{
 	"add":             true,
+	"alias":           true,
 	"list":            true,
 	"ls":              true,
 	"remove":          true,
@@ -113,6 +115,8 @@ func main() {
 		cmdList(rest)
 	case "remove", "rm":
 		cmdRemove(rest)
+	case "alias":
+		cmdAlias(rest)
 	case "status":
 		cmdStatus(rest)
 	case "support":
@@ -155,16 +159,22 @@ func main() {
 func cmdAdd(args []string) {
 	fs := flag.NewFlagSet("add", flag.ExitOnError)
 	slot := fs.Int("slot", 0, "specific slot number (default: next free)")
+	alias := fs.String("alias", "", "short alias for this account (e.g. work, personal)")
+	noAlias := fs.Bool("no-alias", false, "skip auto-alias from display name")
 	_ = fs.Parse(args)
 
-	acct, refreshed, err := switcher.AddCurrent(*slot)
+	acct, refreshed, err := switcher.AddCurrent(*slot, *alias, *noAlias)
 	if err != nil {
 		fail(err)
 	}
+	aliasStr := ""
+	if acct.Alias != "" {
+		aliasStr = fmt.Sprintf(" · %s", acct.Alias)
+	}
 	if refreshed {
-		fmt.Printf("Refreshed slot %d (%s).\n", acct.Slot, acct.Email)
+		fmt.Printf("Refreshed slot %d (%s%s).\n", acct.Slot, acct.Email, aliasStr)
 	} else {
-		fmt.Printf("Added slot %d (%s).\n", acct.Slot, acct.Email)
+		fmt.Printf("Added slot %d (%s%s).\n", acct.Slot, acct.Email, aliasStr)
 	}
 }
 
@@ -248,7 +258,7 @@ func cmdRemove(args []string) {
 	force := fs.Bool("force", false, "remove even if active")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: cux remove [--force] <slot|email>")
+		fmt.Fprintln(os.Stderr, "usage: cux remove [--force] <slot|email|alias>")
 		os.Exit(2)
 	}
 	acct, err := switcher.Remove(fs.Arg(0), *force)
@@ -256,6 +266,54 @@ func cmdRemove(args []string) {
 		fail(err)
 	}
 	fmt.Printf("Removed slot %d (%s).\n", acct.Slot, acct.Email)
+}
+
+// cmdAlias sets or clears the alias for a managed account.
+//
+//	cux alias <slot|email|alias> <new-alias>   — set alias
+//	cux alias <slot|email|alias> --clear       — remove alias
+func cmdAlias(args []string) {
+	fs := flag.NewFlagSet("alias", flag.ExitOnError)
+	clear := fs.Bool("clear", false, "remove the alias from this account")
+	_ = fs.Parse(args)
+
+	if fs.NArg() < 1 || (fs.NArg() < 2 && !*clear) {
+		fmt.Fprintln(os.Stderr, "usage: cux alias <slot|email|alias> <new-alias>")
+		fmt.Fprintln(os.Stderr, "       cux alias <slot|email|alias> --clear")
+		os.Exit(2)
+	}
+
+	lk, err := lockfile.Acquire(paths.LockFile(), 10*time.Second)
+	if err != nil {
+		fail(err)
+	}
+	defer lk.Unlock() //nolint:errcheck
+
+	state, err := store.Load()
+	if err != nil {
+		fail(err)
+	}
+	acct, err := state.Resolve(fs.Arg(0))
+	if err != nil {
+		fail(err)
+	}
+
+	newAlias := ""
+	if !*clear {
+		newAlias = strings.TrimSpace(fs.Arg(1))
+	}
+	if err := state.SetAlias(acct.Slot, newAlias); err != nil {
+		fail(err)
+	}
+	if err := state.Save(); err != nil {
+		fail(err)
+	}
+
+	if newAlias == "" {
+		fmt.Printf("Cleared alias for slot %d (%s).\n", acct.Slot, acct.Email)
+	} else {
+		fmt.Printf("Set alias %q for slot %d (%s).\n", newAlias, acct.Slot, acct.Email)
+	}
 }
 
 func cmdStatus(args []string) {
@@ -289,17 +347,25 @@ func cmdStatus(args []string) {
 
 func cmdSwitch(args []string) {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: cux switch <slot|email>")
+		fmt.Fprintln(os.Stderr, "usage: cux switch <slot|email|alias>")
 		os.Exit(2)
 	}
 	from, to, err := switcher.SwitchTo(args[0])
 	if err != nil {
 		fail(err)
 	}
-	if from.Email != "" {
-		fmt.Printf("Switched %s → %s.\n", from.Email, to.Email)
+	fromLabel := from.Email
+	if from.Alias != "" {
+		fromLabel = from.Alias
+	}
+	toLabel := to.Email
+	if to.Alias != "" {
+		toLabel = to.Alias
+	}
+	if fromLabel != "" {
+		fmt.Printf("Switched %s → %s.\n", fromLabel, toLabel)
 	} else {
-		fmt.Printf("Switched to %s.\n", to.Email)
+		fmt.Printf("Switched to %s.\n", toLabel)
 	}
 	if os.Getenv("CUX_WRAPPED") == "" {
 		fmt.Println("Restart Claude Code to apply the change.")
@@ -316,7 +382,7 @@ func cmdSlashSwitch(args []string) {
 
 func cmdForceSwitch(args []string) {
 	if len(args) > 1 {
-		fmt.Fprintln(os.Stderr, "usage: cux force-switch [slot|email]")
+		fmt.Fprintln(os.Stderr, "usage: cux force-switch [slot|email|alias]")
 		os.Exit(2)
 	}
 	target := strings.TrimSpace(strings.Join(args, " "))
@@ -1547,7 +1613,16 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 		}
 
 		slotCell := "  " + b + fmt.Sprintf("%02d", slot) + r + "  "
-		emailCell := " " + t + padTo(a.Email, colEmailW-2) + r + " "
+		// ACCOUNT cell: if an alias is set, show "alias · email" truncated to
+		// fit colEmailW; otherwise show email as before.
+		var accountLabel string
+		if a.Alias != "" {
+			full := a.Alias + " · " + a.Email
+			accountLabel = padTo(full, colEmailW-2)
+		} else {
+			accountLabel = padTo(a.Email, colEmailW-2)
+		}
+		emailCell := " " + t + accountLabel + r + " "
 		stateCell := " " + sc + padTo(sl, colStateW-2) + r + " "
 		resetCell := " " + t + padTo(resetStr, colResetW-2) + r + " "
 
@@ -1577,35 +1652,37 @@ func printHelp() {
 	fmt.Println(`cux — Run multiple Claude Code Pro/Max accounts as one
 
 USAGE
-  cux [claude-args...]              run claude under the wrapper (default)
-  cux run [claude-args...]          same, explicit
-  cux add [--slot N]                add the currently logged-in account
-  cux list                          list managed accounts
-  cux switch <slot|email>           swap the active account (manual; requires
-                                    restart unless run from /switch inside)
-  cux force-switch [slot|email]     emergency swap for an active cux session
-                                    when Claude will not run /switch
-  cux remove [--force] <slot|email> remove an account from cux
-  cux status                        show live login + cux state
-  cux support                       show support URL
-  cux docs                          show documentation URL
-  cux setup                         install /switch, /cux:* + Claude Code hooks
-  cux install-hooks                 install Claude Code hooks only
-  cux uninstall-hooks               remove cux's entries from settings.json
-  cux history [-n N] [--json]       show recent account swaps
-  cux history --clear               delete the swap history
-  cux config show                   print current configuration
-  cux config keys                   list every settable key
-  cux config edit                   interactive settings editor
-  cux config set <key> <value>      update a single setting
-  cux usage refresh                 fetch fresh usage for every account
-  cux usage show                    print the on-disk usage cache (JSON)
-  cux upgrade                       update cux using npm or the installer
-  cux hook <event>                  internal: invoked by Claude Code
-  cux version                       print version
+  cux [claude-args...]                    run claude under the wrapper (default)
+  cux run [claude-args...]                same, explicit
+  cux add [--slot N] [--alias NAME] [--no-alias]  add the currently logged-in account
+  cux list                                list managed accounts
+  cux alias <slot|email|alias> <name>     set a short alias (e.g. work, personal)
+  cux alias <slot|email|alias> --clear    remove alias
+  cux switch <slot|email|alias>           swap the active account (manual; requires
+                                          restart unless run from /switch inside)
+  cux force-switch [slot|email|alias]     emergency swap for an active cux session
+                                          when Claude will not run /switch
+  cux remove [--force] <slot|email|alias> remove an account from cux
+  cux status                              show live login + cux state
+  cux support                             show support URL
+  cux docs                                show documentation URL
+  cux setup                               install /switch, /cux:* + Claude Code hooks
+  cux install-hooks                       install Claude Code hooks only
+  cux uninstall-hooks                     remove cux's entries from settings.json
+  cux history [-n N] [--json]             show recent account swaps
+  cux history --clear                     delete the swap history
+  cux config show                         print current configuration
+  cux config keys                         list every settable key
+  cux config edit                         interactive settings editor
+  cux config set <key> <value>            update a single setting
+  cux usage refresh                       fetch fresh usage for every account
+  cux usage show                          print the on-disk usage cache (JSON)
+  cux upgrade                             update cux using npm or the installer
+  cux hook <event>                        internal: invoked by Claude Code
+  cux version                             print version
 
 INLINE SWITCHING
-  Once set up, type /switch [<slot|email>] from inside a Claude Code
+  Once set up, type /switch [<slot|email|alias>] from inside a Claude Code
   session started via cux. You can also use /cux:switch, /cux:add,
   /cux:list, /cux:status, /cux:support, /cux:config, /cux:remove,
   and /cux:usage-refresh from inside the

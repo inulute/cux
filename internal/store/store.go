@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/inulute/cux/internal/atomicfile"
@@ -26,6 +27,7 @@ type Account struct {
 	Email    string    `json:"email"`
 	UUID     string    `json:"uuid"`
 	OrgUUID  string    `json:"orgUuid,omitempty"`
+	Alias    string    `json:"alias,omitempty"`
 	AddedAt  time.Time `json:"addedAt"`
 	LastUsed time.Time `json:"lastUsed,omitempty"`
 }
@@ -58,6 +60,22 @@ var (
 )
 
 var emailRE = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
+
+// aliasRE accepts 1–20 lowercase alphanumeric + hyphen characters that start
+// with a letter. This ensures aliases can never be confused with slot numbers
+// (which are purely numeric) or email addresses (which contain @).
+var aliasRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,19}$`)
+
+// ValidateAlias returns an error if s is not a valid alias.
+func ValidateAlias(s string) error {
+	if !aliasRE.MatchString(s) {
+		return fmt.Errorf("store: alias %q must start with a letter, contain only lowercase letters, digits, or hyphens, and be at most 20 chars", s)
+	}
+	return nil
+}
+
+// ErrAliasExists is returned when the requested alias is already taken.
+var ErrAliasExists = errors.New("store: alias already in use")
 
 func ValidateEmail(s string) error {
 	if !emailRE.MatchString(s) {
@@ -185,20 +203,64 @@ func (s *State) FindByIdentity(email, orgUUID string) int {
 
 // Resolve accepts either a slot number ("2") or an email and returns
 // the matching account. Returns ErrAccountMissing if neither matches.
+// FindByAlias returns the slot for a given alias (case-insensitive), or 0 if
+// none. Aliases are stored lowercase so normalising here is defensive.
+func (s *State) FindByAlias(alias string) int {
+	alias = strings.ToLower(strings.TrimSpace(alias))
+	for slot, a := range s.Accounts {
+		if strings.ToLower(a.Alias) == alias {
+			return slot
+		}
+	}
+	return 0
+}
+
+// Resolve accepts a slot number, email, or alias and returns the matching
+// account. Returns ErrAccountMissing if none matches.
 func (s *State) Resolve(identifier string) (Account, error) {
+	// 1. Slot number.
 	if n, err := strconv.Atoi(identifier); err == nil {
 		if a, ok := s.Accounts[n]; ok {
 			return a, nil
 		}
 		return Account{}, fmt.Errorf("%w: slot %d", ErrAccountMissing, n)
 	}
+	// 2. Alias (before email, so "work" never hits the email validator).
+	if slot := s.FindByAlias(identifier); slot != 0 {
+		return s.Accounts[slot], nil
+	}
+	// 3. Email.
 	if err := ValidateEmail(identifier); err != nil {
-		return Account{}, err
+		// Not a number, not a known alias, not a valid email.
+		return Account{}, fmt.Errorf("%w: %q (use slot number, email, or alias)", ErrAccountMissing, identifier)
 	}
 	if slot := s.FindByEmail(identifier); slot != 0 {
 		return s.Accounts[slot], nil
 	}
 	return Account{}, fmt.Errorf("%w: %s", ErrAccountMissing, identifier)
+}
+
+// SetAlias assigns (or clears) the alias for a managed account. Validates the
+// alias and ensures it is unique. Pass alias="" to clear.
+func (s *State) SetAlias(slot int, alias string) error {
+	a, ok := s.Accounts[slot]
+	if !ok {
+		return fmt.Errorf("%w: slot %d", ErrAccountMissing, slot)
+	}
+	if alias == "" {
+		a.Alias = ""
+		s.Accounts[slot] = a
+		return nil
+	}
+	if err := ValidateAlias(alias); err != nil {
+		return err
+	}
+	if existing := s.FindByAlias(alias); existing != 0 && existing != slot {
+		return fmt.Errorf("%w: %q is already used by slot %d (%s)", ErrAliasExists, alias, existing, s.Accounts[existing].Email)
+	}
+	a.Alias = alias
+	s.Accounts[slot] = a
+	return nil
 }
 
 // NextSlot returns the lowest unused positive slot number. Reusing
