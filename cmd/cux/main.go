@@ -50,7 +50,7 @@ import (
 // It must be a var (not const) so -ldflags can inject the real release
 // tag. The fallback "0.2.6" is the development/unreleased default;
 // released binaries always get the tag stamped in.
-var version = "0.2.8"
+var version = "0.2.9"
 
 const (
 	// donateURL is shown only by `cux version --verbose`. Subtle by
