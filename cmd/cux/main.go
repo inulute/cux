@@ -50,7 +50,7 @@ import (
 // It must be a var (not const) so -ldflags can inject the real release
 // tag. The fallback "0.2.6" is the development/unreleased default;
 // released binaries always get the tag stamped in.
-var version = "0.2.9"
+var version = "0.2.10"
 
 const (
 	// donateURL is shown only by `cux version --verbose`. Subtle by
@@ -317,6 +317,10 @@ func cmdAlias(args []string) {
 }
 
 func cmdStatus(args []string) {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	noRefresh := fs.Bool("no-refresh", false, "show cached usage without fetching fresh data")
+	_ = fs.Parse(args)
+
 	cfg, _ := config.Load()
 	setTheme(cfg.Theme)
 
@@ -327,6 +331,11 @@ func cmdStatus(args []string) {
 	liveEmail, liveErr := switcher.CurrentLiveEmail()
 	if liveErr != nil {
 		liveEmail = ""
+	}
+
+	var warnings []error
+	if !*noRefresh && len(state.Accounts) > 0 {
+		_, warnings = monitor.RefreshAll()
 	}
 
 	cache, _ := usage.LoadCache()
@@ -342,6 +351,9 @@ func cmdStatus(args []string) {
 		}
 	} else {
 		fmt.Printf(" %sNo accounts managed yet. Run `cux add` while logged in.%s\n\n", colorGray, colorReset)
+	}
+	for _, e := range warnings {
+		fmt.Fprintln(os.Stderr, "warning:", e)
 	}
 }
 
@@ -393,24 +405,26 @@ func cmdForceSwitch(args []string) {
 
 // --- Hook subcommands ----------------------------------------------------
 
-// cmdHook dispatches `cux hook {prompt-submit,stop,session-start,rate-limit}`. These
+// cmdHook dispatches `cux hook {prompt-submit|prompt-expansion|stop|session-start|rate-limit}`. These
 // are invoked by Claude Code itself via entries in
 // ~/.claude/settings.json. They read JSON from stdin and write a
 // signal file under the cux runtime directory; everything else is
 // done by the wrapper's poll loop.
 func cmdHook(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: cux hook {prompt-submit|stop|session-start|rate-limit}")
+		fmt.Fprintln(os.Stderr, "usage: cux hook {prompt-submit|prompt-expansion|stop|session-start|rate-limit}")
 		os.Exit(2)
 	}
 	var err error
 	switch args[0] {
 	case "prompt-submit":
 		err = hooks.UserPromptSubmit(os.Stdin, os.Stdout)
+	case "prompt-expansion":
+		err = hooks.UserPromptExpansion(os.Stdin, os.Stdout)
 	case "stop":
 		err = hooks.Stop(os.Stdin)
 	case "session-start":
-		err = hooks.SessionStart(os.Stdin)
+		err = hooks.SessionStart(os.Stdin, os.Stdout)
 	case "rate-limit":
 		err = hooks.RateLimit(os.Stdin)
 	default:
@@ -1360,8 +1374,6 @@ func stripANSI(s string) string {
 	return string(out)
 }
 
-
-
 func stdinIsTTY() bool {
 	fi, err := os.Stdin.Stat()
 	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
@@ -1596,7 +1608,7 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 
 	for _, slot := range slots {
 		a := st.Accounts[slot]
-		au := cache[a.CacheKey()]
+		au := cachedAccountUsage(cache, a)
 		sl := accountState(a.Email, liveEmail, au)
 
 		var sc string
@@ -1648,6 +1660,21 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 	}
 
 	fmt.Fprintln(w, tableSep("└", "┴", "┘"))
+}
+
+func cachedAccountUsage(cache usage.Cache, acct store.Account) usage.AccountUsage {
+	if cache == nil {
+		return usage.AccountUsage{}
+	}
+	if u, ok := cache[acct.CacheKey()]; ok {
+		return u
+	}
+	if acct.CacheKey() != acct.Email {
+		if u, ok := cache[acct.Email]; ok {
+			return u
+		}
+	}
+	return usage.AccountUsage{}
 }
 
 func renderSupport(useANSI bool) string {

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/inulute/cux/internal/claudecfg"
@@ -55,19 +56,39 @@ func RefreshAll() (usage.Cache, []error) {
 	if cache == nil {
 		cache = usage.Cache{}
 	}
-	var errs []error
+	// Fetch all accounts in parallel — latency is dominated by the API
+	// round-trip, so N sequential calls cost N× more than needed.
+	type result struct {
+		cacheKey string
+		entry    usage.AccountUsage
+		err      error
+		email    string
+	}
+	ch := make(chan result, len(state.Accounts))
+	var wg sync.WaitGroup
 	for slot, a := range state.Accounts {
-		entry, err := refreshOne(slot, a.Email, a.OrgUUID)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", a.Email, err))
+		wg.Add(1)
+		go func(slot int, a store.Account) {
+			defer wg.Done()
+			entry, err := refreshOne(slot, a.Email, a.OrgUUID)
+			ch <- result{cacheKey: a.CacheKey(), entry: entry, err: err, email: a.Email}
+		}(slot, a)
+	}
+	wg.Wait()
+	close(ch)
+
+	var errs []error
+	for r := range ch {
+		if r.err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", r.email, r.err))
 			// On token-expired we still cache the marker so `cux list`
 			// surfaces the state to the user.
-			if entry.TokenExpired {
-				cache[a.CacheKey()] = entry
+			if r.entry.TokenExpired {
+				cache[r.cacheKey] = r.entry
 			}
 			continue
 		}
-		cache[a.CacheKey()] = entry
+		cache[r.cacheKey] = r.entry
 	}
 	if err := usage.SaveCache(cache); err != nil {
 		errs = append(errs, err)

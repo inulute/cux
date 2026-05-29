@@ -63,16 +63,32 @@ type sessionStartHookInput struct {
 type rateLimitHookInput struct {
 	// error is json.RawMessage so we can handle both string and object
 	// shapes that different Claude Code versions may emit.
-	Error json.RawMessage `json:"error,omitempty"`
+	Error                json.RawMessage `json:"error,omitempty"`
+	ErrorDetails         json.RawMessage `json:"error_details,omitempty"`
+	LastAssistantMessage json.RawMessage `json:"last_assistant_message,omitempty"`
 }
 
 type userPromptSubmitHookInput struct {
 	Prompt string `json:"prompt"`
 }
 
+type userPromptExpansionHookInput struct {
+	CommandName string `json:"command_name,omitempty"`
+	Prompt      string `json:"prompt,omitempty"`
+}
+
 type userPromptSubmitHookOutput struct {
 	Decision string `json:"decision"`
 	Reason   string `json:"reason"`
+}
+
+type sessionStartHookOutput struct {
+	HookSpecificOutput sessionStartSpecificOutput `json:"hookSpecificOutput"`
+}
+
+type sessionStartSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"`
+	AdditionalContext string `json:"additionalContext"`
 }
 
 // UserPromptSubmit is `cux hook prompt-submit`. It intercepts cux's
@@ -106,6 +122,32 @@ func UserPromptSubmit(stdin io.Reader, stdout io.Writer) error {
 	return nil
 }
 
+func UserPromptExpansion(stdin io.Reader, stdout io.Writer) error {
+	if !isWrapped() {
+		return nil
+	}
+	var in userPromptExpansionHookInput
+	if err := decode(stdin, &in); err != nil {
+		return nil
+	}
+	cmd := strings.TrimPrefix(strings.TrimSpace(in.CommandName), "/")
+	prompt := strings.TrimSpace(in.Prompt)
+	if cmd != "rate-limit-options" && prompt != "/rate-limit-options" {
+		return nil
+	}
+
+	if handled, err := handleAutoSwitchPrompt("/rate-limit-options", stdout); handled || err != nil {
+		return nil
+	}
+
+	if msg, err := renderPromptUsage(true); err == nil {
+		writePromptBlock(stdout, msg)
+		return nil
+	}
+	writePromptBlock(stdout, "cux: session limit reached; no usable managed account is available right now.")
+	return nil
+}
+
 func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 	// Consume the replay flag written by the wrapper before relaunching.
 	// This prevents triggering another switch when the replayed prompt
@@ -120,11 +162,19 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
+	// Use the real cache key (OrgUUID when present, email otherwise).
+	// Accounts in an org are keyed by OrgUUID in the usage cache, so a
+	// bare email lookup silently misses and the threshold check never fires.
+	cacheKey, err := switcher.CurrentLiveCacheKey()
+	if err != nil {
+		return false, nil
+	}
+
 	cache, _ := usage.LoadCache()
 	if cache == nil {
 		cache = usage.Cache{}
 	}
-	u, uOK := cache[email]
+	u, uOK := cachedUsage(cache, cacheKey, email)
 	if !uOK {
 		return false, nil
 	}
@@ -141,7 +191,7 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 	if fresh, _ := monitor.RefreshAll(); fresh != nil {
 		cache = fresh
 		// Re-read the current account from the fresh cache.
-		if freshU, ok := fresh[email]; ok {
+		if freshU, ok := cachedUsage(fresh, cacheKey, email); ok {
 			u = freshU
 			// If the current account itself has recovered (e.g. its 5h window
 			// just reset), don't switch — let the prompt through.
@@ -157,31 +207,59 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 	}
 	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
 	for _, a := range state.Accounts {
-		candidates = append(candidates, strategy.Candidate{Email: a.Email})
+		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
+	}
+	current := strategy.Candidate{Email: email, CacheKey: cacheKey}
+	if _, ok := cache[cacheKey]; !ok {
+		if _, emailOK := cache[email]; emailOK {
+			current.CacheKey = email
+		}
 	}
 	pick, picked := strategy.PickNext(cfg.ResolvedStrategy(), cfg.Strategy.Order, candidates,
-		strategy.Candidate{Email: email}, cache, cfg.Thresholds)
+		current, cache, cfg.Thresholds)
 
 	if picked && !isReplay {
-		pid, err := wrapperPID()
-		if err != nil {
-			return false, err
+		// /rate-limit-options is Claude Code's internally-issued slash command
+		// when a session limit fires mid-turn (during tool use). In that case
+		// the turn is already broken — we need the wrapper's kill+resume flow
+		// to reload the session transcript on the new account. Signal the
+		// wrapper and block the command so the menu never appears.
+		if strings.HasPrefix(strings.TrimSpace(prompt), "/rate-limit-options") {
+			pid, err := wrapperPID()
+			if err != nil {
+				// Not running under the wrapper — fall through to in-place swap.
+				goto inPlaceSwap
+			}
+			if err := signals.Write(pid, signals.SwitchRequested, signals.SwitchRequestedPayload{
+				Target:    pick.Email,
+				Timestamp: time.Now().UTC(),
+			}); err != nil {
+				writePromptBlock(stdout, fmt.Sprintf("cux: %s\ncux: signal failed: %v", why, err))
+				return true, nil
+			}
+			writePromptBlock(stdout, fmt.Sprintf("cux: %s\ncux: → switching to %s and resuming your session...", why, pick.Email))
+			return true, nil
 		}
-		if err := signals.Write(pid, signals.SwitchRequested, signals.SwitchRequestedPayload{
-			Target:        pick.Email,
-			ResumeMessage: prompt,
-			Timestamp:     time.Now().UTC(),
-		}); err != nil {
-			return false, err
+
+	inPlaceSwap:
+		// Pre-turn prompt: swap credentials in-place. Claude Code reads
+		// credentials on every API request, so this prompt will be processed
+		// by the new account with no restart or manual resend needed.
+		from, to, switchErr := switcher.SwitchTo(pick.Email)
+		if switchErr != nil {
+			writePromptBlock(stdout, fmt.Sprintf("cux: %s\ncux: failed to switch to %s: %v", why, pick.Email, switchErr))
+			return true, nil
 		}
-		writePromptBlock(stdout, "cux: "+why+"\ncux: switching accounts and replaying your prompt after resume...")
+		// Notify on stderr — visible in the terminal even inside the TUI.
+		// Writing nothing to stdout causes Claude Code to approve the prompt,
+		// so it continues on the new account without any manual resend.
+		fmt.Fprintf(os.Stderr, "\ncux: %s → %s (%s)\n", from.Email, to.Email, why)
 		return true, nil
 	}
 
 	if isReplay {
-		// This is the replayed prompt after a switch. Even if the new account
-		// is also above threshold, let this one prompt through — auto-switch
-		// will engage again on the next prompt naturally.
+		// Leftover replay flag from the old wrapper-based switch path.
+		// Let the prompt through — auto-switch re-engages on the next prompt.
 		return false, nil
 	}
 
@@ -256,7 +334,7 @@ func handleCuxPromptCommand(prompt string, stdout io.Writer) (bool, error) {
 		writePromptBlock(stdout, text)
 		return true, nil
 	case "status":
-		text, err := renderPromptUsage(false)
+		text, err := renderPromptUsage(true)
 		if err != nil {
 			writePromptBlock(stdout, "cux: "+err.Error())
 			return true, nil
@@ -364,7 +442,7 @@ func promptSwitchHasTarget() (bool, string) {
 	}
 	for _, slot := range state.SortedSlots() {
 		acct := state.Accounts[slot]
-		if slot != state.ActiveSlot && accountHasPromptCapacity(cache, acct.Email, cfg.Thresholds) {
+		if slot != state.ActiveSlot && accountHasPromptCapacity(cache, acct, cfg.Thresholds) {
 			return true, ""
 		}
 	}
@@ -432,7 +510,7 @@ func renderPromptUsage(refresh bool) (string, error) {
 	sort.Ints(slots)
 	for i, slot := range slots {
 		acct := state.Accounts[slot]
-		u := cache[acct.Email]
+		u, _ := cachedUsage(cache, acct.CacheKey(), acct.Email)
 		stateLabel := ""
 		if acct.Email == liveEmail {
 			stateLabel = "active"
@@ -444,7 +522,7 @@ func renderPromptUsage(refresh bool) (string, error) {
 				stateLabel += "+expired"
 			}
 		}
-		if accountHasPromptCapacity(cache, acct.Email, cfg.Thresholds) {
+		if accountHasPromptCapacity(cache, acct, cfg.Thresholds) {
 			anyUsable = true
 		}
 		if stateLabel == "" {
@@ -647,17 +725,17 @@ func nextUsableSlot(state *store.State, cache usage.Cache, thresholds usage.Thre
 	sort.Ints(slots)
 	for _, s := range slots {
 		acct := state.Accounts[s]
-		if !accountHasPromptCapacity(cache, acct.Email, thresholds) {
+		if !accountHasPromptCapacity(cache, acct, thresholds) {
 			continue
 		}
-		u := cache[acct.Email]
+		u, _ := cachedUsage(cache, acct.CacheKey(), acct.Email)
 		return s, acct.Email, resetForWindow(u.FiveHour), true
 	}
 	return 0, "", "", false
 }
 
-func accountHasPromptCapacity(cache usage.Cache, email string, thresholds usage.Thresholds) bool {
-	u, ok := cache[email]
+func accountHasPromptCapacity(cache usage.Cache, acct store.Account, thresholds usage.Thresholds) bool {
+	u, ok := cachedUsage(cache, acct.CacheKey(), acct.Email)
 	if !ok {
 		return true
 	}
@@ -686,7 +764,7 @@ func nextResetSlot(state *store.State, cache usage.Cache) (slot int, email, rese
 	sort.Ints(slots)
 	for _, s := range slots {
 		acct := state.Accounts[s]
-		u := cache[acct.Email]
+		u, _ := cachedUsage(cache, acct.CacheKey(), acct.Email)
 		if u.FiveHour == nil || u.FiveHour.ResetsAt == nil {
 			continue
 		}
@@ -793,7 +871,7 @@ func Stop(stdin io.Reader) error {
 // SessionStart is `cux hook session-start`. We capture the session ID
 // the moment a session begins so the wrapper does not have to fall
 // back to mtime-scanning the transcript directory.
-func SessionStart(stdin io.Reader) error {
+func SessionStart(stdin io.Reader, stdout io.Writer) error {
 	if !isWrapped() {
 		return nil
 	}
@@ -809,12 +887,34 @@ func SessionStart(stdin io.Reader) error {
 		// fallback, but this case is rare.
 		return nil
 	}
-	return signals.Write(pid, signals.SessionStarted, signals.SessionStartedPayload{
+	if err := signals.Write(pid, signals.SessionStarted, signals.SessionStartedPayload{
 		SessionID: in.SessionID,
 		CWD:       in.CWD,
 		Source:    in.Source,
 		Timestamp: time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
+	if strings.TrimSpace(in.Source) == "resume" {
+		writeSessionStartUsageContext(stdout)
+	}
+	return nil
+}
+
+func writeSessionStartUsageContext(stdout io.Writer) {
+	text, err := renderPromptUsage(false)
+	if err != nil || !strings.Contains(text, "STATUS : ALL MANAGED ACCOUNTS EXHAUSTED") {
+		return
+	}
+	msg := "CUX account status at session resume:\n\n" + text +
+		"\n\nAll managed accounts are currently exhausted. You can still read this chat, but new Claude work will wait until the next reset or another account is added."
+	out, _ := json.Marshal(sessionStartHookOutput{
+		HookSpecificOutput: sessionStartSpecificOutput{
+			HookEventName:     "SessionStart",
+			AdditionalContext: msg,
+		},
 	})
+	_, _ = stdout.Write(append(out, '\n'))
 }
 
 // RateLimit is `cux hook rate-limit`. Claude Code routes generic
@@ -842,32 +942,51 @@ func RateLimit(stdin io.Reader) error {
 		return nil
 	}
 
-	// Extract the error text from either JSON shape.
+	// Extract the error text from either JSON shape. StopFailure sends
+	// error="rate_limit" with optional error_details and last_assistant_message;
+	// PostToolUseFailure has historically put the useful text in error itself.
 	// Shape A — string:  "error": "rate limit exceeded"
 	// Shape B — object:  "error": {"type": "rate_limit_error", "message": "..."}
 	errText := extractErrorText(in.Error)
-	if errText == "" {
+	detailText := extractErrorText(in.ErrorDetails)
+	assistantText := extractErrorText(in.LastAssistantMessage)
+	combined := strings.Join(nonEmpty(errText, detailText, assistantText), "\n")
+	if combined == "" {
 		return nil
 	}
 
-	lower := strings.ToLower(errText)
+	lower := strings.ToLower(combined)
 	isRateLimit := strings.Contains(lower, "rate_limit") ||
 		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "session limit") ||
+		strings.Contains(lower, "hit your session limit") ||
 		strings.Contains(lower, "usage limit") ||
-		strings.Contains(lower, "overloaded_error")
+		strings.Contains(lower, "overloaded_error") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "429")
 	if !isRateLimit {
 		return nil
 	}
 
+	message := assistantText
+	if message == "" {
+		message = detailText
+	}
+	if message == "" {
+		message = errText
+	}
 	return signals.Write(pid, signals.RateLimited, signals.RateLimitedPayload{
 		Timestamp: time.Now().UTC(),
-		Message:   errText,
+		Message:   message,
 	})
 }
 
 // extractErrorText returns a plain string from a json.RawMessage that
 // is either a JSON string or a JSON object with "type"/"message" fields.
 func extractErrorText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
 	// Try string shape first.
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
@@ -885,6 +1004,33 @@ func extractErrorText(raw json.RawMessage) string {
 		return obj.Type
 	}
 	return ""
+}
+
+func nonEmpty(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func cachedUsage(cache usage.Cache, cacheKey, email string) (usage.AccountUsage, bool) {
+	if cache == nil {
+		return usage.AccountUsage{}, false
+	}
+	if cacheKey != "" {
+		if u, ok := cache[cacheKey]; ok {
+			return u, true
+		}
+	}
+	if email != "" {
+		if u, ok := cache[email]; ok {
+			return u, true
+		}
+	}
+	return usage.AccountUsage{}, false
 }
 
 // decode reads stdin (with a deadline) and parses it as JSON. Empty

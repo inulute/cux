@@ -104,8 +104,9 @@ func TestUserPromptSubmitBareSwitchBlocksWhenAllAccountsExhausted(t *testing.T) 
 
 // TestHandleAutoSwitchPrompt_HardBlock_Threshold100 verifies that when the
 // active account is at 100% 5h utilization AND thresholds are set to 100
-// (default/"reactive-only"), the prompt-submit hook still triggers a switch
-// to the available second account.
+// (default/"reactive-only"), the prompt-submit hook switches credentials
+// in-place and approves the prompt (empty stdout) so Claude Code sends it
+// on the new account without any manual resend.
 //
 // This is the "session limit" regression: Claude Code's session-limit UI
 // blocks before any tool use, so PostToolUseFailure never fires. The
@@ -113,7 +114,7 @@ func TestUserPromptSubmitBareSwitchBlocksWhenAllAccountsExhausted(t *testing.T) 
 func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CUX_WRAPPED", "1")
-	// Redirect HOME so claudecfg reads our fake .claude.json, not the real one.
+	// Redirect HOME and XDG_DATA_HOME so all paths resolve under tmp.
 	t.Setenv("HOME", tmp)
 	t.Setenv("XDG_DATA_HOME", tmp)
 	t.Setenv("CUX_CONFIG_FILE", filepath.Join(tmp, "config.json"))
@@ -129,13 +130,22 @@ func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Use current process PID as the fake wrapper PID so the signal
-	// directory path is deterministic. Pre-create the dir so Write succeeds.
-	// RuntimeDir() = $XDG_DATA_HOME/cux/runtime, so signals live under that.
-	pid := os.Getpid()
-	t.Setenv("CUX_WRAPPER_PID", fmt.Sprintf("%d", pid))
-	sigDir := filepath.Join(tmp, "cux", "runtime", "signals")
-	if err := os.MkdirAll(sigDir, 0o700); err != nil {
+	// Backup credentials for slot 2 (target account). The hook calls
+	// switcher.SwitchTo directly, which reads these files to swap creds.
+	// The credential blob intentionally omits "accessToken" so that
+	// RefreshAll's refreshOne call hits ExtractAccessToken error and
+	// returns before making a real API call — avoiding a 401 that would
+	// mark the account as TokenExpired and prevent PickNext from selecting it.
+	acct2Dir := filepath.Join(tmp, "cux", "accounts", "02-free@x.test")
+	if err := os.MkdirAll(acct2Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fakeCreds := `{"cux-test-slot":"2"}` // no accessToken → no API call
+	if err := os.WriteFile(filepath.Join(acct2Dir, "credentials.json"), []byte(fakeCreds), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeOAuth := `{"emailAddress":"free@x.test","accountUuid":"u2"}`
+	if err := os.WriteFile(filepath.Join(acct2Dir, "oauth.json"), []byte(fakeOAuth), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -164,22 +174,65 @@ func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 	}
 	got := out.String()
 
-	// Hook must block the prompt.
-	if !strings.Contains(got, `"decision":"block"`) {
-		t.Fatalf("hook should block the prompt, got: %s", got)
+	// Hook must NOT block the prompt — empty stdout means Claude Code approves it
+	// and sends it using the newly-swapped credentials.
+	if strings.Contains(got, `"decision":"block"`) {
+		t.Fatalf("hook should approve (empty stdout), but got block: %s", got)
 	}
-	// Hook must announce a switch, not an exhaustion warning.
-	if !strings.Contains(got, "switching accounts") {
-		t.Fatalf("hook should announce switching accounts, got: %s", got)
-	}
-	if strings.Contains(got, "all managed accounts are at or above") {
-		t.Fatalf("hook should not report exhaustion when account 2 is free, got: %s", got)
+	if got != "" {
+		t.Fatalf("hook should produce empty stdout for an approved switch, got: %s", got)
 	}
 
-	// The SwitchRequested signal file must exist — wrapper picks it up to do the swap.
-	sigFile := filepath.Join(sigDir, fmt.Sprintf("%d-%s", pid, signals.SwitchRequested))
-	if _, err := os.Stat(sigFile); err != nil {
-		t.Fatalf("SwitchRequested signal file not written: %v (hook output: %s)", err, got)
+	// The live credentials file must now contain the target account's backup blob.
+	liveCredsPath := filepath.Join(claudeDir, ".credentials.json")
+	b, err := os.ReadFile(liveCredsPath)
+	if err != nil {
+		t.Fatalf("live credentials file not written after switch: %v", err)
+	}
+	if !strings.Contains(string(b), "cux-test-slot") {
+		t.Fatalf("live credentials should contain target account blob, got: %s", b)
+	}
+
+	// Live Claude config must now identify the target account.
+	claudeCfg, err := os.ReadFile(filepath.Join(claudeDir, ".claude.json"))
+	if err != nil {
+		t.Fatalf("claude config not readable: %v", err)
+	}
+	if !strings.Contains(string(claudeCfg), "free@x.test") {
+		t.Fatalf("claude config should have been updated to free@x.test, got: %s", claudeCfg)
+	}
+}
+
+func TestRateLimitStopFailureWritesSignal(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CUX_WRAPPED", "1")
+	t.Setenv("XDG_DATA_HOME", tmp)
+	pid := os.Getpid()
+	t.Setenv("CUX_WRAPPER_PID", fmt.Sprintf("%d", pid))
+
+	input := `{
+		"hook_event_name": "StopFailure",
+		"error": "rate_limit",
+		"error_details": "429 Too Many Requests",
+		"last_assistant_message": "You've hit your session limit · resets 1:10am (Asia/Kolkata)"
+	}`
+	if err := RateLimit(strings.NewReader(input)); err != nil {
+		t.Fatalf("RateLimit returned error: %v", err)
+	}
+
+	b, ok, err := signals.Read(pid, signals.RateLimited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("RateLimit should write rate-limited signal for StopFailure rate_limit")
+	}
+	p, err := signals.DecodeRateLimited(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.Message, "session limit") {
+		t.Fatalf("signal should preserve rendered session-limit message, got %q", p.Message)
 	}
 }
 

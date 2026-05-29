@@ -26,16 +26,18 @@ import (
 // the user if cux is not findable.
 const CuxBinary = "cux"
 
-// hookSpec describes one hook ccux registers.
+// hookSpec describes one hook cux registers.
 type hookSpec struct {
-	Event   string // "Stop", "SessionStart", "PostToolUseFailure", "UserPromptSubmit"
-	Subcmd  string // "stop", "session-start", "rate-limit", "prompt-submit"
+	Event   string // "Stop", "StopFailure", "SessionStart", "PostToolUseFailure", "UserPromptSubmit", "UserPromptExpansion"
+	Subcmd  string // "stop", "session-start", "rate-limit", "prompt-submit", "prompt-expansion"
 	Timeout int    // seconds
 }
 
 var specs = []hookSpec{
 	{Event: "UserPromptSubmit", Subcmd: "prompt-submit", Timeout: 20},
+	{Event: "UserPromptExpansion", Subcmd: "prompt-expansion", Timeout: 5},
 	{Event: "Stop", Subcmd: "stop", Timeout: 10},
+	{Event: "StopFailure", Subcmd: "rate-limit", Timeout: 5},
 	{Event: "SessionStart", Subcmd: "session-start", Timeout: 5},
 	{Event: "PostToolUseFailure", Subcmd: "rate-limit", Timeout: 5},
 }

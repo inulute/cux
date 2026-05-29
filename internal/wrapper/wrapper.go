@@ -88,12 +88,6 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	}
 	defer cleanupWrapperPID(pid)
 
-	// One-shot background refresh so threshold checks have something
-	// to work with on the first turn. Errors are ignored — a fresh
-	// install with no usage data is fine; threshold logic falls back
-	// to "no decision" rather than guessing.
-	go func() { _, _ = monitor.RefreshAll() }()
-
 	// lastManualTarget holds the email the user explicitly switched to
 	// within this wrapper session. Threshold auto-switch is suppressed
 	// while the live account matches this value, so a manual choice is
@@ -101,6 +95,29 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	var lastManualTarget string
 
 	currentArgv := argv
+	if shouldPreflightHardLimit(argv) {
+		_, _ = monitor.RefreshAll()
+		if p, _ := evaluatePrelaunchHardLimitSwap(&cfg); p != nil {
+			target, err := resolveTarget(p.explicitTarget, p.trigger, &cfg)
+			if err != nil {
+				fmt.Fprintf(w, "cux: %v — staying on current account\n", err)
+			} else if from, to, err := switcher.SwitchTo(target); err != nil {
+				fmt.Fprintf(w, "cux: prelaunch switch failed: %v\n", err)
+			} else {
+				fmt.Fprintf(w, "cux: %s on %s → switched to %s before resume\n", p.reason, from.Email, to.Email)
+				lastManualTarget = ""
+				setManualSwitchState("")
+				appendPrelaunchHistory(from, to, p)
+			}
+		}
+	} else {
+		// One-shot background refresh so threshold checks have something
+		// to work with on the first turn. Errors are ignored — a fresh
+		// install with no usage data is fine; threshold logic falls back
+		// to "no decision" rather than guessing.
+		go func() { _, _ = monitor.RefreshAll() }()
+	}
+
 	for {
 		exitCode, sessionID, hadTurns, p, err := launch(claudeBin, currentArgv, pid, &cfg, lastManualTarget, w)
 		if err != nil {
@@ -108,10 +125,27 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		}
 		if p == nil {
 			// No swap pending ⇒ user quit normally.
+			if shouldPreflightHardLimit(currentArgv) && isActiveHardLimited() {
+				if msg := renderAllAccountsExhaustedMessage(&cfg); msg != "" {
+					fmt.Fprintln(w, msg)
+					fmt.Fprintln(w)
+				}
+			}
+			// Print a cux-branded resume hint so the user knows to use
+			// `cux --resume` (not `claude --resume`) to reconnect.
+			if sessionID != "" {
+				fmt.Fprintf(w, "cux --resume %s\n", sessionID)
+			}
 			return exitCode, nil
 		}
 
 		target, err := resolveTarget(p.explicitTarget, p.trigger, &cfg)
+		if err != nil {
+			if p.trigger == history.TriggerRateLimit || p.trigger == history.TriggerThreshold {
+				_, _ = monitor.RefreshAll()
+				target, err = resolveTarget(p.explicitTarget, p.trigger, &cfg)
+			}
+		}
 		if err != nil {
 			fmt.Fprintf(w, "cux: %v — staying on current account\n", err)
 			return exitCode, nil
@@ -428,6 +462,7 @@ func step(
 // decided to leave. Best-effort; if the cache is empty the entry just
 // shows zero usage which the history printer renders as "—".
 func snapshotActiveUsage() usage.AccountUsage {
+	email, _ := switcher.CurrentLiveEmail()
 	cacheKey, err := switcher.CurrentLiveCacheKey()
 	if err != nil {
 		return usage.AccountUsage{}
@@ -436,7 +471,8 @@ func snapshotActiveUsage() usage.AccountUsage {
 	if err != nil {
 		return usage.AccountUsage{}
 	}
-	return cache[cacheKey]
+	u, _ := cachedUsage(cache, cacheKey, email)
+	return u
 }
 
 // evaluateThresholdSwap returns a pending if the active account's
@@ -454,17 +490,9 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 		return nil
 	}
 
-	// Layer 1: in-wrapper guard.
-	if manualTarget != "" && email == manualTarget {
-		return nil
-	}
-	// Layer 2: cross-wrapper guard — another session manually placed
-	// this account here; respect their choice.
-	if st, err := store.Load(); err == nil {
-		if st.ManualSwitchEmail == email && !st.ManualSwitchAt.IsZero() {
-			return nil
-		}
-	}
+	// Read usage first — at hard limit (100%) necessity overrides any
+	// manual-switch guard, so the guard must be evaluated after we know
+	// whether this is a soft-threshold or hard-limit case.
 	cache, err := usage.LoadCache()
 	if err != nil || cache == nil {
 		return nil
@@ -473,7 +501,7 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 	if err != nil {
 		return nil
 	}
-	u, ok := cache[cacheKey]
+	u, ok := cachedUsage(cache, cacheKey, email)
 	if !ok {
 		return nil
 	}
@@ -481,6 +509,25 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 	if !over {
 		return nil
 	}
+
+	// Hard-limit check: 5h or 7d at exactly 100% → bypass both guards.
+	// At soft-threshold triggers we still respect manual choices.
+	atHardLimit := (u.FiveHour != nil && u.FiveHour.Utilization >= 100) ||
+		(u.SevenDay != nil && u.SevenDay.Utilization >= 100)
+	if !atHardLimit {
+		// Layer 1: in-wrapper guard.
+		if manualTarget != "" && email == manualTarget {
+			return nil
+		}
+		// Layer 2: cross-wrapper guard — another session manually placed
+		// this account here; respect their choice.
+		if st, err := store.Load(); err == nil {
+			if st.ManualSwitchEmail == email && !st.ManualSwitchAt.IsZero() {
+				return nil
+			}
+		}
+	}
+
 	state, err := store.Load()
 	if err != nil {
 		return nil
@@ -489,8 +536,14 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 	for _, a := range state.Accounts {
 		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
 	}
+	current := strategy.Candidate{Email: email, CacheKey: cacheKey}
+	if _, ok := cache[cacheKey]; !ok {
+		if _, emailOK := cache[email]; emailOK {
+			current.CacheKey = email
+		}
+	}
 	pick, ok := strategy.PickNext(cfg.ResolvedStrategy(), cfg.Strategy.Order, candidates,
-		strategy.Candidate{Email: email, CacheKey: cacheKey}, cache, cfg.Thresholds)
+		current, cache, cfg.Thresholds)
 	if !ok {
 		// Nothing to swap to — let claude continue on the maxed-out
 		// account; the rate-limit hook will catch the actual cap.
@@ -502,6 +555,164 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 		explicitTarget: pick.Email,
 		fromUsage:      u,
 	}
+}
+
+func shouldPreflightHardLimit(argv []string) bool {
+	for _, arg := range argv {
+		if arg == "--resume" || arg == "-r" {
+			return true
+		}
+	}
+	return false
+}
+
+func evaluatePrelaunchHardLimitSwap(cfg *config.Config) (*pending, string) {
+	p := evaluateThresholdSwap(cfg, "")
+	if p != nil && isHardLimitUsage(p.fromUsage) {
+		p.trigger = history.TriggerRateLimit
+		p.reason = p.reason + " before launch"
+		return p, ""
+	}
+
+	if isActiveHardLimited() {
+		if msg := renderAllAccountsExhaustedMessage(cfg); msg != "" {
+			return nil, msg
+		}
+	}
+	return nil, ""
+}
+
+func isHardLimitUsage(u usage.AccountUsage) bool {
+	return (u.FiveHour != nil && u.FiveHour.Utilization >= 100) ||
+		(u.SevenDay != nil && u.SevenDay.Utilization >= 100)
+}
+
+func appendPrelaunchHistory(from, to store.Account, p *pending) {
+	cwd, _ := os.Getwd()
+	toUsageCache, _ := usage.LoadCache()
+	toUsage, _ := cachedUsage(toUsageCache, to.CacheKey(), to.Email)
+	_ = history.Append(history.Entry{
+		From:        from.Email,
+		To:          to.Email,
+		Trigger:     p.trigger,
+		Reason:      p.reason,
+		CWD:         cwd,
+		FromUsage5h: utilizationOrZero(p.fromUsage.FiveHour),
+		FromUsage7d: utilizationOrZero(p.fromUsage.SevenDay),
+		ToUsage5h:   utilizationOrZero(toUsage.FiveHour),
+		ToUsage7d:   utilizationOrZero(toUsage.SevenDay),
+	})
+}
+
+func isActiveHardLimited() bool {
+	email, err := switcher.CurrentLiveEmail()
+	if err != nil {
+		return false
+	}
+	cacheKey, err := switcher.CurrentLiveCacheKey()
+	if err != nil {
+		cacheKey = email
+	}
+	cache, err := usage.LoadCache()
+	if err != nil {
+		return false
+	}
+	u, ok := cachedUsage(cache, cacheKey, email)
+	return ok && isHardLimitUsage(u)
+}
+
+func cachedUsage(cache usage.Cache, cacheKey, email string) (usage.AccountUsage, bool) {
+	if cache == nil {
+		return usage.AccountUsage{}, false
+	}
+	if cacheKey != "" {
+		if u, ok := cache[cacheKey]; ok {
+			return u, true
+		}
+	}
+	if email != "" {
+		if u, ok := cache[email]; ok {
+			return u, true
+		}
+	}
+	return usage.AccountUsage{}, false
+}
+
+func renderAllAccountsExhaustedMessage(cfg *config.Config) string {
+	state, err := store.Load()
+	if err != nil || len(state.Accounts) == 0 {
+		return ""
+	}
+	cache, err := usage.LoadCache()
+	if err != nil {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("cux: all managed accounts are exhausted\n")
+	b.WriteString("cux: no Claude usage is available right now.\n\n")
+	b.WriteString("Accounts:\n")
+
+	var nextEmail string
+	var nextReset *time.Time
+	for _, slot := range state.SortedSlots() {
+		acct := state.Accounts[slot]
+		u, _ := cachedUsage(cache, acct.CacheKey(), acct.Email)
+		reset := availabilityReset(u)
+		b.WriteString(fmt.Sprintf("  [%02d] %s  5h:%s  7d:%s", slot, acct.Email, pct(u.FiveHour), pct(u.SevenDay)))
+		if reset != nil {
+			b.WriteString("  available in " + shortDuration(time.Until(*reset)))
+			if nextReset == nil || reset.Before(*nextReset) {
+				t := *reset
+				nextReset = &t
+				nextEmail = acct.Email
+			}
+		} else if accountHasSwitchCapacity(cache, acct.CacheKey(), cfg) {
+			b.WriteString("  available now")
+		} else {
+			b.WriteString("  reset unknown")
+		}
+		b.WriteString("\n")
+	}
+
+	if nextReset != nil {
+		b.WriteString(fmt.Sprintf("\nNext available account: %s in %s\n", nextEmail, shortDuration(time.Until(*nextReset))))
+	} else {
+		b.WriteString("\nNext available account: unknown; run `cux usage refresh` later.\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func availabilityReset(u usage.AccountUsage) *time.Time {
+	if u.SevenDay != nil && u.SevenDay.Utilization >= 100 {
+		return u.SevenDay.ResetsAt
+	}
+	if u.FiveHour != nil && u.FiveHour.Utilization >= 100 {
+		return u.FiveHour.ResetsAt
+	}
+	return nil
+}
+
+func pct(w *usage.Window) string {
+	if w == nil {
+		return "--"
+	}
+	return fmt.Sprintf("%.0f%%", w.Utilization)
+}
+
+func shortDuration(d time.Duration) string {
+	if d <= 0 {
+		return "now"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		return fmt.Sprintf("%dh %02dm", h, m)
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
 // gracefulExit asks the child to shut down. We send the OS-appropriate
