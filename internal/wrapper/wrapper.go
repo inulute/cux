@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,8 +49,12 @@ const (
 	envWrapperPID = "CUX_WRAPPER_PID"
 	envClaudeBin  = "CUX_CLAUDE_BIN"
 
-	pollInterval     = 100 * time.Millisecond
-	gracefulExitWait = 5 * time.Second
+	pollInterval           = 100 * time.Millisecond
+	gracefulExitWait       = 5 * time.Second
+	transcriptWaitTimeout  = 2 * time.Second
+	transcriptStableWindow = 200 * time.Millisecond
+	transcriptPollInterval = 50 * time.Millisecond
+	resumeRetryExtraWait   = 500 * time.Millisecond
 )
 
 // pending captures the reason the wrapper has decided a swap is needed.
@@ -118,11 +123,27 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		go func() { _, _ = monitor.RefreshAll() }()
 	}
 
+	var resumeRetryPending bool
+
 	for {
 		exitCode, sessionID, hadTurns, p, err := launch(claudeBin, currentArgv, pid, &cfg, lastManualTarget, w)
 		if err != nil {
 			return exitCode, err
 		}
+
+		if p == nil && resumeRetryPending && isResumeArgv(currentArgv) && exitCode != 0 {
+			resumeRetryPending = false
+			cwd, _ := os.Getwd()
+			sid := resumeSessionID(currentArgv)
+			if sid == "" {
+				sid = sessionID
+			}
+			time.Sleep(resumeRetryExtraWait)
+			waitForTranscript(cwd, sid, transcriptWaitTimeout)
+			continue
+		}
+		resumeRetryPending = false
+
 		if p == nil {
 			// No swap pending ⇒ user quit normally.
 			if shouldPreflightHardLimit(currentArgv) && isActiveHardLimited() {
@@ -209,6 +230,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			default:
 				fmt.Fprintf(w, "cux: %s → %s (%s), resuming…\n", from.Email, to.Email, p.reason)
 			}
+			waitForTranscript(cwd, sessionID, transcriptWaitTimeout)
 			currentArgv = []string{"--resume", sessionID}
 			if p.resumeMessage != "" {
 				// Write a one-shot flag so the UserPromptSubmit hook skips the
@@ -220,6 +242,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			} else if cfg.AutoMessage != "" {
 				currentArgv = append(currentArgv, cfg.AutoMessage)
 			}
+			resumeRetryPending = true
 		} else {
 			// No session to resume — Claude will start fresh (welcome screen).
 			// Print the switch result so the user knows which account is now active.
@@ -436,9 +459,14 @@ func step(
 	// (~150 ms) at turn-end, which is invisible against claude's own
 	// turn latency. If we deferred the refresh to a goroutine the
 	// threshold check would read stale data left from a prior Stop.
-	if _, ok, _ := signals.Read(wrapperPID, signals.Stopped); ok {
+	if b, ok, _ := signals.Read(wrapperPID, signals.Stopped); ok {
 		_ = signals.Consume(wrapperPID, signals.Stopped)
 		hadTurns.Store(true)
+		if p, err := signals.DecodeStopped(b); err == nil && p.SessionID != "" {
+			mu.Lock()
+			*sessionID = p.SessionID
+			mu.Unlock()
+		}
 		if email, err := switcher.CurrentLiveEmail(); err == nil {
 			_ = monitor.RefreshActive(email)
 		}
@@ -720,9 +748,10 @@ func shortDuration(d time.Duration) string {
 // for claude to flush and exit on its own, then escalate to a hard
 // terminate if it's still alive.
 //
-// Because gracefulExit only runs after a Stop signal, the child is at
-// "waiting for user input" and the transcript is already flushed. The
-// race v0.1 had to warn about doesn't exist here.
+// Threshold swaps wait for a Stop signal before calling this, so the
+// transcript is usually flushed. Rate-limit and manual /switch paths
+// may interrupt mid-turn; Run waits for the transcript file to settle
+// before relaunching with --resume.
 func gracefulExit(cmd *exec.Cmd, w io.Writer) {
 	if cmd.Process == nil {
 		return
@@ -842,6 +871,62 @@ func accountHasSwitchCapacity(cache usage.Cache, cacheKey string, cfg *config.Co
 		cap5 = 90
 	}
 	return u.FiveHour == nil || u.FiveHour.Utilization < float64(cap5)
+}
+
+func isResumeArgv(argv []string) bool {
+	for _, arg := range argv {
+		if arg == "--resume" || arg == "-r" {
+			return true
+		}
+	}
+	return false
+}
+
+func resumeSessionID(argv []string) string {
+	for i, arg := range argv {
+		if (arg == "--resume" || arg == "-r") && i+1 < len(argv) {
+			return argv[i+1]
+		}
+	}
+	return ""
+}
+
+func transcriptPath(cwd, sessionID string) string {
+	return filepath.Join(paths.ProjectTranscriptDir(cwd), sessionID+".jsonl")
+}
+
+// waitForTranscript blocks until the session transcript exists, is
+// non-empty, and its size has been stable for transcriptStableWindow,
+// or until timeout. Returns false when the file never becomes ready.
+func waitForTranscript(cwd, sessionID string, timeout time.Duration) bool {
+	if cwd == "" || sessionID == "" {
+		return false
+	}
+	path := transcriptPath(cwd, sessionID)
+	deadline := time.Now().Add(timeout)
+	var (
+		lastSize    int64 = -1
+		stableSince time.Time
+	)
+	for time.Now().Before(deadline) {
+		fi, err := os.Stat(path)
+		if err != nil || fi.IsDir() || fi.Size() == 0 {
+			lastSize = -1
+			stableSince = time.Time{}
+			time.Sleep(transcriptPollInterval)
+			continue
+		}
+		size := fi.Size()
+		if size != lastSize {
+			lastSize = size
+			stableSince = time.Now()
+		} else if !stableSince.IsZero() && time.Since(stableSince) >= transcriptStableWindow {
+			return true
+		}
+		time.Sleep(transcriptPollInterval)
+	}
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir() && fi.Size() > 0
 }
 
 // bestEffortSessionID is the v0.1 fallback for capturing session id —

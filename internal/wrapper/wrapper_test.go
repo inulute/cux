@@ -5,9 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/inulute/cux/internal/config"
 	"github.com/inulute/cux/internal/history"
+	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/usage"
 )
@@ -178,4 +180,85 @@ func accountUsage(five, seven float64) usage.AccountUsage {
 	w5 := usage.Window{Utilization: five}
 	w7 := usage.Window{Utilization: seven}
 	return usage.AccountUsage{FiveHour: &w5, SevenDay: &w7}
+}
+
+func TestIsResumeArgv(t *testing.T) {
+	if !isResumeArgv([]string{"--resume", "abc"}) {
+		t.Fatal("expected --resume argv")
+	}
+	if !isResumeArgv([]string{"-r", "abc"}) {
+		t.Fatal("expected -r argv")
+	}
+	if isResumeArgv([]string{"--model", "sonnet"}) {
+		t.Fatal("non-resume argv should return false")
+	}
+}
+
+func TestResumeSessionID(t *testing.T) {
+	if got := resumeSessionID([]string{"--resume", "sess-1", "hello"}); got != "sess-1" {
+		t.Fatalf("resumeSessionID = %q, want sess-1", got)
+	}
+	if got := resumeSessionID([]string{"-r", "sess-2"}); got != "sess-2" {
+		t.Fatalf("resumeSessionID = %q, want sess-2", got)
+	}
+}
+
+func TestWaitForTranscriptStableFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "test-session"
+	path := filepath.Join(paths.ProjectTranscriptDir(cwd), sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"user"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForTranscript(cwd, sessionID, time.Second) {
+		t.Fatal("waitForTranscript should succeed for a stable non-empty file")
+	}
+}
+
+func TestWaitForTranscriptEventuallyStable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "growing-session"
+	path := filepath.Join(paths.ProjectTranscriptDir(cwd), sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 3; i++ {
+			_ = os.WriteFile(path, []byte(strings.Repeat("x", (i+1)*20)), 0o600)
+			time.Sleep(80 * time.Millisecond)
+		}
+	}()
+
+	if !waitForTranscript(cwd, sessionID, 2*time.Second) {
+		t.Fatal("waitForTranscript should succeed once writes stop")
+	}
+	<-done
+}
+
+func TestWaitForTranscriptMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if waitForTranscript(cwd, "missing-session", 150*time.Millisecond) {
+		t.Fatal("waitForTranscript should return false when file never appears")
+	}
 }
