@@ -17,6 +17,7 @@ import (
 func withTempBackup(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
 	t.Setenv("XDG_DATA_HOME", dir)
 	// Make sure no stale file from a prior run exists at the path
 	// paths.BackupRoot will compute under our temp XDG_DATA_HOME.
