@@ -167,6 +167,10 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 				target, err = resolveTarget(p.explicitTarget, p.trigger, &cfg)
 			}
 		}
+		if err != nil && cfg.WaitForReset && p.explicitTarget == "" &&
+			(p.trigger == history.TriggerRateLimit || p.trigger == history.TriggerThreshold) {
+			target, err = waitForReset(p.trigger, &cfg, w)
+		}
 		if err != nil {
 			fmt.Fprintf(w, "cux: %v — staying on current account\n", err)
 			return exitCode, nil
@@ -647,6 +651,96 @@ func isActiveHardLimited() bool {
 	}
 	u, ok := cachedUsage(cache, cacheKey, email)
 	return ok && isHardLimitUsage(u)
+}
+
+// waitForReset blocks until the earliest moment a managed account
+// becomes usable again, refreshes usage, and retries target resolution.
+// Reached only when every account is exhausted — the alternative was
+// giving up and stranding an unattended session until a human returns.
+// A few attempts guard against clock skew between the local machine
+// and the API's reset stamps; each retry waits for the next reset, so
+// even the fallback path never spins.
+const (
+	waitForResetAttempts = 4
+	// resetSlack pads each sleep so we wake after the API-side window
+	// has actually rolled over, not in the same second it should.
+	resetSlack = 90 * time.Second
+)
+
+func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (string, error) {
+	for attempt := 0; attempt < waitForResetAttempts; attempt++ {
+		state, err := store.Load()
+		if err != nil {
+			return "", err
+		}
+		cache, _ := usage.LoadCache()
+		readyAt, email, ok := nextAvailability(state.Accounts, cache, cfg.Thresholds, time.Now())
+		if !ok {
+			return "", errors.New("all accounts exhausted and no reset time is known")
+		}
+		d := time.Until(readyAt) + resetSlack
+		if d < resetSlack {
+			d = resetSlack
+		}
+		fmt.Fprintf(w, "cux: all accounts exhausted — waiting %s for %s to reset…\n",
+			shortDuration(d), email)
+		time.Sleep(d)
+		_, _ = monitor.RefreshAll()
+		if target, err := resolveTarget("", trigger, cfg); err == nil {
+			return target, nil
+		}
+	}
+	return "", errors.New("accounts still exhausted after waiting for resets")
+}
+
+// nextAvailability returns the earliest instant any account becomes
+// usable again and which account that is. An account's ready time is
+// the latest reset among its over-threshold windows — a 5h reset does
+// not help while the 7d window is still capped. Accounts whose binding
+// window carries no reset stamp are skipped: there is nothing to wait
+// for. ok is false when no account has a known ready time.
+func nextAvailability(
+	accounts map[int]store.Account,
+	cache usage.Cache,
+	thresholds usage.Thresholds,
+	now time.Time,
+) (time.Time, string, bool) {
+	var best time.Time
+	var bestEmail string
+	for _, acct := range accounts {
+		u, found := cachedUsage(cache, acct.CacheKey(), acct.Email)
+		if !found || u.TokenExpired {
+			continue
+		}
+		readyAt := now
+		unknown := false
+		for _, wc := range []struct {
+			win *usage.Window
+			cap int
+		}{
+			{u.FiveHour, thresholds.FiveHour},
+			{u.SevenDay, thresholds.SevenDay},
+		} {
+			if wc.win == nil || wc.win.Utilization < float64(wc.cap) {
+				continue
+			}
+			if wc.win.ResetsAt == nil {
+				unknown = true
+				break
+			}
+			if wc.win.ResetsAt.After(readyAt) {
+				readyAt = *wc.win.ResetsAt
+			}
+		}
+		if unknown {
+			continue
+		}
+		if bestEmail == "" || readyAt.Before(best) {
+			best = readyAt
+			bestEmail = acct.Email
+		}
+	}
+	return best, bestEmail, bestEmail != ""
 }
 
 func cachedUsage(cache usage.Cache, cacheKey, email string) (usage.AccountUsage, bool) {
