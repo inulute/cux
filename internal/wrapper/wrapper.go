@@ -231,7 +231,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 				fmt.Fprintf(w, "cux: %s → %s (%s), resuming…\n", from.Email, to.Email, p.reason)
 			}
 			waitForTranscript(cwd, sessionID, transcriptWaitTimeout)
-			currentArgv = []string{"--resume", sessionID}
+			currentArgv = append(relaunchFlags(argv), "--resume", sessionID)
 			if p.resumeMessage != "" {
 				// Write a one-shot flag so the UserPromptSubmit hook skips the
 				// threshold check for this replayed prompt. Without this, if the
@@ -871,6 +871,76 @@ func accountHasSwitchCapacity(cache usage.Cache, cacheKey string, cfg *config.Co
 		cap5 = 90
 	}
 	return u.FiveHour == nil || u.FiveHour.Utilization < float64(cap5)
+}
+
+// sessionFlags are claude's session-selection arguments. The wrapper
+// substitutes its own `--resume <id>` on relaunch, so whatever the user
+// passed to pick a session must not survive alongside it.
+var sessionFlags = map[string]bool{
+	"--resume": true, "-r": true,
+	"--continue": true, "-c": true,
+	"--session-id":   true,
+	"--fork-session": true,
+}
+
+// sessionValueFlags are the session flags that may consume the next
+// token as their value (`--resume <id>`, `--session-id <uuid>`).
+var sessionValueFlags = map[string]bool{
+	"--resume": true, "-r": true,
+	"--session-id": true,
+}
+
+// claudeBoolFlags are claude flags known to never take a value, so a bare
+// token right after one of them is a positional prompt rather than the
+// flag's value. The list doesn't need to be exhaustive: an unknown
+// boolean flag just means a trailing prompt is kept as its "value" and
+// replayed into the resumed session — mildly redundant, never fatal.
+var claudeBoolFlags = map[string]bool{
+	"--dangerously-skip-permissions": true,
+	"--print":                        true,
+	"-p":                             true,
+	"--verbose":                      true,
+	"--ide":                          true,
+	"--strict-mcp-config":            true,
+}
+
+// relaunchFlags returns the user's original claude arguments minus
+// session selection and minus positional prompts, so a post-swap
+// relaunch keeps flags like --dangerously-skip-permissions or --model
+// while the wrapper controls which session is resumed. Positional
+// prompts are dropped because a resumable session (hadTurns) already
+// has them in its transcript; replaying one would duplicate the turn.
+func relaunchFlags(argv []string) []string {
+	out := []string{}
+	expectValue := false
+	for i := 0; i < len(argv); i++ {
+		tok := argv[i]
+		if tok == "--" {
+			break // everything after the separator is positional
+		}
+		isFlag := len(tok) > 1 && tok[0] == '-'
+		if !isFlag {
+			if expectValue {
+				out = append(out, tok)
+				expectValue = false
+			}
+			continue
+		}
+		expectValue = false
+		name, _, hasEq := strings.Cut(tok, "=")
+		if sessionFlags[name] {
+			if !hasEq && sessionValueFlags[name] &&
+				i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+				i++ // skip the flag's session-id value too
+			}
+			continue
+		}
+		out = append(out, tok)
+		if !hasEq && !claudeBoolFlags[name] {
+			expectValue = true
+		}
+	}
+	return out
 }
 
 func isResumeArgv(argv []string) bool {
