@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,6 +67,7 @@ type rateLimitHookInput struct {
 	Error                json.RawMessage `json:"error,omitempty"`
 	ErrorDetails         json.RawMessage `json:"error_details,omitempty"`
 	LastAssistantMessage json.RawMessage `json:"last_assistant_message,omitempty"`
+	HookEventName        string          `json:"hook_event_name,omitempty"`
 }
 
 type userPromptSubmitHookInput struct {
@@ -942,17 +944,37 @@ func RateLimit(stdin io.Reader) error {
 		return nil
 	}
 
-	// Extract the error text from either JSON shape. StopFailure sends
-	// error="rate_limit" with optional error_details and last_assistant_message;
-	// PostToolUseFailure has historically put the useful text in error itself.
-	// Shape A — string:  "error": "rate limit exceeded"
-	// Shape B — object:  "error": {"type": "rate_limit_error", "message": "..."}
+	kind, message := classifyFailure(in)
+	switch kind {
+	case signals.RateLimited:
+		return signals.Write(pid, signals.RateLimited, signals.RateLimitedPayload{
+			Timestamp: time.Now().UTC(),
+			Message:   message,
+		})
+	case signals.TurnFailed:
+		return signals.Write(pid, signals.TurnFailed, signals.TurnFailedPayload{
+			Timestamp: time.Now().UTC(),
+			Message:   message,
+		})
+	}
+	return nil
+}
+
+// classifyFailure decides which signal (if any) a failure event should
+// produce, and the message to attach.
+//
+// Extracts the error text from either JSON shape. StopFailure sends
+// error="rate_limit" with optional error_details and last_assistant_message;
+// PostToolUseFailure has historically put the useful text in error itself.
+// Shape A — string:  "error": "rate limit exceeded"
+// Shape B — object:  "error": {"type": "rate_limit_error", "message": "..."}
+func classifyFailure(in rateLimitHookInput) (signals.Name, string) {
 	errText := extractErrorText(in.Error)
 	detailText := extractErrorText(in.ErrorDetails)
 	assistantText := extractErrorText(in.LastAssistantMessage)
 	combined := strings.Join(nonEmpty(errText, detailText, assistantText), "\n")
 	if combined == "" {
-		return nil
+		return "", ""
 	}
 
 	lower := strings.ToLower(combined)
@@ -964,21 +986,76 @@ func RateLimit(stdin io.Reader) error {
 		strings.Contains(lower, "overloaded_error") ||
 		strings.Contains(lower, "too many requests") ||
 		strings.Contains(lower, "429")
-	if !isRateLimit {
-		return nil
+
+	if isRateLimit {
+		message := assistantText
+		if message == "" {
+			message = detailText
+		}
+		if message == "" {
+			message = errText
+		}
+		return signals.RateLimited, message
 	}
 
-	message := assistantText
-	if message == "" {
-		message = detailText
+	// Non-rate-limit API failure. Two extra guards beyond the rate-limit
+	// path, because the failure patterns here (timeout, connection, 5xx)
+	// are words that legitimately appear all over normal conversations:
+	//
+	//   - Only StopFailure qualifies: it means the whole turn died after
+	//     Claude Code exhausted its own retries. PostToolUseFailure
+	//     routes through here too, but a tool's stderr saying
+	//     "connection timed out" is the tool's problem, not the API's.
+	//   - Only the structured error fields are searched — never
+	//     last_assistant_message. Claude discussing a timeout bug must
+	//     not read as the API timing out.
+	structuredErr := strings.ToLower(strings.Join(nonEmpty(errText, detailText), "\n"))
+	if in.HookEventName == "StopFailure" && isAPIFailure(structuredErr) {
+		failMsg := detailText
+		if failMsg == "" {
+			failMsg = errText
+		}
+		return signals.TurnFailed, failMsg
 	}
-	if message == "" {
-		message = errText
+	return "", ""
+}
+
+// apiStatusCode matches 5xx status codes as standalone tokens so a
+// number embedded in unrelated text ("215000 tokens") never counts.
+var apiStatusCode = regexp.MustCompile(`\b(500|502|503|504|529)\b`)
+
+// isAPIFailure reports whether an error string from StopFailure looks
+// like a transport- or server-side API failure worth retrying, as
+// opposed to something the user did (abort) or a model refusal.
+func isAPIFailure(lower string) bool {
+	for _, pat := range []string{
+		"api_error",
+		"api error",
+		"internal server error",
+		"internal_server_error",
+		"service unavailable",
+		"bad gateway",
+		"gateway timeout",
+		"connection error",
+		"connection refused",
+		"connection reset",
+		"connection closed",
+		"econnrefused",
+		"econnreset",
+		"etimedout",
+		"enotfound",
+		"eai_again",
+		"timed out",
+		"timeout",
+		"network error",
+		"fetch failed",
+		"socket hang up",
+	} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
 	}
-	return signals.Write(pid, signals.RateLimited, signals.RateLimitedPayload{
-		Timestamp: time.Now().UTC(),
-		Message:   message,
-	})
+	return apiStatusCode.MatchString(lower)
 }
 
 // extractErrorText returns a plain string from a json.RawMessage that

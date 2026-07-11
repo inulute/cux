@@ -36,6 +36,7 @@ const (
 	Stopped         Name = "stopped"
 	RateLimited     Name = "rate-limited"
 	SwitchRequested Name = "switch-requested"
+	TurnFailed      Name = "turn-failed"
 )
 
 // Payloads. Match claude-revolver's shapes for hook-emitted signals so
@@ -64,6 +65,13 @@ type SwitchRequestedPayload struct {
 	Target        string    `json:"target,omitempty"`
 	ResumeMessage string    `json:"resumeMessage,omitempty"`
 	Timestamp     time.Time `json:"timestamp"`
+}
+
+// TurnFailedPayload marks a turn that died on a non-rate-limit API
+// error after Claude Code exhausted its own retries.
+type TurnFailedPayload struct {
+	Timestamp time.Time `json:"timestamp"`
+	Message   string    `json:"message,omitempty"`
 }
 
 // Dir returns the absolute signal directory. Callers that intend to
@@ -175,6 +183,16 @@ func DecodeSwitchRequested(b []byte) (SwitchRequestedPayload, error) {
 // DecodeRateLimited is a convenience for the wrapper.
 func DecodeRateLimited(b []byte) (RateLimitedPayload, error) {
 	var p RateLimitedPayload
+	if len(b) == 0 {
+		return p, nil
+	}
+	err := json.Unmarshal(b, &p)
+	return p, err
+}
+
+// DecodeTurnFailed is a convenience for the wrapper.
+func DecodeTurnFailed(b []byte) (TurnFailedPayload, error) {
+	var p TurnFailedPayload
 	if len(b) == 0 {
 		return p, nil
 	}

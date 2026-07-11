@@ -65,6 +65,7 @@ type Config struct {
 	AutoSwitchOnRateLimit bool              `json:"auto_switch_on_rate_limit"`
 	AutoResume            bool              `json:"auto_resume"`
 	AutoMessage           string            `json:"auto_message"`
+	RetryOnAPIError       bool              `json:"retry_on_api_error"`
 	Notify                bool              `json:"notify"`
 	PollIntervalSeconds   int               `json:"poll_interval_seconds"`
 	UpdateCheck           UpdateCheckConfig `json:"update_check"`
@@ -87,6 +88,7 @@ func Defaults() Config {
 		AutoSwitchOnRateLimit: true,
 		AutoResume:            true,
 		AutoMessage:           "Go continue.",
+		RetryOnAPIError:       true,
 		Notify:                true,
 		PollIntervalSeconds:   60,
 		UpdateCheck:           UpdateCheckConfig{Enabled: true, CadenceHours: 6},
@@ -204,6 +206,12 @@ func Set(c Config, key, value string) (Config, error) {
 		} else {
 			c.AutoMessage = value
 		}
+	case "retry_on_api_error":
+		b, err := parseBool(value)
+		if err != nil {
+			return c, err
+		}
+		c.RetryOnAPIError = b
 	case "notify":
 		b, err := parseBool(value)
 		if err != nil {
@@ -297,6 +305,11 @@ func Keys(c Config) []KeyInfo {
 			Key: "auto_message", Default: "Go continue.",
 			Description: `first user turn after auto-swap; set to "" for silent resume`,
 			Current:     c.AutoMessage,
+		},
+		{
+			Key: "retry_on_api_error", Default: "true",
+			Description: "relaunch and auto-continue after a non-rate-limit API failure (fibonacci backoff)",
+			Current:     strconv.FormatBool(c.RetryOnAPIError),
 		},
 		{
 			Key: "notify", Default: "true",
