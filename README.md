@@ -185,8 +185,8 @@ If the answer is `4729`, swap-and-resume is working.
              │     ask claude to exit cleanly       │
              │     swap creds (transactional)       │
              │     append history.Entry             │
-             │     relaunch claude --resume <id>    │
-             │       [optional auto_message]        │
+             │     relaunch claude <orig. flags>    │
+             │       --resume <id> [auto_message]   │
              └──────────────────────────────────────┘
 ```
 
