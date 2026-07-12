@@ -299,6 +299,7 @@ cux project create side --dir ~/code/side
 cux project assign side 2 3              # seat 2 is shared between both
 cux project list --refresh               # projects + live usage per seat
 cux project unassign side 3
+cux project stats clientwork --days 7    # tokens & time from Claude Code transcripts
 cux project remove side                  # unbind only; accounts untouched
 ```
 
@@ -316,6 +317,11 @@ rate-limit swaps, rotation, and `wait_for_reset`'s availability math.
   seat outranks the project boundary.
 - Removing an account (`cux remove`) also removes it from every
   project pool.
+
+`cux project stats` reads the session transcripts Claude Code already
+writes under `~/.claude/projects` — cux collects nothing itself — and
+sums sessions, active time, turns, and input/output/cache tokens for
+the project's directory tree, optionally windowed with `--days N`.
 
 ## Swap history
 

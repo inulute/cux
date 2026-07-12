@@ -37,6 +37,7 @@ import (
 	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/switcher"
+	"github.com/inulute/cux/internal/transcripts"
 	"github.com/inulute/cux/internal/updater"
 	"github.com/inulute/cux/internal/usage"
 	"github.com/inulute/cux/internal/wrapper"
@@ -219,6 +220,76 @@ func cmdList(args []string) {
 	}
 }
 
+func cmdProjectStats(args []string) {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	name := args[0]
+	fs := flag.NewFlagSet("project stats", flag.ExitOnError)
+	days := fs.Int("days", 0, "limit to the last N days (0 = all time)")
+	_ = fs.Parse(args[1:])
+
+	state, err := store.Load()
+	if err != nil {
+		fail(err)
+	}
+	proj, ok := state.Projects[name]
+	if !ok {
+		fail(fmt.Errorf("project %q not found — see `cux project list`", name))
+	}
+	var since time.Time
+	if *days > 0 {
+		since = time.Now().Add(-time.Duration(*days) * 24 * time.Hour)
+	}
+	st, err := transcripts.ForDir(proj.Dir, since)
+	if err != nil {
+		fail(err)
+	}
+
+	window := "all time"
+	if *days > 0 {
+		window = fmt.Sprintf("last %d day(s)", *days)
+	}
+	fmt.Printf("%s  %s  (%s)\n", proj.Name, proj.Dir, window)
+	if st.Sessions == 0 {
+		fmt.Println("  no transcript activity found")
+		return
+	}
+	fmt.Printf("  sessions      %d\n", st.Sessions)
+	fmt.Printf("  active time   %s\n", formatDuration(st.ActiveTime))
+	fmt.Printf("  turns         %d\n", st.Turns)
+	fmt.Printf("  tokens in     %s\n", formatTokens(st.InputTokens))
+	fmt.Printf("  tokens out    %s\n", formatTokens(st.OutputTokens))
+	fmt.Printf("  cache write   %s\n", formatTokens(st.CacheCreationTokens))
+	fmt.Printf("  cache read    %s\n", formatTokens(st.CacheReadTokens))
+	fmt.Printf("  first / last  %s → %s\n",
+		st.FirstAt.Local().Format("2006-01-02 15:04"),
+		st.LastAt.Local().Format("2006-01-02 15:04"))
+}
+
+func formatTokens(n int64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(n)/1e9)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1e3)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Minute)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %02dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
 func windowPct(w *usage.Window) string {
 	if w == nil {
 		return "—"
@@ -292,6 +363,8 @@ func cmdProject(args []string) {
 		cmdProjectMutate(rest, false)
 	case "list", "ls":
 		cmdProjectList(rest)
+	case "stats":
+		cmdProjectStats(rest)
 	case "remove", "rm":
 		cmdProjectRemove(rest)
 	default:
@@ -305,6 +378,7 @@ func printProjectUsage() {
 	fmt.Fprintln(os.Stderr, "       cux project assign <name> <slot|email|alias> [...]")
 	fmt.Fprintln(os.Stderr, "       cux project unassign <name> <slot|email|alias> [...]")
 	fmt.Fprintln(os.Stderr, "       cux project list [--refresh]")
+	fmt.Fprintln(os.Stderr, "       cux project stats <name> [--days N]      tokens & time from Claude Code transcripts")
 	fmt.Fprintln(os.Stderr, "       cux project remove <name>")
 }
 
