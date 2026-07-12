@@ -625,7 +625,7 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 	}
 	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
 	for _, a := range state.Accounts {
-		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
+		candidates = append(candidates, strategy.Candidate{Email: a.Email, Slot: a.Slot, CacheKey: a.CacheKey()})
 	}
 	current := strategy.Candidate{Email: email, CacheKey: cacheKey}
 	if _, ok := cache[cacheKey]; !ok {
@@ -643,7 +643,7 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 	return &pending{
 		trigger:        history.TriggerThreshold,
 		reason:         reason,
-		explicitTarget: pick.Email,
+		explicitTarget: pick.Identifier(),
 		fromUsage:      u,
 	}
 }
@@ -964,7 +964,7 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 	}
 	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
 	for _, a := range state.Accounts {
-		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
+		candidates = append(candidates, strategy.Candidate{Email: a.Email, Slot: a.Slot, CacheKey: a.CacheKey()})
 	}
 	// In manual mode strategy.PickNext returns ok=false, but a manual
 	// trigger with no explicit target still means "rotate" — fall
@@ -975,7 +975,7 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 	}
 	if pick, ok := strategy.PickNext(kind, cfg.Strategy.Order, candidates,
 		strategy.Candidate{Email: current, CacheKey: currentCacheKey}, cache, cfg.Thresholds); ok {
-		return pick.Email, nil
+		return pick.Identifier(), nil
 	}
 	return rotateFallback(state, cache, cfg)
 }

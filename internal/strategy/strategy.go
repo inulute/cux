@@ -26,6 +26,7 @@ package strategy
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/inulute/cux/internal/usage"
@@ -72,6 +73,7 @@ func ParseKind(s string) Kind {
 // converts its store.Account list into Candidates before calling.
 type Candidate struct {
 	Email    string
+	Slot     int    // stable seat identifier; 0 when unknown (e.g. the live account)
 	CacheKey string // usage-cache key; falls back to Email when empty
 }
 
@@ -85,11 +87,34 @@ func (c Candidate) cacheKey() string {
 	return c.Email
 }
 
+// sameSeat reports whether two candidates are the same seat. Emails are
+// not unique — the same address can hold a personal subscription and
+// one seat per organization — so compare by cache key (one per seat)
+// whenever both sides carry one, and only fall back to email for
+// legacy candidates that predate seat keys.
+func sameSeat(a, b Candidate) bool {
+	if a.CacheKey != "" && b.CacheKey != "" {
+		return a.CacheKey == b.CacheKey
+	}
+	return a.Email == b.Email
+}
+
 // Pick is the strategy's answer. Reason is a short human-readable
 // label included in the swap-history log.
 type Pick struct {
 	Email  string
+	Slot   int // seat identifier; 0 when the pick predates slot tracking
 	Reason string
+}
+
+// Identifier returns the string to hand to switcher.SwitchTo. Slots are
+// unambiguous (emails are not, see sameSeat), so prefer the slot number
+// whenever the pick carries one.
+func (p Pick) Identifier() string {
+	if p.Slot > 0 {
+		return strconv.Itoa(p.Slot)
+	}
+	return p.Email
 }
 
 // PickNext chooses an account to swap to.
@@ -166,7 +191,7 @@ func ShouldRebalance(
 		var bestUtil float64 = -1
 		for i := range accounts {
 			c := &accounts[i]
-			if c.Email == current.Email {
+			if sameSeat(*c, current) {
 				continue
 			}
 			if !isAvailable(cache, c.cacheKey()) {
@@ -186,10 +211,10 @@ func ShouldRebalance(
 		priority = best
 	}
 
-	if priority == nil || priority.Email == current.Email {
+	if priority == nil || sameSeat(*priority, current) {
 		return Pick{}, false
 	}
-	return Pick{Email: priority.Email, Reason: "rebalance to priority account"}, true
+	return Pick{Email: priority.Email, Slot: priority.Slot, Reason: "rebalance to priority account"}, true
 }
 
 // --- internals -----------------------------------------------------------
@@ -220,7 +245,7 @@ func pickDrain(
 			continue
 		}
 		if fiveHourUtil(cache, c.cacheKey()) < float64(cap5) && sevenDayUtil(cache, c.cacheKey()) < float64(cap7) {
-			return Pick{Email: c.Email, Reason: "drain: 7d under cap"}, true
+			return Pick{Email: c.Email, Slot: c.Slot, Reason: "drain: 7d under cap"}, true
 		}
 	}
 
@@ -232,7 +257,7 @@ func pickDrain(
 			continue
 		}
 		if fiveHourUtil(cache, c.cacheKey()) < float64(cap5) && sevenDayUtil(cache, c.cacheKey()) < 100 {
-			return Pick{Email: c.Email, Reason: "drain: 5h has room"}, true
+			return Pick{Email: c.Email, Slot: c.Slot, Reason: "drain: 5h has room"}, true
 		}
 	}
 
@@ -242,7 +267,7 @@ func pickDrain(
 func pickBalanced(accounts []Candidate, current Candidate, cache usage.Cache, thresholds usage.Thresholds) (Pick, bool) {
 	candidates := make([]Candidate, 0, len(accounts))
 	for _, c := range accounts {
-		if c.Email == current.Email {
+		if sameSeat(c, current) {
 			continue
 		}
 		if !isAvailable(cache, c.cacheKey()) {
@@ -266,7 +291,7 @@ func pickBalanced(accounts []Candidate, current Candidate, cache usage.Cache, th
 		}
 		return fiveHourUtil(cache, candidates[i].cacheKey()) < fiveHourUtil(cache, candidates[j].cacheKey())
 	})
-	return Pick{Email: candidates[0].Email, Reason: "balanced: lowest 7d"}, true
+	return Pick{Email: candidates[0].Email, Slot: candidates[0].Slot, Reason: "balanced: lowest 7d"}, true
 }
 
 // orderedCandidates returns the drain-mode evaluation order: the
@@ -277,7 +302,7 @@ func orderedCandidates(order []string, accounts []Candidate, current Candidate, 
 	if len(order) == 0 {
 		out := make([]Candidate, 0, len(accounts))
 		for _, c := range accounts {
-			if c.Email == current.Email {
+			if sameSeat(c, current) {
 				continue
 			}
 			out = append(out, c)
@@ -289,11 +314,13 @@ func orderedCandidates(order []string, accounts []Candidate, current Candidate, 
 	}
 	out := make([]Candidate, 0, len(order))
 	for _, email := range order {
-		if email == current.Email {
-			continue
-		}
-		if c := findByEmail(accounts, email); c != nil {
-			out = append(out, *c)
+		// An email in the priority list may match several seats (personal
+		// + org). Keep them all, in list order, minus the current seat.
+		for i := range accounts {
+			if accounts[i].Email != email || sameSeat(accounts[i], current) {
+				continue
+			}
+			out = append(out, accounts[i])
 		}
 	}
 	return out

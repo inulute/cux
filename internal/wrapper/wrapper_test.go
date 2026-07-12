@@ -124,8 +124,10 @@ func TestEvaluatePrelaunchHardLimitSwapUsesRateLimitTrigger(t *testing.T) {
 	if p.trigger != history.TriggerRateLimit {
 		t.Fatalf("trigger = %q, want %q", p.trigger, history.TriggerRateLimit)
 	}
-	if p.explicitTarget != "b@x.test" {
-		t.Fatalf("target = %q, want b@x.test", p.explicitTarget)
+	// Picks now carry the seat's slot number — unambiguous where emails
+	// are not (the same email can hold personal + org seats).
+	if p.explicitTarget != "2" {
+		t.Fatalf("target = %q, want slot \"2\" (b@x.test)", p.explicitTarget)
 	}
 	if !strings.Contains(p.reason, "before launch") {
 		t.Fatalf("reason should include before launch, got %q", p.reason)
