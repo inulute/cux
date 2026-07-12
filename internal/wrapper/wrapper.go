@@ -68,6 +68,7 @@ type pending struct {
 	reason         string
 	explicitTarget string
 	resumeMessage  string
+	retryOnly      bool               // relaunch the same account; no swap
 	fromUsage      usage.AccountUsage // best-effort snapshot
 }
 
@@ -124,12 +125,45 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	}
 
 	var resumeRetryPending bool
+	// apiRetries counts consecutive same-account relaunches after API
+	// failures; it scales the fibonacci backoff and resets whenever a
+	// turn completes or claude exits for any other reason. There is no
+	// upper bound by design: an unattended session should outlast even
+	// a multi-hour outage, and a human can always Ctrl+C.
+	var apiRetries int
 
 	for {
 		exitCode, sessionID, hadTurns, p, err := launch(claudeBin, currentArgv, pid, &cfg, lastManualTarget, w)
 		if err != nil {
 			return exitCode, err
 		}
+
+		if p != nil && p.retryOnly {
+			if hadTurns {
+				apiRetries = 0
+			}
+			delay := fibonacciDelay(apiRetries)
+			apiRetries++
+			fmt.Fprintf(w, "cux: API failure after claude's own retries (%s) — auto-continuing in %s (attempt %d)…\n",
+				snippet(p.reason), shortDuration(delay), apiRetries)
+			time.Sleep(delay)
+			if sessionID != "" && cfg.AutoResume {
+				cwd, _ := os.Getwd()
+				waitForTranscript(cwd, sessionID, transcriptWaitTimeout)
+				// Preserve the user's original flags (e.g.
+				// --dangerously-skip-permissions, --model) on the retry
+				// relaunch, same as the swap path below (#11).
+				currentArgv = append(relaunchFlags(argv), "--resume", sessionID)
+				if cfg.AutoMessage != "" {
+					currentArgv = append(currentArgv, cfg.AutoMessage)
+				}
+				resumeRetryPending = true
+			} else {
+				currentArgv = argv
+			}
+			continue
+		}
+		apiRetries = 0
 
 		if p == nil && resumeRetryPending && isResumeArgv(currentArgv) && exitCode != 0 {
 			resumeRetryPending = false
@@ -423,6 +457,31 @@ func step(
 			}
 		} else {
 			fmt.Fprintln(w, "cux: rate-limit hook fired but auto_switch_on_rate_limit is off; staying on current account")
+		}
+	}
+
+	// 2b. Non-rate-limit API failure ⇒ relaunch the same account after
+	//     a backoff. The turn is already dead (StopFailure fires only
+	//     after Claude Code exhausted its own retries), so like the
+	//     rate-limit case there may be no later Stop event to wait for.
+	if b, ok, _ := signals.Read(wrapperPID, signals.TurnFailed); ok {
+		_ = signals.Consume(wrapperPID, signals.TurnFailed)
+		if cfg.RetryOnAPIError {
+			hasSwap := false
+			mu.Lock()
+			if *swap == nil {
+				msg := "API error after retries"
+				if p, err := signals.DecodeTurnFailed(b); err == nil && p.Message != "" {
+					msg = p.Message
+				}
+				*swap = &pending{retryOnly: true, reason: msg}
+			}
+			hasSwap = *swap != nil
+			mu.Unlock()
+			if hasSwap && stopRequested.CompareAndSwap(false, true) {
+				go gracefulExit(cmd, w)
+				return
+			}
 		}
 	}
 
@@ -1035,6 +1094,36 @@ func relaunchFlags(argv []string) []string {
 		}
 	}
 	return out
+}
+
+const (
+	retryBaseDelay = 10 * time.Second
+	retryMaxDelay  = 2 * time.Minute
+)
+
+// fibonacciDelay returns the wait before auto-continue attempt n
+// (0-based): 10s, 10s, 20s, 30s, 50s, 80s, then capped at 2 minutes.
+// The clock starts only after StopFailure fires — Claude Code has
+// already burned through its own internal retries by then — so there
+// is no reason to start slower.
+func fibonacciDelay(n int) time.Duration {
+	a, b := 1, 1
+	for i := 0; i < n; i++ {
+		a, b = b, a+b
+		if time.Duration(a)*retryBaseDelay >= retryMaxDelay {
+			return retryMaxDelay
+		}
+	}
+	return time.Duration(a) * retryBaseDelay
+}
+
+// snippet trims an error message down to a single displayable line.
+func snippet(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > 120 {
+		return s[:117] + "..."
+	}
+	return s
 }
 
 func isResumeArgv(argv []string) bool {

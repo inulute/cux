@@ -261,6 +261,7 @@ cux config set update_check.enabled true            # opt in to update checks
 | `auto_resume`                 | `true`         | Pass `--resume <id>` to the relaunched claude |
 | `auto_message`                | `Go continue.` | First user turn after auto-swap; `""` = silent |
 | `wait_for_reset`              | `true`         | When every account is exhausted, sleep until the earliest reset and resume |
+| `retry_on_api_error`          | `true`         | Relaunch and auto-continue after a non-rate-limit API failure (fibonacci backoff, capped at 2 min) |
 | `update_check.enabled`        | `false`        | Check GitHub for newer cux releases on startup |
 | `update_check.cadence_hours`  | `6`            | Minimum hours between update checks (cached locally) |
 

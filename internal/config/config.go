@@ -66,6 +66,7 @@ type Config struct {
 	AutoResume            bool              `json:"auto_resume"`
 	AutoMessage           string            `json:"auto_message"`
 	WaitForReset          bool              `json:"wait_for_reset"`
+	RetryOnAPIError       bool              `json:"retry_on_api_error"`
 	Notify                bool              `json:"notify"`
 	PollIntervalSeconds   int               `json:"poll_interval_seconds"`
 	UpdateCheck           UpdateCheckConfig `json:"update_check"`
@@ -89,6 +90,7 @@ func Defaults() Config {
 		AutoResume:            true,
 		AutoMessage:           "Go continue.",
 		WaitForReset:          true,
+		RetryOnAPIError:       true,
 		Notify:                true,
 		PollIntervalSeconds:   60,
 		UpdateCheck:           UpdateCheckConfig{Enabled: true, CadenceHours: 6},
@@ -212,6 +214,12 @@ func Set(c Config, key, value string) (Config, error) {
 			return c, err
 		}
 		c.WaitForReset = b
+	case "retry_on_api_error":
+		b, err := parseBool(value)
+		if err != nil {
+			return c, err
+		}
+		c.RetryOnAPIError = b
 	case "notify":
 		b, err := parseBool(value)
 		if err != nil {
@@ -310,6 +318,11 @@ func Keys(c Config) []KeyInfo {
 			Key: "wait_for_reset", Default: "true",
 			Description: "when every account is exhausted, sleep until the earliest reset and resume",
 			Current:     strconv.FormatBool(c.WaitForReset),
+		},
+		{
+			Key: "retry_on_api_error", Default: "true",
+			Description: "relaunch and auto-continue after a non-rate-limit API failure (fibonacci backoff)",
+			Current:     strconv.FormatBool(c.RetryOnAPIError),
 		},
 		{
 			Key: "notify", Default: "true",
