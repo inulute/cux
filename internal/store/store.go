@@ -32,10 +32,17 @@ type Account struct {
 	LastUsed time.Time `json:"lastUsed,omitempty"`
 }
 
-// CacheKey returns the usage-cache key for this account. When OrgUUID is
-// set it is used as the key so two accounts sharing the same email get
-// independent cache entries. Falls back to email for legacy slots.
+// CacheKey returns the usage-cache key for this account. Usage limits are
+// tracked per seat — one (account, organization) pair — so the key combines
+// both UUIDs: two accounts sharing an email but in different orgs get
+// distinct entries, and so do different accounts inside the same org
+// (keying on OrgUUID alone made those collapse into one entry that every
+// refresh overwrote). Falls back to OrgUUID, then email, for legacy slots
+// recorded before these fields existed.
 func (a Account) CacheKey() string {
+	if a.UUID != "" && a.OrgUUID != "" {
+		return a.UUID + "|" + a.OrgUUID
+	}
 	if a.OrgUUID != "" {
 		return a.OrgUUID
 	}

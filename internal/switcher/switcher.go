@@ -277,14 +277,18 @@ func CurrentLiveEmail() (string, error) {
 }
 
 // CurrentLiveCacheKey returns the usage-cache key for the currently active
-// account. When the account has an organizationUuid that is used; otherwise
-// the email is returned for backward compatibility.
+// account, derived the same way store.Account.CacheKey does so live and
+// managed lookups always agree.
 func CurrentLiveCacheKey() (string, error) {
 	_, parsed, err := claudecfg.ReadOAuthBlock()
 	if err != nil {
 		return "", err
 	}
-	acct := store.Account{Email: parsed.EmailAddress, OrgUUID: parsed.OrganizationUUID}
+	acct := store.Account{
+		Email:   parsed.EmailAddress,
+		UUID:    parsed.AccountUUID,
+		OrgUUID: parsed.OrganizationUUID,
+	}
 	return acct.CacheKey(), nil
 }
 
