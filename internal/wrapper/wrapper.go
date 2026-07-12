@@ -147,13 +147,16 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			fmt.Fprintf(w, "cux: API failure after claude's own retries (%s) — auto-continuing in %s (attempt %d)…\n",
 				snippet(p.reason), shortDuration(delay), apiRetries)
 			time.Sleep(delay)
-			if sessionID != "" && cfg.AutoResume {
+			// A StopFailure implies a session existed and a turn was
+			// attempted, so treat a hook-reported session as resumable
+			// even without a completed turn.
+			if resumeSID, ok := resumableSession(sessionID, currentArgv, cfg.AutoResume, sessionID != ""); ok {
 				cwd, _ := os.Getwd()
-				waitForTranscript(cwd, sessionID, transcriptWaitTimeout)
+				waitForTranscript(cwd, resumeSID, transcriptWaitTimeout)
 				// Preserve the user's original flags (e.g.
 				// --dangerously-skip-permissions, --model) on the retry
 				// relaunch, same as the swap path below (#11).
-				currentArgv = append(relaunchFlags(argv), "--resume", sessionID)
+				currentArgv = append(relaunchFlags(argv), "--resume", resumeSID)
 				if cfg.AutoMessage != "" {
 					currentArgv = append(currentArgv, cfg.AutoMessage)
 				}
@@ -255,11 +258,8 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			setManualSwitchState("")
 		}
 
-		canResume := sessionID != "" && cfg.AutoResume && hadTurns
+		resumeSID, canResume := resumableSession(sessionID, currentArgv, cfg.AutoResume, hadTurns)
 		if canResume {
-			// Only resume if at least one turn completed — an empty/just-started
-			// session has no transcript content and claude rejects --resume for it.
-			// This applies to all trigger types including manual /switch.
 			switch p.trigger {
 			case history.TriggerRateLimit:
 				fmt.Fprintf(w, "cux: rate limit on %s → swapped to %s, resuming…\n", from.Email, to.Email)
@@ -268,8 +268,8 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			default:
 				fmt.Fprintf(w, "cux: %s → %s (%s), resuming…\n", from.Email, to.Email, p.reason)
 			}
-			waitForTranscript(cwd, sessionID, transcriptWaitTimeout)
-			currentArgv = append(relaunchFlags(argv), "--resume", sessionID)
+			waitForTranscript(cwd, resumeSID, transcriptWaitTimeout)
+			currentArgv = append(relaunchFlags(argv), "--resume", resumeSID)
 			if p.resumeMessage != "" {
 				// Write a one-shot flag so the UserPromptSubmit hook skips the
 				// threshold check for this replayed prompt. Without this, if the
@@ -1124,6 +1124,39 @@ func snippet(s string) string {
 		return s[:117] + "..."
 	}
 	return s
+}
+
+// resumableSession decides whether the wrapper can relaunch into an
+// existing session after a swap, and which session id to use.
+// sessionID is what the SessionStart hook reported for the run that
+// just exited; argv is that run's launch argv.
+//
+// A completed turn (hadTurns) is the usual proof a transcript exists —
+// an empty, just-started session has nothing to resume and claude
+// rejects --resume for it. But a run that was itself resuming an
+// earlier session has a transcript by definition, even when it died
+// before completing a new turn (e.g. a swap landing on an account that
+// rate-limits during the very first replayed prompt). Falling back to
+// the original argv in that case is what stranded unattended runs: a
+// bare `--resume` in it opens the interactive session picker, which
+// nobody is around to answer at 3am.
+func resumableSession(sessionID string, argv []string, autoResume, hadTurns bool) (string, bool) {
+	if !autoResume {
+		return "", false
+	}
+	sid := sessionID
+	if sid == "" {
+		if v := resumeSessionID(argv); v != "" && !strings.HasPrefix(v, "-") {
+			sid = v
+		}
+	}
+	if sid == "" {
+		return "", false
+	}
+	if hadTurns || isResumeArgv(argv) {
+		return sid, true
+	}
+	return "", false
 }
 
 func isResumeArgv(argv []string) bool {
