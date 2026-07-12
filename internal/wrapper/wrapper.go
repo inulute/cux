@@ -623,8 +623,9 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 	if err != nil {
 		return nil
 	}
-	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
-	for _, a := range state.Accounts {
+	pool := state.PoolForCwd()
+	candidates := make([]strategy.Candidate, 0, len(pool))
+	for _, a := range pool {
 		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
 	}
 	current := strategy.Candidate{Email: email, CacheKey: cacheKey}
@@ -733,7 +734,7 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 			return "", err
 		}
 		cache, _ := usage.LoadCache()
-		readyAt, email, ok := nextAvailability(state.Accounts, cache, cfg.Thresholds, time.Now())
+		readyAt, email, ok := nextAvailability(state.PoolForCwd(), cache, cfg.Thresholds, time.Now())
 		if !ok {
 			return "", errors.New("all accounts exhausted and no reset time is known")
 		}
@@ -948,8 +949,13 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 	if err != nil {
 		return "", err
 	}
-	if len(state.Accounts) < 2 {
-		return "", errors.New("only one account is managed; nothing to rotate to")
+	// Rotation draws from the project pool for this directory (the full
+	// account list when no project claims it). Explicit targets bypass
+	// this function entirely — a human naming a seat outranks the
+	// project boundary.
+	pool := state.PoolForCwd()
+	if len(pool) < 2 {
+		return "", errors.New("only one account is available here; nothing to rotate to")
 	}
 	current, _ := switcher.CurrentLiveEmail()
 	currentCacheKey, _ := switcher.CurrentLiveCacheKey()
@@ -962,8 +968,8 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 	if cache == nil {
 		cache = usage.Cache{}
 	}
-	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
-	for _, a := range state.Accounts {
+	candidates := make([]strategy.Candidate, 0, len(pool))
+	for _, a := range pool {
 		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
 	}
 	// In manual mode strategy.PickNext returns ok=false, but a manual
@@ -984,8 +990,9 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 // that are known to have no capacity. Missing usage is treated as usable so
 // fresh installs can rotate before the first refresh completes.
 func rotateFallback(state *store.State, cache usage.Cache, cfg *config.Config) (string, error) {
+	pool := state.PoolForCwd()
 	for _, slot := range rotationSlots(state) {
-		acct, ok := state.Accounts[slot]
+		acct, ok := pool[slot]
 		if !ok || slot == state.ActiveSlot {
 			continue
 		}

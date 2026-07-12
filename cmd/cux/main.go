@@ -64,6 +64,7 @@ const (
 // to the real claude binary via the wrapper.
 var knownSubcommands = map[string]bool{
 	"add":             true,
+	"project":         true,
 	"alias":           true,
 	"list":            true,
 	"ls":              true,
@@ -117,6 +118,8 @@ func main() {
 		cmdRemove(rest)
 	case "alias":
 		cmdAlias(rest)
+	case "project":
+		cmdProject(rest)
 	case "status":
 		cmdStatus(rest)
 	case "support":
@@ -272,6 +275,188 @@ func cmdRemove(args []string) {
 //
 //	cux alias <slot|email|alias> <new-alias>   — set alias
 //	cux alias <slot|email|alias> --clear       — remove alias
+// --- Project subcommands ---------------------------------------------------
+
+func cmdProject(args []string) {
+	if len(args) == 0 {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "create":
+		cmdProjectCreate(rest)
+	case "assign":
+		cmdProjectMutate(rest, true)
+	case "unassign":
+		cmdProjectMutate(rest, false)
+	case "list", "ls":
+		cmdProjectList(rest)
+	case "remove", "rm":
+		cmdProjectRemove(rest)
+	default:
+		printProjectUsage()
+		os.Exit(2)
+	}
+}
+
+func printProjectUsage() {
+	fmt.Fprintln(os.Stderr, "usage: cux project create <name> [--dir PATH]     bind a directory (default: cwd)")
+	fmt.Fprintln(os.Stderr, "       cux project assign <name> <slot|email|alias> [...]")
+	fmt.Fprintln(os.Stderr, "       cux project unassign <name> <slot|email|alias> [...]")
+	fmt.Fprintln(os.Stderr, "       cux project list [--refresh]")
+	fmt.Fprintln(os.Stderr, "       cux project remove <name>")
+}
+
+func withState(fn func(*store.State) error) {
+	lk, err := lockfile.Acquire(paths.LockFile(), 10*time.Second)
+	if err != nil {
+		fail(err)
+	}
+	defer lk.Unlock() //nolint:errcheck
+	state, err := store.Load()
+	if err != nil {
+		fail(err)
+	}
+	if err := fn(state); err != nil {
+		fail(err)
+	}
+	if err := state.Save(); err != nil {
+		fail(err)
+	}
+}
+
+func cmdProjectCreate(args []string) {
+	// Name first, flags after: `cux project create iht --dir ~/code/iht`.
+	// Go's flag parser stops at the first positional, so split by hand.
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	name := args[0]
+	fs := flag.NewFlagSet("project create", flag.ExitOnError)
+	dir := fs.String("dir", "", "directory the project claims (default: current directory)")
+	_ = fs.Parse(args[1:])
+	if fs.NArg() != 0 {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	d := *dir
+	if d == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fail(err)
+		}
+		d = cwd
+	}
+	abs, err := filepath.Abs(d)
+	if err != nil {
+		fail(err)
+	}
+	withState(func(state *store.State) error {
+		return state.AddProject(name, abs)
+	})
+	fmt.Printf("Created project %s → %s. Assign seats with `cux project assign %s <slot|alias>`.\n", name, abs, name)
+}
+
+func cmdProjectMutate(args []string, assign bool) {
+	if len(args) < 2 {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	name, seats := args[0], args[1:]
+	withState(func(state *store.State) error {
+		for _, seat := range seats {
+			acct, err := state.Resolve(seat)
+			if err != nil {
+				return err
+			}
+			if assign {
+				if err := state.AssignProjectSlot(name, acct.Slot); err != nil {
+					return err
+				}
+				fmt.Printf("Assigned slot %d (%s) to %s.\n", acct.Slot, acct.Email, name)
+			} else {
+				if err := state.UnassignProjectSlot(name, acct.Slot); err != nil {
+					return err
+				}
+				fmt.Printf("Unassigned slot %d (%s) from %s.\n", acct.Slot, acct.Email, name)
+			}
+		}
+		return nil
+	})
+}
+
+func cmdProjectRemove(args []string) {
+	if len(args) != 1 {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	withState(func(state *store.State) error {
+		return state.RemoveProject(args[0])
+	})
+	fmt.Printf("Removed project %s. Accounts are untouched.\n", args[0])
+}
+
+func cmdProjectList(args []string) {
+	fs := flag.NewFlagSet("project list", flag.ExitOnError)
+	refresh := fs.Bool("refresh", false, "fetch fresh usage before printing")
+	_ = fs.Parse(args)
+
+	if *refresh {
+		if _, errs := monitor.RefreshAll(); len(errs) > 0 {
+			for _, e := range errs {
+				fmt.Fprintf(os.Stderr, "warning: %v\n", e)
+			}
+		}
+	}
+	state, err := store.Load()
+	if err != nil {
+		fail(err)
+	}
+	if len(state.Projects) == 0 {
+		fmt.Println("No projects defined. Create one with `cux project create <name> [--dir PATH]`.")
+		return
+	}
+	cache, _ := usage.LoadCache()
+
+	names := make([]string, 0, len(state.Projects))
+	for n := range state.Projects {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		p := state.Projects[n]
+		fmt.Printf("%s  %s\n", p.Name, p.Dir)
+		if len(p.Slots) == 0 {
+			fmt.Println("  (no seats assigned — full pool applies here)")
+			continue
+		}
+		for _, slot := range p.Slots {
+			acct, ok := state.Accounts[slot]
+			if !ok {
+				continue
+			}
+			label := acct.Email
+			if acct.Alias != "" {
+				label = acct.Alias + " · " + acct.Email
+			}
+			line := fmt.Sprintf("  [%02d] %-42s", slot, label)
+			if cache != nil {
+				if u, ok := cache[acct.CacheKey()]; ok {
+					line += "  5h:" + windowPct(u.FiveHour) + "  7d:" + windowPct(u.SevenDay)
+					if u.TokenExpired {
+						line += "  (needs login)"
+					}
+				} else {
+					line += "  (no usage data — try --refresh)"
+				}
+			}
+			fmt.Println(line)
+		}
+	}
+}
+
 func cmdAlias(args []string) {
 	fs := flag.NewFlagSet("alias", flag.ExitOnError)
 	clear := fs.Bool("clear", false, "remove the alias from this account")
@@ -1695,6 +1880,11 @@ USAGE
   cux add [--slot N] [--alias NAME] [--no-alias]  add the currently logged-in account
   cux list                                list managed accounts
   cux alias <slot|email|alias> <name>     set a short alias (e.g. work, personal)
+  cux project create <name> [--dir PATH]  scope a directory to its own seat pool
+  cux project assign <name> <seat> [...]  add seats to a project (seats can be shared)
+  cux project unassign <name> <seat> [...]
+  cux project list [--refresh]            projects + live usage of their seats
+  cux project remove <name>               unbind a directory (accounts untouched)
   cux alias <slot|email|alias> --clear    remove alias
   cux switch <slot|email|alias>           swap the active account (manual; requires
                                           restart unless run from /switch inside)

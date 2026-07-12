@@ -51,13 +51,14 @@ func (a Account) CacheKey() string {
 
 // State is the on-disk shape of state.json.
 type State struct {
-	Version          int             `json:"version"`
-	ActiveSlot       int             `json:"activeSlot"`
-	LastUpdated      time.Time       `json:"lastUpdated"`
-	Sequence         []int           `json:"sequence"` // user-visible ordering for `cux switch` rotation
-	Accounts         map[int]Account `json:"accounts"`
-	ManualSwitchEmail string         `json:"manualSwitchEmail,omitempty"`
-	ManualSwitchAt    time.Time      `json:"manualSwitchAt,omitempty"`
+	Version           int                `json:"version"`
+	ActiveSlot        int                `json:"activeSlot"`
+	LastUpdated       time.Time          `json:"lastUpdated"`
+	Sequence          []int              `json:"sequence"` // user-visible ordering for `cux switch` rotation
+	Accounts          map[int]Account    `json:"accounts"`
+	Projects          map[string]Project `json:"projects,omitempty"` // per-directory account pools
+	ManualSwitchEmail string             `json:"manualSwitchEmail,omitempty"`
+	ManualSwitchAt    time.Time          `json:"manualSwitchAt,omitempty"`
 }
 
 var (
@@ -116,6 +117,7 @@ func Load() (*State, error) {
 		LastUpdated       time.Time          `json:"lastUpdated"`
 		Sequence          []int              `json:"sequence"`
 		Accounts          map[string]Account `json:"accounts"`
+		Projects          map[string]Project `json:"projects,omitempty"`
 		ManualSwitchEmail string             `json:"manualSwitchEmail,omitempty"`
 		ManualSwitchAt    time.Time          `json:"manualSwitchAt,omitempty"`
 	}
@@ -129,6 +131,7 @@ func Load() (*State, error) {
 		LastUpdated:       raw.LastUpdated,
 		Sequence:          raw.Sequence,
 		Accounts:          make(map[int]Account, len(raw.Accounts)),
+		Projects:          raw.Projects,
 		ManualSwitchEmail: raw.ManualSwitchEmail,
 		ManualSwitchAt:    raw.ManualSwitchAt,
 	}
@@ -166,9 +169,10 @@ func (s *State) Save() error {
 		LastUpdated       time.Time          `json:"lastUpdated"`
 		Sequence          []int              `json:"sequence"`
 		Accounts          map[string]Account `json:"accounts"`
+		Projects          map[string]Project `json:"projects,omitempty"`
 		ManualSwitchEmail string             `json:"manualSwitchEmail,omitempty"`
 		ManualSwitchAt    time.Time          `json:"manualSwitchAt,omitempty"`
-	}{s.Version, s.ActiveSlot, s.LastUpdated, s.Sequence, accounts, s.ManualSwitchEmail, s.ManualSwitchAt}
+	}{s.Version, s.ActiveSlot, s.LastUpdated, s.Sequence, accounts, s.Projects, s.ManualSwitchEmail, s.ManualSwitchAt}
 
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
@@ -316,6 +320,10 @@ func (s *State) Remove(slot int) error {
 		return fmt.Errorf("%w: slot %d", ErrAccountMissing, slot)
 	}
 	delete(s.Accounts, slot)
+	// A removed account must not linger in any project pool.
+	for name := range s.Projects {
+		_ = s.UnassignProjectSlot(name, slot)
+	}
 	out := s.Sequence[:0]
 	for _, n := range s.Sequence {
 		if n != slot {

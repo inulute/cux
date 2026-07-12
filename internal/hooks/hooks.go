@@ -207,8 +207,9 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
-	for _, a := range state.Accounts {
+	pool := state.PoolForCwd()
+	candidates := make([]strategy.Candidate, 0, len(pool))
+	for _, a := range pool {
 		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
 	}
 	current := strategy.Candidate{Email: email, CacheKey: cacheKey}
@@ -434,8 +435,9 @@ func promptSwitchHasTarget() (bool, string) {
 		cache = usage.Cache{}
 	}
 	current, _ := switcher.CurrentLiveEmail()
-	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
-	for _, a := range state.Accounts {
+	pool := state.PoolForCwd()
+	candidates := make([]strategy.Candidate, 0, len(pool))
+	for _, a := range pool {
 		candidates = append(candidates, strategy.Candidate{Email: a.Email})
 	}
 	if _, ok := strategy.PickNext(cfg.ResolvedStrategy(), cfg.Strategy.Order, candidates,
@@ -443,7 +445,10 @@ func promptSwitchHasTarget() (bool, string) {
 		return true, ""
 	}
 	for _, slot := range state.SortedSlots() {
-		acct := state.Accounts[slot]
+		acct, inPool := pool[slot]
+		if !inPool {
+			continue
+		}
 		if slot != state.ActiveSlot && accountHasPromptCapacity(cache, acct, cfg.Thresholds) {
 			return true, ""
 		}
