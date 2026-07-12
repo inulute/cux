@@ -65,6 +65,7 @@ type Config struct {
 	AutoSwitchOnRateLimit bool              `json:"auto_switch_on_rate_limit"`
 	AutoResume            bool              `json:"auto_resume"`
 	AutoMessage           string            `json:"auto_message"`
+	WaitForReset          bool              `json:"wait_for_reset"`
 	Notify                bool              `json:"notify"`
 	PollIntervalSeconds   int               `json:"poll_interval_seconds"`
 	UpdateCheck           UpdateCheckConfig `json:"update_check"`
@@ -87,6 +88,7 @@ func Defaults() Config {
 		AutoSwitchOnRateLimit: true,
 		AutoResume:            true,
 		AutoMessage:           "Go continue.",
+		WaitForReset:          true,
 		Notify:                true,
 		PollIntervalSeconds:   60,
 		UpdateCheck:           UpdateCheckConfig{Enabled: true, CadenceHours: 6},
@@ -204,6 +206,12 @@ func Set(c Config, key, value string) (Config, error) {
 		} else {
 			c.AutoMessage = value
 		}
+	case "wait_for_reset":
+		b, err := parseBool(value)
+		if err != nil {
+			return c, err
+		}
+		c.WaitForReset = b
 	case "notify":
 		b, err := parseBool(value)
 		if err != nil {
@@ -297,6 +305,11 @@ func Keys(c Config) []KeyInfo {
 			Key: "auto_message", Default: "Go continue.",
 			Description: `first user turn after auto-swap; set to "" for silent resume`,
 			Current:     c.AutoMessage,
+		},
+		{
+			Key: "wait_for_reset", Default: "true",
+			Description: "when every account is exhausted, sleep until the earliest reset and resume",
+			Current:     strconv.FormatBool(c.WaitForReset),
 		},
 		{
 			Key: "notify", Default: "true",

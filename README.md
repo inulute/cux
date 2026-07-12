@@ -260,6 +260,7 @@ cux config set update_check.enabled true            # opt in to update checks
 | `auto_switch_on_rate_limit`   | `true`         | Master toggle for swap on rate-limit hook |
 | `auto_resume`                 | `true`         | Pass `--resume <id>` to the relaunched claude |
 | `auto_message`                | `Go continue.` | First user turn after auto-swap; `""` = silent |
+| `wait_for_reset`              | `true`         | When every account is exhausted, sleep until the earliest reset and resume |
 | `update_check.enabled`        | `false`        | Check GitHub for newer cux releases on startup |
 | `update_check.cadence_hours`  | `6`            | Minimum hours between update checks (cached locally) |
 
