@@ -285,6 +285,13 @@ Config file: `~/.config/cux/config.json` (XDG-aware).
 - **manual** — Never swap automatically. `/switch` and `cux switch`
   still work.
 
+Both automatic strategies also prefer accounts whose model-specific
+weekly windows (Opus/Sonnet, reported on some plans) still have room.
+A model-capped account is never made ineligible — cux cannot know
+which model the session will ask for next — it just sorts behind
+model-clear candidates, so a heavy-Opus session is not swapped onto a
+seat that would rate-limit its very next call.
+
 ## Swap history
 
 ```text
