@@ -139,10 +139,18 @@ Website: https://cux.inulute.com
 ```bash
 cux setup           # install /switch, /cux:* + Claude Code hooks
 cux add             # register the currently-logged-in account
-claude logout && claude login   # log into your second account
+claude login        # log into your second account — just log in again, no logout
 cux add             # register it
 cux                 # launch claude under cux instead of `claude` directly
 ```
+
+> **Don't run `claude logout` to switch accounts.** `claude login` on its
+> own re-authenticates and replaces the active credentials — that's all
+> cux needs to capture the next account. `claude logout` *clears and
+> revokes* the stored token, which invalidates the backup cux keeps for
+> that account (it will show up as `EXPRD` in `cux list`). Once both
+> accounts are added, let cux do all switching — it swaps credentials
+> directly and never logs out, so nothing gets revoked.
 
 After `cux setup`, restart Claude Code so it picks up the newly
 installed hooks. From then on:
