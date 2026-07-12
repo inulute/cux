@@ -156,6 +156,13 @@ func ShouldRebalance(
 					continue
 				}
 			}
+			// Never rebalance ONTO a model-capped account: the hop is
+			// proactive, and landing a heavy-Opus session on a capped
+			// seat trades a working account for an instant rate limit —
+			// and a bounce right back at the next Stop.
+			if modelCapped(cache, c.cacheKey()) {
+				continue
+			}
 			priority = c
 			break
 		}
@@ -176,6 +183,9 @@ func ShouldRebalance(
 				if over, _ := usage.IsOverThreshold(u, thresholds); over {
 					continue
 				}
+			}
+			if modelCapped(cache, c.cacheKey()) {
+				continue
 			}
 			u := sevenDayUtil(cache, c.cacheKey())
 			if u > bestUtil {
@@ -215,24 +225,42 @@ func pickDrain(
 	if cap5 == 0 || cap5 == 100 {
 		cap5 = 90
 	}
-	for _, c := range ordered {
-		if !isAvailable(cache, c.cacheKey()) {
-			continue
-		}
-		if fiveHourUtil(cache, c.cacheKey()) < float64(cap5) && sevenDayUtil(cache, c.cacheKey()) < float64(cap7) {
-			return Pick{Email: c.Email, Reason: "drain: 7d under cap"}, true
+	// Each pass runs twice: first over candidates whose model-specific
+	// weekly windows (Opus/Sonnet) still have room, then over the rest.
+	// Model windows never make an account ineligible — cux cannot know
+	// which model the wrapped session will ask for next — but a
+	// model-capped account is a worse first choice: a heavy-Opus
+	// session swapped onto it rate-limits on its next call. When every
+	// candidate is model-capped the second sweep restores today's pick,
+	// so a pool is never stranded by this preference.
+	for _, preferModelClear := range []bool{true, false} {
+		for _, c := range ordered {
+			if preferModelClear && modelCapped(cache, c.cacheKey()) {
+				continue
+			}
+			if !isAvailable(cache, c.cacheKey()) {
+				continue
+			}
+			if fiveHourUtil(cache, c.cacheKey()) < float64(cap5) && sevenDayUtil(cache, c.cacheKey()) < float64(cap7) {
+				return Pick{Email: c.Email, Reason: "drain: 7d under cap"}, true
+			}
 		}
 	}
 
 	// Pass 2: 5h has any room — but never pick a 7D-hard-full account.
 	// A 7D-at-100% account has no recoverable capacity in this window
 	// regardless of 5h utilisation.
-	for _, c := range ordered {
-		if !isAvailable(cache, c.cacheKey()) {
-			continue
-		}
-		if fiveHourUtil(cache, c.cacheKey()) < float64(cap5) && sevenDayUtil(cache, c.cacheKey()) < 100 {
-			return Pick{Email: c.Email, Reason: "drain: 5h has room"}, true
+	for _, preferModelClear := range []bool{true, false} {
+		for _, c := range ordered {
+			if preferModelClear && modelCapped(cache, c.cacheKey()) {
+				continue
+			}
+			if !isAvailable(cache, c.cacheKey()) {
+				continue
+			}
+			if fiveHourUtil(cache, c.cacheKey()) < float64(cap5) && sevenDayUtil(cache, c.cacheKey()) < 100 {
+				return Pick{Email: c.Email, Reason: "drain: 5h has room"}, true
+			}
 		}
 	}
 
@@ -260,6 +288,12 @@ func pickBalanced(accounts []Candidate, current Candidate, cache usage.Cache, th
 		return Pick{}, false
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
+		// Model-capped accounts stay eligible but sort last — see the
+		// rationale on modelCapped.
+		mi, mj := modelCapped(cache, candidates[i].cacheKey()), modelCapped(cache, candidates[j].cacheKey())
+		if mi != mj {
+			return !mi
+		}
 		ai, bi := sevenDayUtil(cache, candidates[i].cacheKey()), sevenDayUtil(cache, candidates[j].cacheKey())
 		if ai != bi {
 			return ai < bi
@@ -297,6 +331,24 @@ func orderedCandidates(order []string, accounts []Candidate, current Candidate, 
 		}
 	}
 	return out
+}
+
+// modelCapped reports whether any model-specific weekly window
+// (Opus/Sonnet) sits at its hard cap. Only >=100 counts: user
+// thresholds express intent about the account-wide windows, not the
+// per-model ones, and a model window the plan does not report stays
+// nil — which reads as room, like every other missing window.
+func modelCapped(cache usage.Cache, key string) bool {
+	u, ok := cache[key]
+	if !ok {
+		return false
+	}
+	for _, w := range []*usage.Window{u.SevenDayOpus, u.SevenDaySonnet} {
+		if w != nil && w.Utilization >= 100 {
+			return true
+		}
+	}
+	return false
 }
 
 func isAvailable(cache usage.Cache, email string) bool {
