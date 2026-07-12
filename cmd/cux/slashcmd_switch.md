@@ -6,17 +6,16 @@ allowed-tools: Bash(cux __slash-switch:*)
 
 # /switch
 
-Hands off the current Claude Code session to a different managed
-account and reconnects to the same conversation on the new account.
+Switches the active managed account in place — your conversation keeps
+going on the new account with no restart and no lost context.
 
 - With no argument: rotates to the next account in your sequence.
 - With a slot number or email: switches to that specific account.
 
 Requires the session to have been started via `cux` (not `claude`
-directly). The handoff is implemented by `cux __slash-switch`, which
-writes a switch-requested signal the cux wrapper picks up. The
-wrapper waits for this turn to end cleanly (so the transcript is
-flushed) before swapping accounts and reconnecting with `--resume`.
+directly). The swap is done by `cux __slash-switch`, which rewrites the
+live credentials. Claude Code reads credentials on every request, so
+your next message continues seamlessly on the new account.
 
 ```bash
 cux __slash-switch $ARGUMENTS

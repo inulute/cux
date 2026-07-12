@@ -1,13 +1,15 @@
 package wrapper
 
 // SlashSwitch implements `cux __slash-switch <target>`, the body the
-// /switch slash command shells out to.
+// /switch and /cux:switch slash commands shell out to.
 //
-// This writes a switch-requested signal — the wrapper's poll loop picks
-// it up, asks Claude to exit cleanly, then performs the swap and resumes
-// the session. The command runs locally, so it does not need another
-// model turn after the slash command has been accepted.
-
+// The swap happens in place: this process rewrites the live credential
+// blob and returns. Claude Code re-reads credentials on every API
+// request, so the very next message continues on the new account in the
+// same session — no kill, no `--resume`, no lost context. (The auto
+// threshold hook uses the same in-place mechanism.) Mid-turn rate-limit
+// recovery and `cux force-switch` still go through the wrapper's
+// kill+resume path, which reloads the transcript when a turn is broken.
 import (
 	"errors"
 	"fmt"
@@ -17,14 +19,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inulute/cux/internal/config"
+	"github.com/inulute/cux/internal/history"
+	"github.com/inulute/cux/internal/monitor"
 	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/signals"
 	"github.com/inulute/cux/internal/store"
+	"github.com/inulute/cux/internal/switcher"
+	"github.com/inulute/cux/internal/usage"
 )
 
 // SlashSwitch is invoked by the slash command's bash block. target may
-// be empty — that means "rotate per the configured strategy", which
-// the wrapper resolves once it sees the signal.
+// be empty — that means "rotate per the configured strategy".
 func SlashSwitch(target string, w io.Writer) error {
 	if os.Getenv(envWrapped) != "1" {
 		return errors.New("/switch requires cux as the entry point — start your session with `cux` instead of `claude`")
@@ -41,8 +47,10 @@ func SlashSwitch(target string, w io.Writer) error {
 
 	target = strings.TrimSpace(target)
 
-	// Validate now so the user gets immediate feedback rather than a
-	// silent failure 100ms later when the wrapper rejects the target.
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 	state, err := store.Load()
 	if err != nil {
 		return err
@@ -50,24 +58,62 @@ func SlashSwitch(target string, w io.Writer) error {
 	if len(state.Accounts) < 2 {
 		return errors.New("need at least two managed accounts — run `cux add` after logging into another account")
 	}
-	if target != "" {
-		resolved, err := state.Resolve(target)
-		if err != nil {
-			return err
-		}
-		if resolved.Slot == state.ActiveSlot {
-			fmt.Fprintf(w, "cux: already on %s, nothing to do\n", resolved.Email)
-			return nil
-		}
-		fmt.Fprintf(w, "Switching to %s — reconnecting after this turn ends.\n", resolved.Email)
-	} else {
-		fmt.Fprintln(w, "Rotating to next account — reconnecting after this turn ends.")
+
+	// Resolve explicit target (slot/email/alias) or rotate per strategy.
+	resolved, err := resolveTarget(target, history.TriggerManual, &cfg)
+	if err != nil {
+		return err
+	}
+	acct, err := state.Resolve(resolved)
+	if err != nil {
+		return err
+	}
+	if acct.Slot == state.ActiveSlot {
+		fmt.Fprintf(w, "cux: already on %s, nothing to do\n", acct.Email)
+		return nil
 	}
 
-	return signals.Write(wrapperPID, signals.SwitchRequested, signals.SwitchRequestedPayload{
-		Target:    target,
-		Timestamp: time.Now().UTC(),
+	// In-place swap: rewrite the live credential blob. Claude picks it up
+	// on its next API request, so the same session continues on the new
+	// account with no restart.
+	from, to, err := switcher.SwitchTo(resolved)
+	if err != nil {
+		return fmt.Errorf("switch failed: %w", err)
+	}
+
+	// Record the swap so `cux history` and `cux list` stay accurate.
+	cwd, _ := os.Getwd()
+	cache, _ := usage.LoadCache()
+	fromU := cache[from.CacheKey()]
+	toU := cache[to.CacheKey()]
+	_ = history.Append(history.Entry{
+		From:        from.Email,
+		To:          to.Email,
+		Trigger:     history.TriggerManual,
+		Reason:      "user requested via /switch",
+		CWD:         cwd,
+		FromUsage5h: utilizationOrZero(fromU.FiveHour),
+		FromUsage7d: utilizationOrZero(fromU.SevenDay),
+		ToUsage5h:   utilizationOrZero(toU.FiveHour),
+		ToUsage7d:   utilizationOrZero(toU.SevenDay),
 	})
+
+	// Honour the deliberate choice: skip the auto threshold check on the
+	// very next prompt so a `/switch` onto a busy account is not
+	// immediately undone by auto-switch. (setManualSwitchState alone does
+	// not gate the UserPromptSubmit hook — the replay flag does.)
+	setManualSwitchState(to.Email)
+	_ = os.WriteFile(paths.ReplayFlagFile(wrapperPID), []byte("1"), 0o600)
+
+	// Freshen both accounts' usage in the background for `cux list`.
+	go func(fromEmail, toEmail string) {
+		_ = monitor.RefreshActive(fromEmail)
+		_ = monitor.RefreshActive(toEmail)
+	}(from.Email, to.Email)
+
+	fmt.Fprintf(w, "cux: %s → %s — switched in place; this conversation continues on %s.\n",
+		from.Email, to.Email, to.Email)
+	return nil
 }
 
 // ForceSwitch is the out-of-band version of SlashSwitch. It is meant
