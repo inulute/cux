@@ -37,6 +37,7 @@ import (
 	"github.com/inulute/cux/internal/history"
 	"github.com/inulute/cux/internal/monitor"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/signals"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/strategy"
@@ -93,6 +94,11 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		fmt.Fprintf(w, "cux: warning: cannot publish wrapper pid: %v\n", err)
 	}
 	defer cleanupWrapperPID(pid)
+	// Heartbeat: self-report what this wrapper is doing so that
+	// `cux sessions` (and remote surfaces reading the same registry)
+	// can show every concurrent session at a glance.
+	registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateRunning })
+	defer registry.RemoveSelf()
 
 	// lastManualTarget holds the email the user explicitly switched to
 	// within this wrapper session. Threshold auto-switch is suppressed
@@ -133,9 +139,19 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	var apiRetries int
 
 	for {
+		if seat, err := switcher.CurrentLiveEmail(); err == nil {
+			registry.UpdateSelf(func(e *registry.Entry) {
+				e.State = registry.StateRunning
+				e.Seat = seat
+				e.Detail = ""
+			})
+		}
 		exitCode, sessionID, hadTurns, p, err := launch(claudeBin, currentArgv, pid, &cfg, lastManualTarget, w)
 		if err != nil {
 			return exitCode, err
+		}
+		if sessionID != "" {
+			registry.UpdateSelf(func(e *registry.Entry) { e.SessionID = sessionID })
 		}
 
 		if p != nil && p.retryOnly {
@@ -146,6 +162,10 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			apiRetries++
 			fmt.Fprintf(w, "cux: API failure after claude's own retries (%s) — auto-continuing in %s (attempt %d)…\n",
 				snippet(p.reason), shortDuration(delay), apiRetries)
+			registry.UpdateSelf(func(e *registry.Entry) {
+				e.State = registry.StateRetrying
+				e.Detail = fmt.Sprintf("attempt %d, next try in %s", apiRetries, shortDuration(delay))
+			})
 			time.Sleep(delay)
 			if sessionID != "" && cfg.AutoResume {
 				cwd, _ := os.Getwd()
@@ -210,6 +230,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			return exitCode, nil
 		}
 
+		registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateSwapping })
 		from, to, swapErr := switcher.SwitchTo(target)
 		if swapErr != nil {
 			fmt.Fprintf(w, "cux: switch failed: %v\n", swapErr)
@@ -744,6 +765,10 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 		}
 		fmt.Fprintf(w, "cux: all accounts exhausted — waiting %s for %s to reset…\n",
 			shortDuration(d), email)
+		registry.UpdateSelf(func(e *registry.Entry) {
+			e.State = registry.StateWaitingReset
+			e.Detail = fmt.Sprintf("%s resets in %s", email, shortDuration(d))
+		})
 		time.Sleep(d)
 		_, _ = monitor.RefreshAll()
 		if target, err := resolveTarget("", trigger, cfg); err == nil {

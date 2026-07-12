@@ -35,6 +35,7 @@ import (
 	"github.com/inulute/cux/internal/lockfile"
 	"github.com/inulute/cux/internal/monitor"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/switcher"
 	"github.com/inulute/cux/internal/updater"
@@ -71,6 +72,7 @@ var knownSubcommands = map[string]bool{
 	"remove":          true,
 	"rm":              true,
 	"status":          true,
+	"sessions":        true,
 	"support":         true,
 	"switch":          true,
 	"force-switch":    true,
@@ -122,6 +124,8 @@ func main() {
 		cmdProject(rest)
 	case "status":
 		cmdStatus(rest)
+	case "sessions":
+		cmdSessions(rest)
 	case "support":
 		cmdSupport(rest)
 	case "switch":
@@ -499,6 +503,47 @@ func cmdAlias(args []string) {
 	} else {
 		fmt.Printf("Set alias %q for slot %d (%s).\n", newAlias, acct.Slot, acct.Email)
 	}
+}
+
+// cmdSessions lists every live cux wrapper on this machine from the
+// heartbeat registry: which directory, which seat, what state. This is
+// the first place N concurrent sessions become visible at all —
+// `cux list` shows seats, this shows the sessions using them.
+func cmdSessions(args []string) {
+	_ = args
+	entries := registry.List()
+	if len(entries) == 0 {
+		fmt.Println("No cux sessions are running.")
+		return
+	}
+	now := time.Now()
+	for _, e := range entries {
+		state := e.State
+		if e.Detail != "" {
+			state += " (" + e.Detail + ")"
+		}
+		sid := e.SessionID
+		if len(sid) > 8 {
+			sid = sid[:8]
+		}
+		if sid == "" {
+			sid = "-"
+		}
+		fmt.Printf("[%d] %s\n", e.PID, e.CWD)
+		fmt.Printf("    seat %-28s session %-9s %s\n", e.Seat, sid, state)
+		fmt.Printf("    up %s, last change %s ago\n",
+			formatDuration(now.Sub(e.StartedAt)), formatDuration(now.Sub(e.UpdatedAt)))
+	}
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Minute)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %02dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
 }
 
 func cmdStatus(args []string) {
@@ -1892,6 +1937,7 @@ USAGE
                                           when Claude will not run /switch
   cux remove [--force] <slot|email|alias> remove an account from cux
   cux status                              show live login + cux state
+  cux sessions                            list running cux sessions (heartbeat registry)
   cux support                             show support URL
   cux docs                                show documentation URL
   cux setup                               install /switch, /cux:* + Claude Code hooks
