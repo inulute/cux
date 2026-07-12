@@ -67,10 +67,23 @@ const (
 // (user never logged in, or just logged out).
 var ErrNotFound = errors.New("creds: live credentials not found")
 
+// envCredsBackend forces the plain-file storage backend on any
+// platform when set to "file". Its primary purpose is test isolation:
+// on macOS/Windows both the live and backup stores live in the OS
+// keystore, which HOME/XDG_DATA_HOME redirection cannot reach, so
+// without this a `go test` run reads — and can write — the real
+// keychain (issue #7). File paths, by contrast, all resolve through
+// HOME/XDG and land inside the test's temp directory.
+const envCredsBackend = "CUX_CREDS_BACKEND"
+
+func fileBackendForced() bool {
+	return os.Getenv(envCredsBackend) == "file"
+}
+
 // ReadLive returns the active credential blob Claude Code is currently
 // using. The format is an opaque JSON string — we don't parse it.
 func ReadLive() (string, error) {
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" && !fileBackendForced() {
 		return readLiveMacOS()
 	}
 	return readLiveFile()
@@ -83,7 +96,7 @@ func WriteLive(blob string) error {
 	if blob == "" {
 		return errors.New("creds: refusing to write empty live credentials")
 	}
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" && !fileBackendForced() {
 		return writeLiveMacOS(blob)
 	}
 	return writeLiveFile(blob)
@@ -92,7 +105,7 @@ func WriteLive(blob string) error {
 // ReadBackup returns the saved credential blob for one account, or
 // ErrNotFound if there is no backup for it.
 func ReadBackup(slot int, email string) (string, error) {
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" || fileBackendForced() {
 		return readBackupFile(slot, email)
 	}
 	return readBackupKeyring(slot, email)
@@ -103,7 +116,7 @@ func WriteBackup(slot int, email, blob string) error {
 	if blob == "" {
 		return errors.New("creds: refusing to write empty backup credentials")
 	}
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" || fileBackendForced() {
 		return writeBackupFile(slot, email, blob)
 	}
 	return writeBackupKeyring(slot, email, blob)
@@ -248,7 +261,7 @@ func RefreshBlob(blob string) (string, error) {
 // DeleteBackup removes the saved credential blob for one account.
 // Missing entries are not an error — deletion is idempotent.
 func DeleteBackup(slot int, email string) error {
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" || fileBackendForced() {
 		return deleteBackupFile(slot, email)
 	}
 	return deleteBackupKeyring(slot, email)

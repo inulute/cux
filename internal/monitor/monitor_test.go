@@ -19,6 +19,7 @@ func TestSyncLiveIfActiveWritesOnlyMatchingLiveAccount(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, ".local", "share"))
+	t.Setenv("CUX_CREDS_BACKEND", "file")
 
 	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
@@ -66,6 +67,7 @@ func TestRefreshAllCreatesDataDirBeforeLock(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, ".local", "share"))
+	t.Setenv("CUX_CREDS_BACKEND", "file")
 
 	if _, err := os.Stat(paths.BackupRoot()); !os.IsNotExist(err) {
 		t.Fatalf("backup root should not exist before refresh, stat err = %v", err)
@@ -87,6 +89,7 @@ func TestRefreshAllReportsUnreadableUsageCache(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, ".local", "share"))
+	t.Setenv("CUX_CREDS_BACKEND", "file")
 
 	runtimeDir := paths.RuntimeDir()
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {

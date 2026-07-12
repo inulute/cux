@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/signals"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/usage"
@@ -24,7 +25,9 @@ func TestRenderPromptSupportIncludesURL(t *testing.T) {
 }
 
 func TestRenderPromptUsageReportsAllExhaustedAtEffectiveCaps(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("CUX_CREDS_BACKEND", "file")
 	t.Setenv("CUX_CONFIG_FILE", t.TempDir()+"/config.json")
 
 	state := &store.State{
@@ -62,7 +65,9 @@ func TestRenderPromptUsageReportsAllExhaustedAtEffectiveCaps(t *testing.T) {
 
 func TestUserPromptSubmitBareSwitchBlocksWhenAllAccountsExhausted(t *testing.T) {
 	t.Setenv("CUX_WRAPPED", "1")
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("CUX_CREDS_BACKEND", "file")
 	t.Setenv("CUX_CONFIG_FILE", t.TempDir()+"/config.json")
 
 	state := &store.State{
@@ -114,9 +119,12 @@ func TestUserPromptSubmitBareSwitchBlocksWhenAllAccountsExhausted(t *testing.T) 
 func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CUX_WRAPPED", "1")
-	// Redirect HOME and XDG_DATA_HOME so all paths resolve under tmp.
+	// Redirect HOME and XDG_DATA_HOME so all paths resolve under tmp,
+	// and force the file credential backend so macOS does not read or
+	// write the real keychain (issue #7).
 	t.Setenv("HOME", tmp)
 	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("CUX_CREDS_BACKEND", "file")
 	t.Setenv("CUX_CONFIG_FILE", filepath.Join(tmp, "config.json"))
 
 	// Write a minimal fake Claude config so CurrentLiveEmail() returns
@@ -136,7 +144,10 @@ func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 	// RefreshAll's refreshOne call hits ExtractAccessToken error and
 	// returns before making a real API call — avoiding a 401 that would
 	// mark the account as TokenExpired and prevent PickNext from selecting it.
-	acct2Dir := filepath.Join(tmp, "cux", "accounts", "02-free@x.test")
+	// Resolve the directory through paths.AccountDir rather than
+	// hand-building it: the backup root differs per platform (XDG on
+	// Linux, ~/.cux elsewhere) and a hardcoded layout only matched Linux.
+	acct2Dir := paths.AccountDir(2, "free@x.test")
 	if err := os.MkdirAll(acct2Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +217,9 @@ func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 func TestRateLimitStopFailureWritesSignal(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CUX_WRAPPED", "1")
+	t.Setenv("HOME", tmp)
 	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("CUX_CREDS_BACKEND", "file")
 	pid := os.Getpid()
 	t.Setenv("CUX_WRAPPER_PID", fmt.Sprintf("%d", pid))
 

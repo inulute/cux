@@ -338,6 +338,11 @@ go build -o cux ./cmd/cux
 
 Requires Go 1.21+.
 
+`go test ./...` is safe to run next to a real cux setup: the suite
+redirects HOME/XDG into temp dirs and forces the file credential
+backend (`CUX_CREDS_BACKEND=file`), so it never touches your actual
+state, usage cache, or OS keychain.
+
 ## License
 
 [GPL-3.0-only](./LICENSE). Modifying and redistributing `cux` is
