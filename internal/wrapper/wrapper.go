@@ -37,6 +37,7 @@ import (
 	"github.com/inulute/cux/internal/history"
 	"github.com/inulute/cux/internal/monitor"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/signals"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/strategy"
@@ -93,6 +94,11 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		fmt.Fprintf(w, "cux: warning: cannot publish wrapper pid: %v\n", err)
 	}
 	defer cleanupWrapperPID(pid)
+	// Heartbeat: self-report what this wrapper is doing so that
+	// `cux sessions` (and remote surfaces reading the same registry)
+	// can show every concurrent session at a glance.
+	registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateRunning })
+	defer registry.RemoveSelf()
 
 	// lastManualTarget holds the email the user explicitly switched to
 	// within this wrapper session. Threshold auto-switch is suppressed
@@ -133,9 +139,19 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	var apiRetries int
 
 	for {
+		if seat, err := switcher.CurrentLiveEmail(); err == nil {
+			registry.UpdateSelf(func(e *registry.Entry) {
+				e.State = registry.StateRunning
+				e.Seat = seat
+				e.Detail = ""
+			})
+		}
 		exitCode, sessionID, hadTurns, p, err := launch(claudeBin, currentArgv, pid, &cfg, lastManualTarget, w)
 		if err != nil {
 			return exitCode, err
+		}
+		if sessionID != "" {
+			registry.UpdateSelf(func(e *registry.Entry) { e.SessionID = sessionID })
 		}
 
 		if p != nil && p.retryOnly {
@@ -146,6 +162,10 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			apiRetries++
 			fmt.Fprintf(w, "cux: API failure after claude's own retries (%s) — auto-continuing in %s (attempt %d)…\n",
 				snippet(p.reason), shortDuration(delay), apiRetries)
+			registry.UpdateSelf(func(e *registry.Entry) {
+				e.State = registry.StateRetrying
+				e.Detail = fmt.Sprintf("attempt %d, next try in %s", apiRetries, shortDuration(delay))
+			})
 			time.Sleep(delay)
 			if sessionID != "" && cfg.AutoResume {
 				cwd, _ := os.Getwd()
@@ -225,6 +245,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 				return exitCode, nil
 			}
 
+			registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateSwapping })
 			var swapErr error
 			from, to, swapErr = switcher.SwitchTo(target)
 			if swapErr != nil {
@@ -645,9 +666,10 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 	if err != nil {
 		return nil
 	}
-	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
-	for _, a := range state.Accounts {
-		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
+	pool := state.PoolForCwd()
+	candidates := make([]strategy.Candidate, 0, len(pool))
+	for _, a := range pool {
+		candidates = append(candidates, strategy.Candidate{Email: a.Email, Slot: a.Slot, CacheKey: a.CacheKey()})
 	}
 	current := strategy.Candidate{Email: email, CacheKey: cacheKey}
 	if _, ok := cache[cacheKey]; !ok {
@@ -665,7 +687,7 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 	return &pending{
 		trigger:        history.TriggerThreshold,
 		reason:         reason,
-		explicitTarget: pick.Email,
+		explicitTarget: pick.Identifier(),
 		fromUsage:      u,
 	}
 }
@@ -758,7 +780,7 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 			return "", err
 		}
 		cache, _ := usage.LoadCache()
-		readyAt, email, ok := nextAvailability(state.Accounts, cache, cfg.Thresholds, time.Now())
+		readyAt, email, ok := nextAvailability(state.PoolForCwd(), cache, cfg.Thresholds, time.Now())
 		if !ok {
 			return "", errors.New("all accounts exhausted and no reset time is known")
 		}
@@ -768,6 +790,10 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 		}
 		fmt.Fprintf(w, "cux: all accounts exhausted — waiting %s for %s to reset…\n",
 			shortDuration(d), email)
+		registry.UpdateSelf(func(e *registry.Entry) {
+			e.State = registry.StateWaitingReset
+			e.Detail = fmt.Sprintf("%s resets in %s", email, shortDuration(d))
+		})
 		// Sleep in slices instead of one block: a concurrent session may
 		// swap or refresh the shared cache while we wait, in which case
 		// capacity is available long before the computed reset. The
@@ -1003,6 +1029,13 @@ func gracefulExit(cmd *exec.Cmd, w io.Writer) {
 	if cmd.Process == nil {
 		return
 	}
+	// Snapshot the descendant tree before signalling: claudeBin may be
+	// a wrapper script chaining other tools (cux → headroom → claude,
+	// issue #3). The SIGINT below reaches only the direct child, and a
+	// dying shell does not forward it — grandchildren would survive,
+	// stay attached to the terminal, and fight the relaunched claude
+	// for stdin.
+	strays := descendantPIDs(cmd.Process.Pid)
 	_ = cmd.Process.Signal(os.Interrupt)
 
 	deadline := time.NewTimer(gracefulExitWait)
@@ -1015,9 +1048,11 @@ func gracefulExit(cmd *exec.Cmd, w io.Writer) {
 		case <-deadline.C:
 			fmt.Fprintln(w, "cux: claude did not exit cleanly, terminating…")
 			_ = cmd.Process.Kill()
+			reapStrays(strays, w)
 			return
 		case <-tick.C:
 			if cmd.ProcessState != nil {
+				reapStrays(strays, w)
 				return
 			}
 		}
@@ -1042,8 +1077,13 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 	if err != nil {
 		return "", err
 	}
-	if len(state.Accounts) < 2 {
-		return "", errors.New("only one account is managed; nothing to rotate to")
+	// Rotation draws from the project pool for this directory (the full
+	// account list when no project claims it). Explicit targets bypass
+	// this function entirely — a human naming a seat outranks the
+	// project boundary.
+	pool := state.PoolForCwd()
+	if len(pool) < 2 {
+		return "", errors.New("only one account is available here; nothing to rotate to")
 	}
 	current, _ := switcher.CurrentLiveEmail()
 	currentCacheKey, _ := switcher.CurrentLiveCacheKey()
@@ -1056,9 +1096,9 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 	if cache == nil {
 		cache = usage.Cache{}
 	}
-	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
-	for _, a := range state.Accounts {
-		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
+	candidates := make([]strategy.Candidate, 0, len(pool))
+	for _, a := range pool {
+		candidates = append(candidates, strategy.Candidate{Email: a.Email, Slot: a.Slot, CacheKey: a.CacheKey()})
 	}
 	// In manual mode strategy.PickNext returns ok=false, but a manual
 	// trigger with no explicit target still means "rotate" — fall
@@ -1069,7 +1109,7 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 	}
 	if pick, ok := strategy.PickNext(kind, cfg.Strategy.Order, candidates,
 		strategy.Candidate{Email: current, CacheKey: currentCacheKey}, cache, cfg.Thresholds); ok {
-		return pick.Email, nil
+		return pick.Identifier(), nil
 	}
 	return rotateFallback(state, cache, cfg)
 }
@@ -1078,8 +1118,9 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 // that are known to have no capacity. Missing usage is treated as usable so
 // fresh installs can rotate before the first refresh completes.
 func rotateFallback(state *store.State, cache usage.Cache, cfg *config.Config) (string, error) {
+	pool := state.PoolForCwd()
 	for _, slot := range rotationSlots(state) {
-		acct, ok := state.Accounts[slot]
+		acct, ok := pool[slot]
 		if !ok || slot == state.ActiveSlot {
 			continue
 		}

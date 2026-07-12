@@ -285,6 +285,51 @@ Config file: `~/.config/cux/config.json` (XDG-aware).
 - **manual** — Never swap automatically. `/switch` and `cux switch`
   still work.
 
+Both automatic strategies also prefer accounts whose model-specific
+weekly windows (Opus/Sonnet, reported on some plans) still have room.
+A model-capped account is never made ineligible — cux cannot know
+which model the session will ask for next — it just sorts behind
+model-clear candidates, so a heavy-Opus session is not swapped onto a
+seat that would rate-limit its very next call.
+
+## Projects
+
+A machine that hosts several codebases often wants them on different
+seats — one client's work billed to their org, a personal side project
+kept off the company pool — while related projects share accounts.
+Projects bind a directory to a subset of seats:
+
+```bash
+cux project create clientwork --dir ~/code/client
+cux project assign clientwork 1 2        # seats by slot, email, or alias
+cux project create side --dir ~/code/side
+cux project assign side 2 3              # seat 2 is shared between both
+cux project list --refresh               # projects + live usage per seat
+cux project unassign side 3
+cux project stats clientwork --days 7    # tokens & time from Claude Code transcripts
+cux project remove side                  # unbind only; accounts untouched
+```
+
+When cux starts, the working directory picks the project (longest,
+path-boundary-aware match — nested projects work) and every automatic
+decision draws from that project's seats only: threshold and
+rate-limit swaps, rotation, and `wait_for_reset`'s availability math.
+
+- **No projects, or an unclaimed directory** → the full pool. Existing
+  setups behave exactly as before.
+- **A project with no seats assigned yet** → the full pool, until you
+  assign some.
+- **Explicit targets are never restricted** — `/switch <seat>` and
+  `cux switch <seat>` go wherever you point them; a human naming a
+  seat outranks the project boundary.
+- Removing an account (`cux remove`) also removes it from every
+  project pool.
+
+`cux project stats` reads the session transcripts Claude Code already
+writes under `~/.claude/projects` — cux collects nothing itself — and
+sums sessions, active time, turns, and input/output/cache tokens for
+the project's directory tree, optionally windowed with `--days N`.
+
 ## Swap history
 
 ```text

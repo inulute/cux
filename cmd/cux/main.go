@@ -35,8 +35,10 @@ import (
 	"github.com/inulute/cux/internal/lockfile"
 	"github.com/inulute/cux/internal/monitor"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/switcher"
+	"github.com/inulute/cux/internal/transcripts"
 	"github.com/inulute/cux/internal/updater"
 	"github.com/inulute/cux/internal/usage"
 	"github.com/inulute/cux/internal/wrapper"
@@ -64,12 +66,14 @@ const (
 // to the real claude binary via the wrapper.
 var knownSubcommands = map[string]bool{
 	"add":             true,
+	"project":         true,
 	"alias":           true,
 	"list":            true,
 	"ls":              true,
 	"remove":          true,
 	"rm":              true,
 	"status":          true,
+	"sessions":        true,
 	"support":         true,
 	"switch":          true,
 	"force-switch":    true,
@@ -117,8 +121,12 @@ func main() {
 		cmdRemove(rest)
 	case "alias":
 		cmdAlias(rest)
+	case "project":
+		cmdProject(rest)
 	case "status":
 		cmdStatus(rest)
+	case "sessions":
+		cmdSessions(rest)
 	case "support":
 		cmdSupport(rest)
 	case "switch":
@@ -216,6 +224,76 @@ func cmdList(args []string) {
 	}
 }
 
+func cmdProjectStats(args []string) {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	name := args[0]
+	fs := flag.NewFlagSet("project stats", flag.ExitOnError)
+	days := fs.Int("days", 0, "limit to the last N days (0 = all time)")
+	_ = fs.Parse(args[1:])
+
+	state, err := store.Load()
+	if err != nil {
+		fail(err)
+	}
+	proj, ok := state.Projects[name]
+	if !ok {
+		fail(fmt.Errorf("project %q not found — see `cux project list`", name))
+	}
+	var since time.Time
+	if *days > 0 {
+		since = time.Now().Add(-time.Duration(*days) * 24 * time.Hour)
+	}
+	st, err := transcripts.ForDir(proj.Dir, since)
+	if err != nil {
+		fail(err)
+	}
+
+	window := "all time"
+	if *days > 0 {
+		window = fmt.Sprintf("last %d day(s)", *days)
+	}
+	fmt.Printf("%s  %s  (%s)\n", proj.Name, proj.Dir, window)
+	if st.Sessions == 0 {
+		fmt.Println("  no transcript activity found")
+		return
+	}
+	fmt.Printf("  sessions      %d\n", st.Sessions)
+	fmt.Printf("  active time   %s\n", formatDuration(st.ActiveTime))
+	fmt.Printf("  turns         %d\n", st.Turns)
+	fmt.Printf("  tokens in     %s\n", formatTokens(st.InputTokens))
+	fmt.Printf("  tokens out    %s\n", formatTokens(st.OutputTokens))
+	fmt.Printf("  cache write   %s\n", formatTokens(st.CacheCreationTokens))
+	fmt.Printf("  cache read    %s\n", formatTokens(st.CacheReadTokens))
+	fmt.Printf("  first / last  %s → %s\n",
+		st.FirstAt.Local().Format("2006-01-02 15:04"),
+		st.LastAt.Local().Format("2006-01-02 15:04"))
+}
+
+func formatTokens(n int64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(n)/1e9)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1e3)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Minute)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %02dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
 func windowPct(w *usage.Window) string {
 	if w == nil {
 		return "—"
@@ -272,6 +350,191 @@ func cmdRemove(args []string) {
 //
 //	cux alias <slot|email|alias> <new-alias>   — set alias
 //	cux alias <slot|email|alias> --clear       — remove alias
+// --- Project subcommands ---------------------------------------------------
+
+func cmdProject(args []string) {
+	if len(args) == 0 {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "create":
+		cmdProjectCreate(rest)
+	case "assign":
+		cmdProjectMutate(rest, true)
+	case "unassign":
+		cmdProjectMutate(rest, false)
+	case "list", "ls":
+		cmdProjectList(rest)
+	case "stats":
+		cmdProjectStats(rest)
+	case "remove", "rm":
+		cmdProjectRemove(rest)
+	default:
+		printProjectUsage()
+		os.Exit(2)
+	}
+}
+
+func printProjectUsage() {
+	fmt.Fprintln(os.Stderr, "usage: cux project create <name> [--dir PATH]     bind a directory (default: cwd)")
+	fmt.Fprintln(os.Stderr, "       cux project assign <name> <slot|email|alias> [...]")
+	fmt.Fprintln(os.Stderr, "       cux project unassign <name> <slot|email|alias> [...]")
+	fmt.Fprintln(os.Stderr, "       cux project list [--refresh]")
+	fmt.Fprintln(os.Stderr, "       cux project stats <name> [--days N]      tokens & time from Claude Code transcripts")
+	fmt.Fprintln(os.Stderr, "       cux project remove <name>")
+}
+
+func withState(fn func(*store.State) error) {
+	lk, err := lockfile.Acquire(paths.LockFile(), 10*time.Second)
+	if err != nil {
+		fail(err)
+	}
+	defer lk.Unlock() //nolint:errcheck
+	state, err := store.Load()
+	if err != nil {
+		fail(err)
+	}
+	if err := fn(state); err != nil {
+		fail(err)
+	}
+	if err := state.Save(); err != nil {
+		fail(err)
+	}
+}
+
+func cmdProjectCreate(args []string) {
+	// Name first, flags after: `cux project create iht --dir ~/code/iht`.
+	// Go's flag parser stops at the first positional, so split by hand.
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	name := args[0]
+	fs := flag.NewFlagSet("project create", flag.ExitOnError)
+	dir := fs.String("dir", "", "directory the project claims (default: current directory)")
+	_ = fs.Parse(args[1:])
+	if fs.NArg() != 0 {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	d := *dir
+	if d == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fail(err)
+		}
+		d = cwd
+	}
+	abs, err := filepath.Abs(d)
+	if err != nil {
+		fail(err)
+	}
+	withState(func(state *store.State) error {
+		return state.AddProject(name, abs)
+	})
+	fmt.Printf("Created project %s → %s. Assign seats with `cux project assign %s <slot|alias>`.\n", name, abs, name)
+}
+
+func cmdProjectMutate(args []string, assign bool) {
+	if len(args) < 2 {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	name, seats := args[0], args[1:]
+	withState(func(state *store.State) error {
+		for _, seat := range seats {
+			acct, err := state.Resolve(seat)
+			if err != nil {
+				return err
+			}
+			if assign {
+				if err := state.AssignProjectSlot(name, acct.Slot); err != nil {
+					return err
+				}
+				fmt.Printf("Assigned slot %d (%s) to %s.\n", acct.Slot, acct.Email, name)
+			} else {
+				if err := state.UnassignProjectSlot(name, acct.Slot); err != nil {
+					return err
+				}
+				fmt.Printf("Unassigned slot %d (%s) from %s.\n", acct.Slot, acct.Email, name)
+			}
+		}
+		return nil
+	})
+}
+
+func cmdProjectRemove(args []string) {
+	if len(args) != 1 {
+		printProjectUsage()
+		os.Exit(2)
+	}
+	withState(func(state *store.State) error {
+		return state.RemoveProject(args[0])
+	})
+	fmt.Printf("Removed project %s. Accounts are untouched.\n", args[0])
+}
+
+func cmdProjectList(args []string) {
+	fs := flag.NewFlagSet("project list", flag.ExitOnError)
+	refresh := fs.Bool("refresh", false, "fetch fresh usage before printing")
+	_ = fs.Parse(args)
+
+	if *refresh {
+		if _, errs := monitor.RefreshAll(); len(errs) > 0 {
+			for _, e := range errs {
+				fmt.Fprintf(os.Stderr, "warning: %v\n", e)
+			}
+		}
+	}
+	state, err := store.Load()
+	if err != nil {
+		fail(err)
+	}
+	if len(state.Projects) == 0 {
+		fmt.Println("No projects defined. Create one with `cux project create <name> [--dir PATH]`.")
+		return
+	}
+	cache, _ := usage.LoadCache()
+
+	names := make([]string, 0, len(state.Projects))
+	for n := range state.Projects {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		p := state.Projects[n]
+		fmt.Printf("%s  %s\n", p.Name, p.Dir)
+		if len(p.Slots) == 0 {
+			fmt.Println("  (no seats assigned — full pool applies here)")
+			continue
+		}
+		for _, slot := range p.Slots {
+			acct, ok := state.Accounts[slot]
+			if !ok {
+				continue
+			}
+			label := acct.Email
+			if acct.Alias != "" {
+				label = acct.Alias + " · " + acct.Email
+			}
+			line := fmt.Sprintf("  [%02d] %-42s", slot, label)
+			if cache != nil {
+				if u, ok := cache[acct.CacheKey()]; ok {
+					line += "  5h:" + windowPct(u.FiveHour) + "  7d:" + windowPct(u.SevenDay)
+					if u.TokenExpired {
+						line += "  (needs login)"
+					}
+				} else {
+					line += "  (no usage data — try --refresh)"
+				}
+			}
+			fmt.Println(line)
+		}
+	}
+}
+
 func cmdAlias(args []string) {
 	fs := flag.NewFlagSet("alias", flag.ExitOnError)
 	clear := fs.Bool("clear", false, "remove the alias from this account")
@@ -313,6 +576,37 @@ func cmdAlias(args []string) {
 		fmt.Printf("Cleared alias for slot %d (%s).\n", acct.Slot, acct.Email)
 	} else {
 		fmt.Printf("Set alias %q for slot %d (%s).\n", newAlias, acct.Slot, acct.Email)
+	}
+}
+
+// cmdSessions lists every live cux wrapper on this machine from the
+// heartbeat registry: which directory, which seat, what state. This is
+// the first place N concurrent sessions become visible at all —
+// `cux list` shows seats, this shows the sessions using them.
+func cmdSessions(args []string) {
+	_ = args
+	entries := registry.List()
+	if len(entries) == 0 {
+		fmt.Println("No cux sessions are running.")
+		return
+	}
+	now := time.Now()
+	for _, e := range entries {
+		state := e.State
+		if e.Detail != "" {
+			state += " (" + e.Detail + ")"
+		}
+		sid := e.SessionID
+		if len(sid) > 8 {
+			sid = sid[:8]
+		}
+		if sid == "" {
+			sid = "-"
+		}
+		fmt.Printf("[%d] %s\n", e.PID, e.CWD)
+		fmt.Printf("    seat %-28s session %-9s %s\n", e.Seat, sid, state)
+		fmt.Printf("    up %s, last change %s ago\n",
+			formatDuration(now.Sub(e.StartedAt)), formatDuration(now.Sub(e.UpdatedAt)))
 	}
 }
 
@@ -1695,6 +1989,11 @@ USAGE
   cux add [--slot N] [--alias NAME] [--no-alias]  add the currently logged-in account
   cux list                                list managed accounts
   cux alias <slot|email|alias> <name>     set a short alias (e.g. work, personal)
+  cux project create <name> [--dir PATH]  scope a directory to its own seat pool
+  cux project assign <name> <seat> [...]  add seats to a project (seats can be shared)
+  cux project unassign <name> <seat> [...]
+  cux project list [--refresh]            projects + live usage of their seats
+  cux project remove <name>               unbind a directory (accounts untouched)
   cux alias <slot|email|alias> --clear    remove alias
   cux switch <slot|email|alias>           swap the active account (manual; requires
                                           restart unless run from /switch inside)
@@ -1702,6 +2001,7 @@ USAGE
                                           when Claude will not run /switch
   cux remove [--force] <slot|email|alias> remove an account from cux
   cux status                              show live login + cux state
+  cux sessions                            list running cux sessions (heartbeat registry)
   cux support                             show support URL
   cux docs                                show documentation URL
   cux setup                               install /switch, /cux:* + Claude Code hooks

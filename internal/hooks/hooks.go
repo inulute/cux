@@ -207,9 +207,10 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
-	for _, a := range state.Accounts {
-		candidates = append(candidates, strategy.Candidate{Email: a.Email, CacheKey: a.CacheKey()})
+	pool := state.PoolForCwd()
+	candidates := make([]strategy.Candidate, 0, len(pool))
+	for _, a := range pool {
+		candidates = append(candidates, strategy.Candidate{Email: a.Email, Slot: a.Slot, CacheKey: a.CacheKey()})
 	}
 	current := strategy.Candidate{Email: email, CacheKey: cacheKey}
 	if _, ok := cache[cacheKey]; !ok {
@@ -233,7 +234,7 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 				goto inPlaceSwap
 			}
 			if err := signals.Write(pid, signals.SwitchRequested, signals.SwitchRequestedPayload{
-				Target:    pick.Email,
+				Target:    pick.Identifier(),
 				Timestamp: time.Now().UTC(),
 			}); err != nil {
 				writePromptBlock(stdout, fmt.Sprintf("cux: %s\ncux: signal failed: %v", why, err))
@@ -247,7 +248,7 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 		// Pre-turn prompt: swap credentials in-place. Claude Code reads
 		// credentials on every API request, so this prompt will be processed
 		// by the new account with no restart or manual resend needed.
-		from, to, switchErr := switcher.SwitchTo(pick.Email)
+		from, to, switchErr := switcher.SwitchTo(pick.Identifier())
 		if switchErr != nil {
 			writePromptBlock(stdout, fmt.Sprintf("cux: %s\ncux: failed to switch to %s: %v", why, pick.Email, switchErr))
 			return true, nil
@@ -434,8 +435,9 @@ func promptSwitchHasTarget() (bool, string) {
 		cache = usage.Cache{}
 	}
 	current, _ := switcher.CurrentLiveEmail()
-	candidates := make([]strategy.Candidate, 0, len(state.Accounts))
-	for _, a := range state.Accounts {
+	pool := state.PoolForCwd()
+	candidates := make([]strategy.Candidate, 0, len(pool))
+	for _, a := range pool {
 		candidates = append(candidates, strategy.Candidate{Email: a.Email})
 	}
 	if _, ok := strategy.PickNext(cfg.ResolvedStrategy(), cfg.Strategy.Order, candidates,
@@ -443,7 +445,10 @@ func promptSwitchHasTarget() (bool, string) {
 		return true, ""
 	}
 	for _, slot := range state.SortedSlots() {
-		acct := state.Accounts[slot]
+		acct, inPool := pool[slot]
+		if !inPool {
+			continue
+		}
 		if slot != state.ActiveSlot && accountHasPromptCapacity(cache, acct, cfg.Thresholds) {
 			return true, ""
 		}

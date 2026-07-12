@@ -31,17 +31,17 @@ import (
 // for testing or migration to a future header value, so we don't have
 // to ship a new binary if Anthropic rolls the beta tag.
 const (
-	defaultEndpoint  = "https://api.anthropic.com/api/oauth/usage"
-	defaultBetaHdr   = "oauth-2025-04-20"
-	envEndpoint      = "CUX_USAGE_ENDPOINT"
-	envBetaHeader    = "CUX_USAGE_BETA"
-	cacheFileName    = "usage-cache.json"
-	httpTimeout      = 10 * time.Second
+	defaultEndpoint = "https://api.anthropic.com/api/oauth/usage"
+	defaultBetaHdr  = "oauth-2025-04-20"
+	envEndpoint     = "CUX_USAGE_ENDPOINT"
+	envBetaHeader   = "CUX_USAGE_BETA"
+	cacheFileName   = "usage-cache.json"
+	httpTimeout     = 10 * time.Second
 )
 
 // Window is one usage interval reported by the API.
 type Window struct {
-	Utilization float64    `json:"utilization"`        // 0.0–100.0
+	Utilization float64    `json:"utilization"`         // 0.0–100.0
 	ResetsAt    *time.Time `json:"resets_at,omitempty"` // nil if API returned null
 }
 

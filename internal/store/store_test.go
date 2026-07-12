@@ -29,3 +29,23 @@ func TestCacheKeyLegacyFallbacks(t *testing.T) {
 		t.Errorf("email-only account: got %q, want %q", got, "a@x.test")
 	}
 }
+
+func TestFindByIdentityPersonalVsOrgSeat(t *testing.T) {
+	s := &State{Accounts: map[int]Account{
+		1: {Slot: 1, Email: "me@x.test", UUID: "u-me"},                      // personal: no org
+		2: {Slot: 2, Email: "me@x.test", UUID: "u-me", OrgUUID: "org-corp"}, // org seat
+	}}
+	if got := s.FindByIdentity("me@x.test", ""); got != 1 {
+		t.Errorf("personal login resolved to slot %d, want 1", got)
+	}
+	if got := s.FindByIdentity("me@x.test", "org-corp"); got != 2 {
+		t.Errorf("org login resolved to slot %d, want 2", got)
+	}
+}
+
+func TestCacheKeyPersonalAccountFallsBackToEmail(t *testing.T) {
+	personal := Account{Email: "me@x.test", UUID: "u-me"} // no OrgUUID
+	if got := personal.CacheKey(); got != "me@x.test" {
+		t.Errorf("personal CacheKey = %q, want email fallback", got)
+	}
+}

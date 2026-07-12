@@ -13,10 +13,10 @@ import (
 // LOCKFILE_FAIL_IMMEDIATELY for non-blocking try-lock semantics that
 // match flock(LOCK_EX|LOCK_NB) on Unix.
 const (
-	lockExclusive  = windows.LOCKFILE_EXCLUSIVE_LOCK
-	lockNonBlock   = windows.LOCKFILE_FAIL_IMMEDIATELY
-	lockBytesLow   = ^uint32(0)
-	lockBytesHigh  = ^uint32(0)
+	lockExclusive = windows.LOCKFILE_EXCLUSIVE_LOCK
+	lockNonBlock  = windows.LOCKFILE_FAIL_IMMEDIATELY
+	lockBytesLow  = ^uint32(0)
+	lockBytesHigh = ^uint32(0)
 )
 
 func tryLock(f *os.File) error {
