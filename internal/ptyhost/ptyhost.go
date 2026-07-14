@@ -55,7 +55,10 @@ type Host struct {
 	hist    history // recent output, replayed to new clients for scrollback
 }
 
-type clientState struct{ size winsize }
+type clientState struct {
+	size winsize
+	wmu  sync.Mutex // serializes writes to this client's conn (replay, broadcast, ping)
+}
 
 type winsize struct{ rows, cols uint16 }
 
@@ -156,14 +159,38 @@ type broadcastWriter struct{ h *Host }
 
 func (b broadcastWriter) Write(p []byte) (int, error) { b.h.broadcast(p); return len(p), nil }
 
+// writeClient sends one frame to a client, serialized with every other
+// write to the same conn via its clientState.wmu — writeFrame emits a
+// header then a payload as two writes, so without this lock a broadcast
+// could interleave between another writer's header and payload and corrupt
+// the stream. On error the client is dropped.
+func (h *Host) writeClient(conn net.Conn, cs *clientState, typ byte, p []byte) {
+	cs.wmu.Lock()
+	err := writeFrame(conn, typ, p)
+	cs.wmu.Unlock()
+	if err != nil {
+		h.mu.Lock()
+		delete(h.clients, conn)
+		h.mu.Unlock()
+		_ = conn.Close()
+	}
+}
+
 func (h *Host) broadcast(p []byte) {
+	// Snapshot the client set, then write outside h.mu so one slow client
+	// can't stall the whole broadcast (or block accept) while holding it.
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	for c := range h.clients {
-		if err := writeFrame(c, FrameOut, p); err != nil {
-			_ = c.Close()
-			delete(h.clients, c)
-		}
+	type ref struct {
+		conn net.Conn
+		cs   *clientState
+	}
+	refs := make([]ref, 0, len(h.clients))
+	for c, cs := range h.clients {
+		refs = append(refs, ref{c, cs})
+	}
+	h.mu.Unlock()
+	for _, r := range refs {
+		h.writeClient(r.conn, r.cs, FrameOut, p)
 	}
 }
 
@@ -173,21 +200,28 @@ func (h *Host) acceptLoop() {
 		if err != nil {
 			return
 		}
+		cs := &clientState{}
+		// Hold the client's write lock across registration and replay so
+		// the backlog is the first thing written to this conn: any
+		// broadcast that races the new client blocks on wmu until the
+		// replay is out, keeping scrollback strictly before live output.
+		cs.wmu.Lock()
 		h.mu.Lock()
-		h.clients[conn] = &clientState{}
+		h.clients[conn] = cs
+		replay := h.hist.replay()
 		h.mu.Unlock()
-		go h.serve(conn)
+		if len(replay) > 0 {
+			_ = writeFrame(conn, FrameOut, replay)
+		}
+		cs.wmu.Unlock()
+		go h.serve(conn, cs)
 		h.redraw()
 	}
 }
 
-// serve reads one client's frames until it disconnects. It first replays
-// the recent-output backlog so the client has scrollback, not just a
-// bare current frame.
-func (h *Host) serve(conn net.Conn) {
-	if b := h.hist.snapshot(); len(b) > 0 {
-		_ = writeFrame(conn, FrameOut, b)
-	}
+// serve reads one client's frames until it disconnects. The backlog replay
+// (scrollback) already went out in acceptLoop; here we only read.
+func (h *Host) serve(conn net.Conn, cs *clientState) {
 	defer func() {
 		h.mu.Lock()
 		delete(h.clients, conn)
@@ -208,7 +242,7 @@ func (h *Host) serve(conn net.Conn) {
 		case FrameResize:
 			if len(payload) == 4 {
 				h.mu.Lock()
-				h.clients[conn].size = winsize{
+				cs.size = winsize{
 					rows: binary.BigEndian.Uint16(payload[0:2]),
 					cols: binary.BigEndian.Uint16(payload[2:4]),
 				}
@@ -216,7 +250,7 @@ func (h *Host) serve(conn net.Conn) {
 				h.recomputeSize()
 			}
 		case FramePing:
-			_ = writeFrame(conn, FramePing, nil)
+			h.writeClient(conn, cs, FramePing, nil)
 		}
 	}
 }
@@ -224,8 +258,16 @@ func (h *Host) serve(conn net.Conn) {
 // recomputeSize applies the tmux rule: the effective PTY size is the
 // smallest of every participant that has declared one, so no viewer
 // ever sees a clipped frame.
+// recomputeSize holds h.mu across the ioctl. pty.Setsize reads the ptmx
+// fd via Fd(), which bypasses os.File's own lock, so it must be serialized
+// against Close() closing that fd — both happen under h.mu, and the closed
+// guard makes it a no-op once torn down.
 func (h *Host) recomputeSize() {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
 	eff := h.local
 	for _, c := range h.clients {
 		if c.size.rows == 0 || c.size.cols == 0 {
@@ -238,7 +280,6 @@ func (h *Host) recomputeSize() {
 			eff.cols = c.size.cols
 		}
 	}
-	h.mu.Unlock()
 	if eff.rows == 0 {
 		return
 	}
@@ -246,6 +287,11 @@ func (h *Host) recomputeSize() {
 }
 
 func (h *Host) applySize() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
 	_ = pty.Setsize(h.ptmx, &pty.Winsize{Rows: h.local.rows, Cols: h.local.cols})
 }
 
@@ -254,11 +300,12 @@ func (h *Host) applySize() {
 func (h *Host) redraw() {
 	h.mu.Lock()
 	rows, cols := h.local.rows, h.local.cols
-	h.mu.Unlock()
-	if rows < 2 {
+	if h.closed || rows < 2 {
+		h.mu.Unlock()
 		return
 	}
 	_ = pty.Setsize(h.ptmx, &pty.Winsize{Rows: rows - 1, Cols: cols})
+	h.mu.Unlock()
 	h.recomputeSize()
 }
 
@@ -286,11 +333,12 @@ func (h *Host) Close() {
 	for c := range h.clients {
 		_ = c.Close()
 	}
+	// Close the PTY under h.mu so it can't race an in-flight Setsize ioctl.
+	_ = h.ptmx.Close()
+	_ = h.tty.Close()
 	h.mu.Unlock()
 	if h.ln != nil {
 		_ = h.ln.Close()
 	}
 	_ = os.Remove(h.sockPath)
-	_ = h.ptmx.Close()
-	_ = h.tty.Close()
 }
