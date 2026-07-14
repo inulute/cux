@@ -28,7 +28,6 @@ package ptyhost
 
 import (
 	"encoding/binary"
-	"errors"
 	"io"
 	"net"
 	"os"
@@ -38,13 +37,6 @@ import (
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
-)
-
-const (
-	FrameOut byte = iota
-	FrameInput
-	FrameResize
-	FramePing
 )
 
 // Host owns the PTY pair and the attach socket for one wrapper.
@@ -295,39 +287,3 @@ func (h *Host) Close() {
 	_ = h.ptmx.Close()
 	_ = h.tty.Close()
 }
-
-/* ---------- frame protocol ---------- */
-
-var errFrameTooBig = errors.New("ptyhost: frame exceeds limit")
-
-const maxFrame = 1 << 20
-
-func writeFrame(w io.Writer, typ byte, payload []byte) error {
-	hdr := [5]byte{typ}
-	binary.BigEndian.PutUint32(hdr[1:], uint32(len(payload)))
-	if _, err := w.Write(hdr[:]); err != nil {
-		return err
-	}
-	_, err := w.Write(payload)
-	return err
-}
-
-func readFrame(r io.Reader) (byte, []byte, error) {
-	var hdr [5]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return 0, nil, err
-	}
-	n := binary.BigEndian.Uint32(hdr[1:])
-	if n > maxFrame {
-		return 0, nil, errFrameTooBig
-	}
-	payload := make([]byte, n)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return 0, nil, err
-	}
-	return hdr[0], payload, nil
-}
-
-// WriteFrame / ReadFrame are exported for `cux attach` and bridges.
-func WriteFrame(w io.Writer, typ byte, payload []byte) error { return writeFrame(w, typ, payload) }
-func ReadFrame(r io.Reader) (byte, []byte, error)            { return readFrame(r) }
