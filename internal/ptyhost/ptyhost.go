@@ -52,6 +52,7 @@ type Host struct {
 	clients map[net.Conn]*clientState
 	local   winsize // the user's real terminal, zero when unknown
 	closed  bool
+	hist    history // recent output, replayed to new clients for scrollback
 }
 
 type clientState struct{ size winsize }
@@ -136,6 +137,7 @@ func (h *Host) Pump() {
 	for {
 		n, err := h.ptmx.Read(buf)
 		if n > 0 {
+			h.hist.record(buf[:n])
 			_, _ = os.Stdout.Write(buf[:n])
 			h.broadcast(buf[:n])
 		}
@@ -179,8 +181,13 @@ func (h *Host) acceptLoop() {
 	}
 }
 
-// serve reads one client's frames until it disconnects.
+// serve reads one client's frames until it disconnects. It first replays
+// the recent-output backlog so the client has scrollback, not just a
+// bare current frame.
 func (h *Host) serve(conn net.Conn) {
+	if b := h.hist.snapshot(); len(b) > 0 {
+		_ = writeFrame(conn, FrameOut, b)
+	}
 	defer func() {
 		h.mu.Lock()
 		delete(h.clients, conn)

@@ -47,6 +47,7 @@ type Host struct {
 	clients map[net.Conn]*clientState
 	local   winsize
 	closed  bool
+	hist    history // recent output, replayed to new clients for scrollback
 }
 
 // New creates the ConPTY (sized to the current console), keeps the host
@@ -133,6 +134,7 @@ func (h *Host) Pump() {
 	for {
 		n, err := h.outR.Read(buf)
 		if n > 0 {
+			h.hist.record(buf[:n])
 			_, _ = os.Stdout.Write(buf[:n])
 			h.broadcast(buf[:n])
 		}
@@ -173,6 +175,10 @@ func (h *Host) acceptLoop() {
 }
 
 func (h *Host) serve(conn net.Conn) {
+	// Replay the recent-output backlog so the client has scrollback.
+	if b := h.hist.snapshot(); len(b) > 0 {
+		_ = writeFrame(conn, FrameOut, b)
+	}
 	defer func() {
 		h.mu.Lock()
 		delete(h.clients, conn)
