@@ -16,6 +16,7 @@ import (
 
 func TestResolveTargetDoesNotRotateToWeeklyFullFallback(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("CUX_CREDS_BACKEND", "file")
 
@@ -82,6 +83,7 @@ func TestEvaluatePrelaunchHardLimitSwapUsesRateLimitTrigger(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("CUX_CREDS_BACKEND", "file")
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
@@ -138,6 +140,7 @@ func TestEvaluatePrelaunchHardLimitSwapBlocksWhenAllAccountsFull(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("CUX_CREDS_BACKEND", "file")
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
@@ -212,6 +215,7 @@ func TestResumeSessionID(t *testing.T) {
 func TestWaitForTranscriptStableFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	cwd := filepath.Join(home, "proj")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
@@ -232,6 +236,7 @@ func TestWaitForTranscriptStableFile(t *testing.T) {
 func TestWaitForTranscriptEventuallyStable(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	cwd := filepath.Join(home, "proj")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
@@ -260,6 +265,7 @@ func TestWaitForTranscriptEventuallyStable(t *testing.T) {
 func TestWaitForTranscriptMissing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	cwd := filepath.Join(home, "proj")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
