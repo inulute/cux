@@ -407,6 +407,13 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 	if err != nil {
 		return 1, "", false, nil, fmt.Errorf("wrapper: start claude: %w", err)
 	}
+	// Tell the host which process to nudge with SIGWINCH on resize: the
+	// child runs without a controlling terminal, so a PTY size change does
+	// not raise SIGWINCH on its own. Refreshed on every (re)launch.
+	if host != nil {
+		host.SetChildPID(ch.Pid())
+		defer host.SetChildPID(0)
+	}
 
 	var (
 		mu        sync.Mutex

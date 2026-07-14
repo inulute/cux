@@ -170,6 +170,11 @@ func (h *Host) writeClient(conn net.Conn, cs *clientState, typ byte, p []byte) {
 	}
 }
 
+// SetChildPID is a no-op on Windows: ResizePseudoConsole notifies the
+// attached process of size changes itself, so there is no out-of-band
+// signal to deliver as there is on Unix. Present for API parity.
+func (h *Host) SetChildPID(pid int) {}
+
 func (h *Host) broadcast(p []byte) {
 	// Snapshot the client set, then write outside h.mu so one slow client
 	// can't stall the whole broadcast (or block accept) while holding it.

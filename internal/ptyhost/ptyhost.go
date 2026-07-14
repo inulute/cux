@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/creack/pty"
@@ -53,6 +54,13 @@ type Host struct {
 	local   winsize // the user's real terminal, zero when unknown
 	closed  bool
 	hist    history // recent output, replayed to new clients for scrollback
+
+	// childPID is the current claude process. We run it setsid without a
+	// controlling terminal (see SysProcAttr), so resizing the PTY does not
+	// itself raise SIGWINCH on the child — the kernel only signals a
+	// terminal's controlling process group. We therefore signal the child
+	// directly after every size change so it re-reads the size and reflows.
+	childPID atomic.Int64
 }
 
 type clientState struct {
@@ -130,6 +138,24 @@ func (h *Host) TTYDup() (*os.File, error) {
 // is needed.
 func SysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setsid: true}
+}
+
+// SetChildPID tells the host which claude process to signal on resize.
+// The wrapper calls it after each (re)launch; 0 clears it between launches.
+func (h *Host) SetChildPID(pid int) { h.childPID.Store(int64(pid)) }
+
+// signalChild nudges the current child with SIGWINCH so it re-reads the
+// PTY size and reflows. Because the child has no controlling terminal, a
+// TIOCSWINSZ on the master does not raise SIGWINCH on its own — we deliver
+// it explicitly, to the process and its group (claude is a setsid leader,
+// so -pid covers any helper it spawns).
+func (h *Host) signalChild() {
+	pid := h.childPID.Load()
+	if pid <= 0 {
+		return
+	}
+	_ = syscall.Kill(int(pid), syscall.SIGWINCH)
+	_ = syscall.Kill(-int(pid), syscall.SIGWINCH)
 }
 
 // Pump mirrors the user's terminal into and out of the PTY. It returns
@@ -284,6 +310,7 @@ func (h *Host) recomputeSize() {
 		return
 	}
 	_ = pty.Setsize(h.ptmx, &pty.Winsize{Rows: eff.rows, Cols: eff.cols})
+	h.signalChild()
 }
 
 func (h *Host) applySize() {
@@ -293,6 +320,7 @@ func (h *Host) applySize() {
 		return
 	}
 	_ = pty.Setsize(h.ptmx, &pty.Winsize{Rows: h.local.rows, Cols: h.local.cols})
+	h.signalChild()
 }
 
 // redraw nudges the PTY one row smaller and back so full-screen
@@ -305,6 +333,7 @@ func (h *Host) redraw() {
 		return
 	}
 	_ = pty.Setsize(h.ptmx, &pty.Winsize{Rows: rows - 1, Cols: cols})
+	h.signalChild()
 	h.mu.Unlock()
 	h.recomputeSize()
 }
