@@ -398,7 +398,15 @@ func setManualSwitchState(email string) {
 func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config, manualTarget string, host *ptyhost.Host, w io.Writer) (int, string, bool, *pending, error) {
 	cmd := exec.Command(claudeBin, argv...)
 	if host != nil {
-		tty := host.TTY()
+		// A dup per launch: os/exec's Wait() closes the stdio files it's
+		// handed, so the shared PTY slave must not be wired in directly —
+		// otherwise the next relaunch (e.g. after a rate-limit account
+		// swap) fails with "bad file descriptor". exec owns and closes
+		// this dup; the real slave lives on with the Host.
+		tty, err := host.TTYDup()
+		if err != nil {
+			return 1, "", false, nil, fmt.Errorf("wrapper: dup pty slave: %w", err)
+		}
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
 		cmd.SysProcAttr = ptyhost.SysProcAttr()
 	} else {

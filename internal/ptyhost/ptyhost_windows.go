@@ -24,6 +24,7 @@ type Host struct{}
 
 func New(sockPath string, inputOK bool) (*Host, error)       { return nil, ErrUnsupported }
 func (h *Host) TTY() *os.File                                { return nil }
+func (h *Host) TTYDup() (*os.File, error)                    { return nil, ErrUnsupported }
 func (h *Host) Pump()                                        {}
 func (h *Host) BroadcastWriter() io.Writer                   { return io.Discard }
 func (h *Host) Close()                                       {}

@@ -105,6 +105,21 @@ func New(sockPath string, inputOK bool) (*Host, error) {
 // the PTY persists across children.
 func (h *Host) TTY() *os.File { return h.tty }
 
+// TTYDup opens a FRESH slave handle for one exec.Cmd, from the same
+// pts path as the persistent slave. This is what a child must run on.
+//
+// Why reopen instead of reuse h.tty: os/exec's Wait() closes the stdio
+// files it was handed, and with Setctty the first child becoming the
+// terminal's session leader tears that slave fd down when it exits. Both
+// mean the shared slave can't survive a second launch — the next
+// relaunch (e.g. after a rate-limit account swap) failed with "bad file
+// descriptor". A brand-new open per launch keeps the master (ptmx) and
+// all future relaunches unaffected; the caller wires the returned file
+// as stdin/stdout/stderr and lets exec own its lifecycle.
+func (h *Host) TTYDup() (*os.File, error) {
+	return os.OpenFile(h.tty.Name(), os.O_RDWR, 0)
+}
+
 // SysProcAttr returns the attributes a child needs to adopt the PTY as
 // its controlling terminal.
 func SysProcAttr() *syscall.SysProcAttr {
