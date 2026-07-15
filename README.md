@@ -63,6 +63,7 @@ cux: rate limit on alice@example.com → swapped to bob@example.com, resuming…
   - [Verify your setup once](#verify-your-setup-once)
 - [How it works](#how-it-works)
 - [Daily usage](#daily-usage)
+  - [Watch & attach to running sessions](#watch--attach-to-running-sessions)
 - [Configuration](#configuration)
   - [Strategies](#strategies)
 - [Swap history](#swap-history)
@@ -214,6 +215,8 @@ cux status                   # current login + cux state
 cux switch <slot|email>      # manual swap (no auto-resume)
 cux remove <slot|email>      # forget an account
 cux history                  # recent swaps with reasons
+cux sessions                 # list running cux sessions (pid, project, seat, state)
+cux attach [pid]             # attach to a running session — watch and control it
 cux usage refresh            # poll all account usage
 cux config show              # current settings
 cux config edit              # interactive settings editor
@@ -245,6 +248,27 @@ run this from another terminal:
 cux force-switch             # rotate the active cux-wrapped session
 cux force-switch 2           # force a specific slot/email
 ```
+
+### Watch & attach to running sessions
+
+`cux sessions` lists every running cux session on the machine — the ones
+you started in other terminals or left running overnight:
+
+```text
+$ cux sessions
+[73820] review the pull request and tell me if its safe…
+    /Users/you/code/app
+    seat you@example.com   session 1634fada   running
+    up 6h 12m, last change 0m ago
+```
+
+`cux attach [pid]` connects your terminal to one of them, tmux-style —
+you see its live output and can type into it (Ctrl+C, everything). With
+no pid it attaches to the only session, or shows a picker when several
+are running. Detach with `Ctrl+\` and the session keeps running.
+Multiple terminals can attach to the same session at once. Requires a
+session started with a build that has attach support (the wrapper serves
+the mirror over a local socket).
 
 ## Configuration
 
@@ -381,6 +405,12 @@ $ cux history
 - **Hook upsert is signature-keyed.** `cux install-hooks` only ever
   modifies entries whose `command` field contains the literal string
   `cux ` or `/cux ` — every other tool's hooks are preserved.
+- **`cux attach` exposes a local control socket.** A session's mirror
+  lives at `~/.cux/runtime/attach/<pid>.sock` (mode 0600 — your user
+  only). Anything that can read it can control that session's terminal.
+  Third-party tools that bridge this socket beyond your machine (tunnels,
+  remote dashboards) are **outside cux's trust boundary** — review them
+  before use. cux itself ships no such bridge.
 
 ## Building from source
 

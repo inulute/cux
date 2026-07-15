@@ -1,6 +1,6 @@
 {
   "name": "@inulute/cux",
-  "version": "0.2.11",
+  "version": "0.3.0",
   "description": "Run multiple Claude Code accounts as one",
   "keywords": [
     "claude",
