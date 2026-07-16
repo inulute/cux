@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -50,7 +51,8 @@ type Host struct {
 	clients map[net.Conn]*clientState
 	local   winsize
 	closed  bool
-	hist    history // recent output, replayed to new clients for scrollback
+	done    chan struct{} // closed by Close; stops the local-resize poller
+	hist    history       // recent output, replayed to new clients for scrollback
 }
 
 // New creates the ConPTY (sized to the current console), keeps the host
@@ -91,7 +93,9 @@ func New(sockPath string, inputOK bool) (*Host, error) {
 		inputOK:  inputOK,
 		clients:  map[net.Conn]*clientState{},
 		local:    local,
+		done:     make(chan struct{}),
 	}
+	go h.watchResize()
 
 	// The attach socket is best-effort: if AF_UNIX is unavailable (older
 	// Windows, or a Wine layer), claude still runs on the ConPTY — it
@@ -108,15 +112,59 @@ func New(sockPath string, inputOK bool) (*Host, error) {
 
 func consoleSize() winsize {
 	// Best effort: query the real console; fall back to 80x24.
-	var info windows.ConsoleScreenBufferInfo
-	if err := windows.GetConsoleScreenBufferInfo(windows.Stdout, &info); err == nil {
-		cols := uint16(info.Window.Right - info.Window.Left + 1)
-		rows := uint16(info.Window.Bottom - info.Window.Top + 1)
-		if cols > 0 && rows > 0 {
-			return winsize{rows: rows, cols: cols}
-		}
+	if sz, ok := queryConsoleSize(); ok {
+		return sz
 	}
 	return winsize{rows: 24, cols: 80}
+}
+
+// queryConsoleSize reports the real console's current window size, and
+// whether the query succeeded (it fails when stdout is redirected).
+func queryConsoleSize() (winsize, bool) {
+	var info windows.ConsoleScreenBufferInfo
+	if err := windows.GetConsoleScreenBufferInfo(windows.Stdout, &info); err != nil {
+		return winsize{}, false
+	}
+	cols := uint16(info.Window.Right - info.Window.Left + 1)
+	rows := uint16(info.Window.Bottom - info.Window.Top + 1)
+	if cols == 0 || rows == 0 {
+		return winsize{}, false
+	}
+	return winsize{rows: rows, cols: cols}, true
+}
+
+// watchResize is this host's stand-in for the Unix watchWinch: Windows
+// raises no signal when the user resizes the real console, and nothing
+// else ever refreshes h.local after New — so without a watcher a local
+// resize never reached ResizePseudoConsole, the child kept painting at
+// the stale width, and the terminal reflowed that stale-width output
+// into duplicated/overlapping frames (issue #33). Reading console input
+// records for WINDOW_BUFFER_SIZE_EVENT isn't an option — Pump streams
+// stdin raw into the ConPTY — so poll the screen-buffer info instead;
+// a query failure (redirected stdout) is not a resize and is skipped.
+func (h *Host) watchResize() {
+	t := time.NewTicker(400 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-h.done:
+			return
+		case <-t.C:
+		}
+		sz, ok := queryConsoleSize()
+		if !ok {
+			continue
+		}
+		h.mu.Lock()
+		changed := !h.closed && sz != h.local
+		if changed {
+			h.local = sz
+		}
+		h.mu.Unlock()
+		if changed {
+			h.recomputeSize()
+		}
+	}
 }
 
 // TTY / TTYDup are the Unix wiring points; on Windows the child attaches
@@ -309,6 +357,7 @@ func (h *Host) Close() {
 		return
 	}
 	h.closed = true
+	close(h.done)
 	for c := range h.clients {
 		_ = c.Close()
 	}
