@@ -201,6 +201,25 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			if hadTurns {
 				apiRetries = 0
 			}
+			// A hard usage limit can reach us dressed as a generic API
+			// failure: the classifier only sees error text, and Claude
+			// Code's wording for the cap shifts between builds. Backoff is
+			// the wrong tool for exhaustion — the account has no capacity
+			// to retry into, and when the whole pool is out the reset
+			// clocks are all known. Check fresh usage and, if the live
+			// account is actually out, promote to the rate-limit path
+			// (swap if anything is usable, else wait-for-reset sleeps
+			// until the earliest known reset) instead of fixed-interval
+			// relaunches that spin against a closed window until a human
+			// returns.
+			_, _ = monitor.RefreshAll()
+			if isActiveHardLimited() {
+				lk, _ := switcher.CurrentLiveCacheKey()
+				fmt.Fprintf(w, "cux: that API failure is a usage limit on the live account — switching instead of retrying\n")
+				p = &pending{trigger: history.TriggerRateLimit, reason: p.reason, fromUsage: snapshotActiveUsage(), fromKey: lk}
+			}
+		}
+		if p != nil && p.retryOnly {
 			delay := fibonacciDelay(apiRetries)
 			apiRetries++
 			fmt.Fprintf(w, "cux: API failure after claude's own retries (%s) — auto-continuing in %s (attempt %d)…\n",
