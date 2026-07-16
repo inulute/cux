@@ -829,17 +829,22 @@ func isActiveHardLimited() bool {
 	return ok && isHardLimitUsage(u)
 }
 
-// waitForReset blocks until the earliest moment a managed account
-// becomes usable again, refreshes usage, and retries target resolution.
-// Reached only when every account is exhausted — the alternative was
-// giving up and stranding an unattended session until a human returns.
-// A few attempts guard against clock skew between the local machine
-// and the API's reset stamps; each retry waits for the next reset, so
-// even the fallback path never spins.
+// waitForReset blocks until a managed account is usable again, then
+// returns it. Reached only when every account is exhausted — and an
+// unattended session must ride that out, not die. The reset clocks are
+// known, so the first sleep already spans the whole outage (plus slack
+// for clock skew and server-side rounding); rounds where the cache is
+// stale or no reset clock is published yet re-check on the poll cadence
+// instead of giving up. It used to abort after a fixed number of
+// attempts, which in practice meant a handful of short waits followed
+// by "accounts still exhausted" and a dead session — exactly the
+// stranding this function exists to prevent. The only unrecoverable
+// exit left is when every pooled account needs a fresh login: no amount
+// of waiting fixes revoked credentials.
 const (
-	waitForResetAttempts = 4
 	// waitPollInterval is how often a sleeping waitForReset re-reads
-	// the shared cache for capacity another session may have created.
+	// the shared cache for capacity another session may have created,
+	// and the re-check cadence while no reset clock is known.
 	waitPollInterval = time.Minute
 	// resetSlack pads each sleep so we wake after the API-side window
 	// has actually rolled over, not in the same second it should.
@@ -850,7 +855,7 @@ const (
 )
 
 func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (string, error) {
-	for attempt := 0; attempt < waitForResetAttempts; attempt++ {
+	for {
 		// Check first, then time. Refresh from the API so the verdict and
 		// the reset clock use current data — never a stale cache whose
 		// resets_at may already be in the past (which used to yield a
@@ -867,7 +872,19 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 		cache, _ := usage.LoadCache()
 		readyAt, email, ok := nextAvailability(state.PoolForCwd(), cache, cfg.Thresholds, time.Now())
 		if !ok {
-			return "", errors.New("all accounts exhausted and no reset time is known")
+			if allTokensExpired(state.PoolForCwd(), cache) {
+				return "", errors.New("every account needs a fresh login (`cux add`) — waiting cannot help")
+			}
+			// No usable reset clock yet — the cache is catching up after
+			// a roll-over, or the API hasn't published one. Time heals
+			// this; re-check shortly instead of abandoning the session.
+			fmt.Fprintf(w, "\r\033[Kcux: all accounts exhausted; no reset clock known yet — re-checking in %s…", shortDuration(waitPollInterval))
+			registry.UpdateSelf(func(e *registry.Entry) {
+				e.State = registry.StateWaitingReset
+				e.Detail = "waiting for a reset clock"
+			})
+			time.Sleep(waitPollInterval)
+			continue
 		}
 		// resetSlack pads past the reset; add another minute of margin so
 		// we resume a bit after the window rolls over rather than the
@@ -917,8 +934,28 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 		}
 		fmt.Fprintln(w) // close the in-place countdown line before relaunch output
 		// Deadline reached — loop back to the check-first refresh above.
+		// If the account still reads exhausted (server-side rounding,
+		// cache lag), the next round computes a fresh deadline from
+		// fresh data rather than giving up.
 	}
-	return "", errors.New("accounts still exhausted after waiting for resets")
+}
+
+// allTokensExpired reports whether waiting is provably futile: every
+// pooled account's credentials are known-expired, so no reset clock
+// will ever tick capacity back. Accounts with no usage data yet count
+// as healable — the next refresh may fill them in. An empty pool has
+// nothing to wait for.
+func allTokensExpired(accounts map[int]store.Account, cache usage.Cache) bool {
+	if len(accounts) == 0 {
+		return true
+	}
+	for _, a := range accounts {
+		u, found := cachedUsage(cache, a.CacheKey(), a.Email)
+		if !found || !u.TokenExpired {
+			return false
+		}
+	}
+	return true
 }
 
 // liveAccountWithCapacity returns the managed account currently
