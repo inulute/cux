@@ -27,6 +27,27 @@ func TestClassifyFailure(t *testing.T) {
 			want: signals.RateLimited,
 		},
 		{
+			// The usage-cap wording without the word "usage": treating
+			// this as a generic API failure sent the wrapper into an
+			// endless fixed-backoff retry loop on an account with no
+			// capacity, instead of swapping / sleeping until the reset.
+			name: "hit-your-limit wording is a rate limit, not a retry",
+			in: rateLimitHookInput{
+				HookEventName:        "StopFailure",
+				Error:                rawStr("error"),
+				LastAssistantMessage: rawStr("You've hit your limit · resets 7pm"),
+			},
+			want: signals.RateLimited,
+		},
+		{
+			name: "weekly limit reached wording is a rate limit",
+			in: rateLimitHookInput{
+				HookEventName: "StopFailure",
+				Error:         rawStr("Weekly limit reached — your limit will reset on Thursday"),
+			},
+			want: signals.RateLimited,
+		},
+		{
 			name: "API error in the error field triggers a retry",
 			in: rateLimitHookInput{
 				HookEventName: "StopFailure",

@@ -988,6 +988,15 @@ func classifyFailure(in rateLimitHookInput) (signals.Name, string) {
 		strings.Contains(lower, "session limit") ||
 		strings.Contains(lower, "hit your session limit") ||
 		strings.Contains(lower, "usage limit") ||
+		// Claude Code's user-facing wording for the usage caps drops the
+		// word "usage" in several builds ("You've hit your limit —
+		// resets 7pm", "Weekly limit reached"). Missing these turned an
+		// exhausted account into an endless fixed-backoff retry loop in
+		// the wrapper instead of a swap / sleep-until-reset.
+		strings.Contains(lower, "hit your limit") ||
+		strings.Contains(lower, "reached your limit") ||
+		strings.Contains(lower, "limit reached") ||
+		strings.Contains(lower, "limit will reset") ||
 		strings.Contains(lower, "overloaded_error") ||
 		strings.Contains(lower, "too many requests") ||
 		strings.Contains(lower, "429")
