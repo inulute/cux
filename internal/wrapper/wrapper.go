@@ -86,6 +86,7 @@ type pending struct {
 	resumeMessage  string
 	retryOnly      bool               // relaunch the same account; no swap
 	fromUsage      usage.AccountUsage // best-effort snapshot
+	fromKey        string             // cache key of the seat live when the swap was decided; lets a rate-limit swap tell "another session already moved us" from "still on the exhausted seat"
 }
 
 // Run executes the wrapper loop. argv is the args passed to `claude`
@@ -268,7 +269,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		if p.explicitTarget == "" &&
 			(p.trigger == history.TriggerRateLimit || p.trigger == history.TriggerThreshold) {
 			_, _ = monitor.RefreshAll()
-			if acct, ok := liveAccountWithCapacity(&cfg); ok {
+			if acct, ok := liveAccountWithCapacity(&cfg); ok && skipSwapOnCapacity(p.trigger, acct.CacheKey(), p.fromKey) {
 				fmt.Fprintf(w, "cux: %s already has capacity (another session may have swapped) — resuming without switching\n", acct.Email)
 				from, to = acct, acct
 				swapped = false
@@ -539,7 +540,8 @@ func step(
 				if p, err := signals.DecodeRateLimited(b); err == nil && p.Message != "" {
 					msg = p.Message
 				}
-				*swap = &pending{trigger: history.TriggerRateLimit, reason: msg, fromUsage: snapshotActiveUsage()}
+				lk, _ := switcher.CurrentLiveCacheKey()
+				*swap = &pending{trigger: history.TriggerRateLimit, reason: msg, fromUsage: snapshotActiveUsage(), fromKey: lk}
 			}
 			hasSwap = *swap != nil
 			mu.Unlock()
@@ -902,6 +904,25 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 // under the configured thresholds. ok is false when the live account
 // is unmanaged, has no usage data yet, or is out of room — callers
 // then proceed with a normal swap.
+// skipSwapOnCapacity decides whether a pending swap may be skipped
+// because the live account already reports capacity. A rate-limit signal
+// is ground truth about the seat that triggered it: the API just refused
+// it, so its utilisation numbers (a session cap, a burst cap, or a
+// per-model Opus/Sonnet cap need not move the 5h/7d figures) cannot be
+// trusted to say "usable". Skipping is therefore only safe on a
+// rate-limit when the live seat is a DIFFERENT one than the one that hit
+// the limit — i.e. another concurrent session already swapped us onto a
+// healthy seat (#21). If the live seat is still the rate-limited one (or
+// we couldn't identify it), we must swap away or wait — never resume in
+// place, which loops forever on the exhausted account. Threshold swaps
+// are proactive (no hard limit was hit), so capacity there is real.
+func skipSwapOnCapacity(trigger history.Trigger, liveKey, rateLimitedKey string) bool {
+	if trigger == history.TriggerRateLimit {
+		return rateLimitedKey != "" && liveKey != "" && liveKey != rateLimitedKey
+	}
+	return true
+}
+
 func liveAccountWithCapacity(cfg *config.Config) (store.Account, bool) {
 	email, err := switcher.CurrentLiveEmail()
 	if err != nil || email == "" {
