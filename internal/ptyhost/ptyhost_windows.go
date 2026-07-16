@@ -257,11 +257,13 @@ func (h *Host) serve(conn net.Conn, cs *clientState) {
 // wins, so no viewer sees a clipped frame.
 // recomputeSize holds h.mu across the ConPTY resize so it can't race
 // Close() destroying the pseudo-console; the closed guard makes it a
-// no-op once torn down.
+// no-op once torn down. The client set is snapshotted before the lock is
+// released so the post-negotiation FrameSize broadcast (below) can't
+// deadlock against writeClient's own h.mu on a failed write.
 func (h *Host) recomputeSize() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.closed {
+		h.mu.Unlock()
 		return
 	}
 	eff := h.local
@@ -277,9 +279,26 @@ func (h *Host) recomputeSize() {
 		}
 	}
 	if eff.rows == 0 {
+		h.mu.Unlock()
 		return
 	}
 	_ = windows.ResizePseudoConsole(h.hpc, windows.Coord{X: int16(eff.cols), Y: int16(eff.rows)})
+	type ref struct {
+		conn net.Conn
+		cs   *clientState
+	}
+	refs := make([]ref, 0, len(h.clients))
+	for c, cs := range h.clients {
+		refs = append(refs, ref{c, cs})
+	}
+	h.mu.Unlock()
+
+	// Every attached client learns the size the console actually settled
+	// on — see the Unix host's recomputeSize for why.
+	p := []byte{byte(eff.rows >> 8), byte(eff.rows), byte(eff.cols >> 8), byte(eff.cols)}
+	for _, r := range refs {
+		h.writeClient(r.conn, r.cs, FrameSize, p)
+	}
 }
 
 // Close tears the socket and ConPTY down.

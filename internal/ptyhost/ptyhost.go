@@ -20,6 +20,7 @@
 //	1 input  — keystrokes for the PTY (client → host)
 //	2 resize — payload rows,cols as two big-endian uint16 (client → host)
 //	3 ping   — keepalive, either direction, empty payload
+//	4 size   — the negotiated rows,cols (host → client), see frame.go
 //
 // On attach the host nudges the PTY size (shrink one row, restore).
 // Full-screen programs repaint on SIGWINCH, so the new client gets a
@@ -287,11 +288,13 @@ func (h *Host) serve(conn net.Conn, cs *clientState) {
 // recomputeSize holds h.mu across the ioctl. pty.Setsize reads the ptmx
 // fd via Fd(), which bypasses os.File's own lock, so it must be serialized
 // against Close() closing that fd — both happen under h.mu, and the closed
-// guard makes it a no-op once torn down.
+// guard makes it a no-op once torn down. The client set is snapshotted
+// before the lock is released so the post-negotiation FrameSize broadcast
+// (below) can't deadlock against writeClient's own h.mu on a failed write.
 func (h *Host) recomputeSize() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.closed {
+		h.mu.Unlock()
 		return
 	}
 	eff := h.local
@@ -307,10 +310,32 @@ func (h *Host) recomputeSize() {
 		}
 	}
 	if eff.rows == 0 {
+		h.mu.Unlock()
 		return
 	}
 	_ = pty.Setsize(h.ptmx, &pty.Winsize{Rows: eff.rows, Cols: eff.cols})
 	h.signalChild()
+	type ref struct {
+		conn net.Conn
+		cs   *clientState
+	}
+	refs := make([]ref, 0, len(h.clients))
+	for c, cs := range h.clients {
+		refs = append(refs, ref{c, cs})
+	}
+	h.mu.Unlock()
+
+	// Every attached client learns the size the PTY actually settled on —
+	// the tmux-rule intersection can be smaller than what any one client
+	// asked for, and a client that never hears the real number keeps
+	// rendering at its own stale guess while the stream it's receiving is
+	// already formatted for the negotiated (possibly narrower) grid.
+	p := make([]byte, 4)
+	binary.BigEndian.PutUint16(p[0:2], eff.rows)
+	binary.BigEndian.PutUint16(p[2:4], eff.cols)
+	for _, r := range refs {
+		h.writeClient(r.conn, r.cs, FrameSize, p)
+	}
 }
 
 func (h *Host) applySize() {

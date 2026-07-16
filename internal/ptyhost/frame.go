@@ -7,6 +7,11 @@
 //	1 input  — keystrokes for the PTY (client → host)
 //	2 resize — payload rows,cols as two big-endian uint16 (client → host)
 //	3 ping   — keepalive, either direction, empty payload
+//	4 size   — payload rows,cols as two big-endian uint16 (host → client):
+//	           the size the shared PTY actually settled on (the tmux-rule
+//	           intersection of every attached client), so a client whose
+//	           own request lost the negotiation can still render at the
+//	           real size instead of drifting out of sync with the stream.
 package ptyhost
 
 import (
@@ -20,6 +25,7 @@ const (
 	FrameInput
 	FrameResize
 	FramePing
+	FrameSize
 )
 
 var errFrameTooBig = errors.New("ptyhost: frame exceeds limit")

@@ -41,7 +41,10 @@ func TestBacklogReplayedOnAttach(t *testing.T) {
 // screen (a full-screen TUI like claude), attaching does NOT dump the raw
 // history — that would render off-screen on a differently sized client and
 // blank the view. With no PTY child to repaint in the test, the client
-// should simply receive nothing.
+// should receive no FrameOut at all. The attach nudge (redraw) also
+// broadcasts a FrameSize to announce the current negotiated size to every
+// client, including this brand-new one — that's expected and orthogonal to
+// history replay, so it's tolerated here rather than treated as a leak.
 func TestNoReplayWhileAltScreen(t *testing.T) {
 	h, err := New(filepath.Join(t.TempDir(), "s.sock"), true)
 	if err != nil {
@@ -56,8 +59,16 @@ func TestNoReplayWhileAltScreen(t *testing.T) {
 	}
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
-	_, _, err = readFrame(conn)
-	if !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("expected no replay frame on the alt screen (read should time out); got err=%v", err)
+	for {
+		typ, _, err := readFrame(conn)
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				return // no history replay arrived within the window — expected
+			}
+			t.Fatalf("readFrame: %v", err)
+		}
+		if typ == FrameOut {
+			t.Fatalf("got a FrameOut frame on the alt screen; history should not replay")
+		}
 	}
 }
