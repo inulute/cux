@@ -827,6 +827,15 @@ const (
 
 func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (string, error) {
 	for attempt := 0; attempt < waitForResetAttempts; attempt++ {
+		// Check first, then time. Refresh from the API so the verdict and
+		// the reset clock use current data — never a stale cache whose
+		// resets_at may already be in the past (which used to yield a
+		// bogus ~2-minute countdown and the wrong account).
+		_, _ = monitor.RefreshAll()
+		if target, err := resolveTarget("", trigger, cfg); err == nil {
+			return target, nil // something is usable now — resume, no timer
+		}
+
 		state, err := store.Load()
 		if err != nil {
 			return "", err
@@ -839,47 +848,41 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 		// resetSlack pads past the reset; add another minute of margin so
 		// we resume a bit after the window rolls over rather than the
 		// instant it should, avoiding an immediate re-hit on clock skew or
-		// server-side rounding.
+		// server-side rounding. Round(0) strips the monotonic clock reading
+		// so the countdown is measured against the wall clock — it keeps
+		// counting across a laptop sleep instead of freezing (Go timers use
+		// the monotonic clock, which pauses while the system is asleep).
 		d := time.Until(readyAt) + resetSlack + resetBuffer
 		if d < resetSlack+resetBuffer {
 			d = resetSlack + resetBuffer
 		}
-		resumeAt := time.Now().Add(d)
-		resumeClock := resumeAt.Format("3:04 PM")
+		deadline := time.Now().Add(d).Round(0)
+		resumeClock := deadline.Format("3:04 PM")
 		fmt.Fprintf(w, "cux: all accounts exhausted. %s reaches its reset first — resuming at %s (in %s).\n",
-			email, resumeClock, shortDuration(d))
+			email, resumeClock, shortDuration(time.Until(deadline)))
 		registry.UpdateSelf(func(e *registry.Entry) {
 			e.State = registry.StateWaitingReset
-			e.Detail = fmt.Sprintf("resuming at %s (%s left)", resumeClock, shortDuration(d))
+			e.Detail = fmt.Sprintf("resuming at %s (%s left)", resumeClock, shortDuration(time.Until(deadline)))
 		})
-		// Sleep in slices instead of one block: a concurrent session may
-		// swap or refresh the shared cache while we wait, in which case
-		// capacity is available long before the computed reset. The
-		// probes only read local files — with no other session writing,
-		// they never fire and this degrades to the single plain sleep.
-		for d > 0 {
-			// Refresh an in-place line each slice so the wait shows the
-			// resume time and minutes remaining instead of looking frozen.
-			// Purely cosmetic — the probe/return logic below is unchanged,
-			// so a stalled overnight run still cannot happen.
-			fmt.Fprintf(w, "\r\033[Kcux: resuming at %s · %s remaining…", resumeClock, shortDuration(d))
-			chunk := min(d, waitPollInterval)
-			time.Sleep(chunk)
-			d -= chunk
-			if acct, ok := liveAccountWithCapacity(cfg); ok {
-				fmt.Fprintf(w, "\ncux: %s regained capacity while waiting — resuming early\n", acct.Email)
-				return acct.Email, nil
+		// Count down against the wall-clock deadline (re-read every slice,
+		// so a system sleep can't freeze it), and refresh + probe each
+		// slice so the moment an account actually resets we resume — rather
+		// than sleeping out a computed duration that may be wrong.
+		for {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				break
 			}
+			fmt.Fprintf(w, "\r\033[Kcux: resuming at %s · %s remaining…", resumeClock, shortDuration(remaining))
+			time.Sleep(min(remaining, waitPollInterval))
+			_, _ = monitor.RefreshAll()
 			if target, err := resolveTarget("", trigger, cfg); err == nil {
-				fmt.Fprintf(w, "\ncux: capacity appeared on %s while waiting — resuming early\n", target)
+				fmt.Fprintf(w, "\ncux: %s has capacity — resuming\n", target)
 				return target, nil
 			}
 		}
 		fmt.Fprintln(w) // close the in-place countdown line before relaunch output
-		_, _ = monitor.RefreshAll()
-		if target, err := resolveTarget("", trigger, cfg); err == nil {
-			return target, nil
-		}
+		// Deadline reached — loop back to the check-first refresh above.
 	}
 	return "", errors.New("accounts still exhausted after waiting for resets")
 }
