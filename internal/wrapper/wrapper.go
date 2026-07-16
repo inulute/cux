@@ -859,26 +859,36 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 		deadline := time.Now().Add(d).Round(0)
 		resumeClock := deadline.Format("3:04 PM")
 		fmt.Fprintf(w, "cux: all accounts exhausted. %s reaches its reset first — resuming at %s (in %s).\n",
-			email, resumeClock, shortDuration(time.Until(deadline)))
+			email, resumeClock, countdownRemaining(time.Until(deadline)))
 		registry.UpdateSelf(func(e *registry.Entry) {
 			e.State = registry.StateWaitingReset
-			e.Detail = fmt.Sprintf("resuming at %s (%s left)", resumeClock, shortDuration(time.Until(deadline)))
+			e.Detail = fmt.Sprintf("resuming at %s (%s left)", resumeClock, countdownRemaining(time.Until(deadline)))
 		})
-		// Count down against the wall-clock deadline (re-read every slice,
-		// so a system sleep can't freeze it), and refresh + probe each
-		// slice so the moment an account actually resets we resume — rather
-		// than sleeping out a computed duration that may be wrong.
+		// Count down against the wall-clock deadline (re-read every tick,
+		// so a system sleep can't freeze it). Tick every second in the last
+		// ten minutes so the seconds visibly count down, otherwise once a
+		// minute. Refresh + probe at most once per poll interval (wall-clock
+		// gated, so it also fires promptly after a sleep) so we resume the
+		// moment an account resets without hammering the API each tick.
+		lastRefresh := time.Now().Round(0)
 		for {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				break
 			}
-			fmt.Fprintf(w, "\r\033[Kcux: resuming at %s · %s remaining…", resumeClock, shortDuration(remaining))
-			time.Sleep(min(remaining, waitPollInterval))
-			_, _ = monitor.RefreshAll()
-			if target, err := resolveTarget("", trigger, cfg); err == nil {
-				fmt.Fprintf(w, "\ncux: %s has capacity — resuming\n", target)
-				return target, nil
+			fmt.Fprintf(w, "\r\033[Kcux: resuming at %s · %s remaining…", resumeClock, countdownRemaining(remaining))
+			tick := waitPollInterval
+			if remaining < 10*time.Minute {
+				tick = time.Second
+			}
+			time.Sleep(min(tick, remaining))
+			if time.Now().Sub(lastRefresh) >= waitPollInterval {
+				lastRefresh = time.Now().Round(0)
+				_, _ = monitor.RefreshAll()
+				if target, err := resolveTarget("", trigger, cfg); err == nil {
+					fmt.Fprintf(w, "\ncux: %s has capacity — resuming\n", target)
+					return target, nil
+				}
 			}
 		}
 		fmt.Fprintln(w) // close the in-place countdown line before relaunch output
@@ -1066,6 +1076,25 @@ func pct(w *usage.Window) string {
 		return "--"
 	}
 	return fmt.Sprintf("%.0f%%", w.Utilization)
+}
+
+// countdownRemaining formats the wait-for-reset countdown: minute
+// granularity normally, but seconds once under ten minutes so the final
+// stretch visibly ticks down (e.g. "9m 53s", "45s").
+func countdownRemaining(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d >= 10*time.Minute {
+		return shortDuration(d)
+	}
+	d = d.Round(time.Second)
+	m := int(d / time.Minute)
+	s := int(d % time.Minute / time.Second)
+	if m > 0 {
+		return fmt.Sprintf("%dm %02ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 func shortDuration(d time.Duration) string {
