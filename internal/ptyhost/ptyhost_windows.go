@@ -2,8 +2,8 @@
 
 // Windows attach host, built on ConPTY (the Windows pseudo-console).
 // Mirrors the Unix host's contract — New/Pump/BroadcastWriter/Close plus
-// the socket + frame protocol from frame.go — so cux attach and cuxdeck
-// treat both platforms identically. The one shape difference is process
+// the socket + frame protocol from frame.go — so cux attach and any
+// socket client treat both platforms identically. The one shape difference is process
 // launch: os/exec can't attach a ConPTY, so StartAttached spawns claude
 // with CreateProcess + a PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE attribute
 // and returns a `child` the wrapper drives like any other.
@@ -95,7 +95,7 @@ func New(sockPath string, inputOK bool) (*Host, error) {
 
 	// The attach socket is best-effort: if AF_UNIX is unavailable (older
 	// Windows, or a Wine layer), claude still runs on the ConPTY — it
-	// just isn't mirrored to cux attach / cuxdeck. The ConPTY itself is
+	// just isn't mirrored to cux attach. The ConPTY itself is
 	// the essential part, so a socket error must not sink the session.
 	_ = os.Remove(sockPath)
 	if ln, err := net.Listen("unix", sockPath); err == nil {

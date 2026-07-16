@@ -72,7 +72,7 @@ type Config struct {
 	UpdateCheck           UpdateCheckConfig `json:"update_check"`
 	Theme                 string            `json:"theme"`
 	// Attach exposes each session on a local Unix socket so `cux attach`
-	// (and tools like cuxdeck) can mirror the terminal; AttachInput
+	// (and compatible tools) can mirror the terminal; AttachInput
 	// additionally lets attached clients type into the session.
 	Attach      bool `json:"attach"`
 	AttachInput bool `json:"attach_input"`
@@ -104,7 +104,7 @@ func Defaults() Config {
 		// (resize corruption/jitter, extra CPU on output — see #33). Most
 		// users never attach, so keep claude sitting directly on the real
 		// terminal (native 0.2.x rendering). Opt in with
-		// `cux config set attach true` to enable `cux attach` / cuxdeck.
+		// `cux config set attach true` to enable `cux attach`.
 		Attach:      false,
 		AttachInput: true,
 	}
@@ -375,7 +375,7 @@ func Keys(c Config) []KeyInfo {
 		},
 		{
 			Key: "attach", Default: "false",
-			Description: "run claude on a wrapper PTY so `cux attach`/cuxdeck can mirror it (off = native rendering, no per-session overhead)",
+			Description: "run claude on a wrapper PTY so `cux attach` (and compatible tools) can mirror it (off = native rendering, no per-session overhead)",
 			Current:     strconv.FormatBool(c.Attach),
 		},
 		{

@@ -12,7 +12,7 @@
 // seat change.
 //
 // The socket speaks a minimal framed protocol, shared with `cux attach`
-// and remote surfaces like cuxdeck:
+// and remote surfaces:
 //
 //	[1 byte type][4 bytes big-endian length][payload]
 //

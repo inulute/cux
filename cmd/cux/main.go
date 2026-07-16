@@ -1067,6 +1067,10 @@ func editConfigInteractive() error {
 			if err := setAndSaveConfig("theme", next); err != nil {
 				return err
 			}
+		case "13":
+			if err := setAndSaveConfig("attach", strconv.FormatBool(!c.Attach)); err != nil {
+				return err
+			}
 		default:
 			fmt.Print("Unknown selection.\r\n")
 			waitEnter(raw, reader)
@@ -1118,6 +1122,7 @@ func printConfigEditor(c config.Config) {
 	row(10, "update cadence", strconv.Itoa(c.UpdateCheck.CadenceHours)+"h", "edit hours", false)
 	row(11, "notifications", checkbox(c.Notify), "toggle", true)
 	row(12, "theme", c.Theme, "cycle default/claude", false)
+	row(13, "attach", checkbox(c.Attach), "toggle", true)
 
 	fmt.Printf("%s└────┴────────────────────────────┴────────────────────────────┴────────────────────────────────────┘%s\r\n\r\n", g, r)
 }

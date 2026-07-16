@@ -150,9 +150,9 @@ func finishAttach(fd int, old *term.State, conn net.Conn, why string) {
 func enableAttachPrompt() int {
 	fmt.Fprint(os.Stderr,
 		"cux: attach is disabled.\n"+
-			"     It runs Claude on a wrapper-owned PTY so other terminals (and cuxdeck)\n"+
-			"     can mirror the session — but that adds a little rendering overhead to\n"+
-			"     every session, so it's off by default.\n"+
+			"     It runs Claude on a wrapper-owned PTY so another terminal can mirror\n"+
+			"     the session — but that adds a little rendering overhead to every\n"+
+			"     session, so it's off by default.\n"+
 			"Enable it now? [y/N]: ")
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	if ans := strings.ToLower(strings.TrimSpace(line)); ans != "y" && ans != "yes" {
