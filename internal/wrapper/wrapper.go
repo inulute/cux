@@ -180,6 +180,16 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	// upper bound by design: an unattended session should outlast even
 	// a multi-hour outage, and a human can always Ctrl+C.
 	var apiRetries int
+	// inPlaceRetries scales a separate fibonacci backoff for the case
+	// where a rate limit fires but no other seat has capacity and the
+	// live seat still does (a transient usage-endpoint 429, or a
+	// session/burst sub-cap that never moves the 5h/7d windows). We resume
+	// on the live seat rather than stranding the session in wait-for-reset;
+	// the backoff keeps a genuinely recurring cap from tight-looping (#21).
+	// It is deliberately distinct from apiRetries, which the retry-only
+	// path zeroes every iteration — a shared counter would collapse to a
+	// constant ~10s relaunch.
+	var inPlaceRetries int
 
 	for {
 		if seat, err := switcher.CurrentLiveEmail(); err == nil {
@@ -295,6 +305,10 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 				fmt.Fprintf(w, "cux: %s already has capacity (another session may have swapped) — resuming without switching\n", acct.Email)
 				from, to = acct, acct
 				swapped = false
+				// Another session moved us onto a healthy seat — the common
+				// recovery under many concurrent sessions. Clear any in-place
+				// backoff so a later limit on this fresh seat starts from zero.
+				inPlaceRetries = 0
 			}
 		}
 
@@ -303,48 +317,79 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			target, err := resolveTarget(p.explicitTarget, p.trigger, &cfg)
 			if err != nil && cfg.WaitForReset && p.explicitTarget == "" &&
 				(p.trigger == history.TriggerRateLimit || p.trigger == history.TriggerThreshold) {
-				target, err = waitForReset(p.trigger, &cfg, w)
+				// No other seat has capacity. Before sleeping until a
+				// reset, check whether the live seat itself still has real
+				// 5h/7d room: a rate-limit signal can fire on a healthy
+				// account — a transient 429 on the usage endpoint, or a
+				// session/burst sub-cap that never moves the tracked
+				// windows. Waiting there strands a usable session for the
+				// whole outage (often days on a 7d cap) while the live seat
+				// sits mostly free — the exact failure in issue #37. Resume
+				// in place on a backoff instead; fall through to
+				// wait-for-reset only when the live seat is out too.
+				if acct, ok := liveAccountWithCapacity(&cfg); ok {
+					if hadTurns {
+						inPlaceRetries = 0
+					}
+					delay := fibonacciDelay(inPlaceRetries)
+					inPlaceRetries++
+					fmt.Fprintf(w, "cux: %s hit a limit but no other account has capacity and it still has room — retrying in place in %s…\n",
+						acct.Email, shortDuration(delay))
+					registry.UpdateSelf(func(e *registry.Entry) {
+						e.State = registry.StateRetrying
+						e.Detail = fmt.Sprintf("retrying in place, next try in %s", shortDuration(delay))
+					})
+					time.Sleep(delay)
+					from, to, swapped, err = acct, acct, false, nil
+				} else {
+					target, err = waitForReset(p.trigger, &cfg, w)
+				}
 			}
-			if err != nil {
-				fmt.Fprintf(w, "cux: %v — staying on current account\n", err)
-				return exitCode, nil
-			}
+			if swapped {
+				// A real swap onto another seat is progress — clear any
+				// in-place backoff carried over from earlier iterations.
+				inPlaceRetries = 0
+				if err != nil {
+					fmt.Fprintf(w, "cux: %v — staying on current account\n", err)
+					return exitCode, nil
+				}
 
-			registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateSwapping })
-			var swapErr error
-			from, to, swapErr = switcher.SwitchTo(target)
-			if swapErr != nil {
-				fmt.Fprintf(w, "cux: switch failed: %v\n", swapErr)
-				return 1, swapErr
-			}
+				registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateSwapping })
+				var swapErr error
+				from, to, swapErr = switcher.SwitchTo(target)
+				if swapErr != nil {
+					fmt.Fprintf(w, "cux: switch failed: %v\n", swapErr)
+					return 1, swapErr
+				}
 
-			// Append swap to the history log. Best-effort — a failure
-			// here doesn't unwind the swap.
-			toUsageCache, _ := usage.LoadCache()
-			toUsage := toUsageCache[to.Email]
-			entry := history.Entry{
-				From:        from.Email,
-				To:          to.Email,
-				Trigger:     p.trigger,
-				Reason:      p.reason,
-				SessionID:   sessionID,
-				CWD:         cwd,
-				FromUsage5h: utilizationOrZero(p.fromUsage.FiveHour),
-				FromUsage7d: utilizationOrZero(p.fromUsage.SevenDay),
-				ToUsage5h:   utilizationOrZero(toUsage.FiveHour),
-				ToUsage7d:   utilizationOrZero(toUsage.SevenDay),
-			}
-			_ = history.Append(entry)
+				// Append swap to the history log. Best-effort — a failure
+				// here doesn't unwind the swap.
+				toUsageCache, _ := usage.LoadCache()
+				toUsage := toUsageCache[to.Email]
+				entry := history.Entry{
+					From:        from.Email,
+					To:          to.Email,
+					Trigger:     p.trigger,
+					Reason:      p.reason,
+					SessionID:   sessionID,
+					CWD:         cwd,
+					FromUsage5h: utilizationOrZero(p.fromUsage.FiveHour),
+					FromUsage7d: utilizationOrZero(p.fromUsage.SevenDay),
+					ToUsage5h:   utilizationOrZero(toUsage.FiveHour),
+					ToUsage7d:   utilizationOrZero(toUsage.SevenDay),
+				}
+				_ = history.Append(entry)
 
-			// Refresh both accounts' caches. The "from" entry now
-			// represents the freshest reading we have; the "to" entry
-			// will be updated again at the first Stop on the new
-			// session, but doing it here gives `cux list` correct data
-			// immediately.
-			go func(from, to string) {
-				_ = monitor.RefreshActive(from)
-				_ = monitor.RefreshActive(to)
-			}(from.Email, to.Email)
+				// Refresh both accounts' caches. The "from" entry now
+				// represents the freshest reading we have; the "to" entry
+				// will be updated again at the first Stop on the new
+				// session, but doing it here gives `cux list` correct data
+				// immediately.
+				go func(from, to string) {
+					_ = monitor.RefreshActive(from)
+					_ = monitor.RefreshActive(to)
+				}(from.Email, to.Email)
+			}
 		}
 
 		// Update the manual-switch guard. A deliberate /switch sets the
@@ -1049,6 +1094,7 @@ func nextAvailability(
 			continue
 		}
 		readyAt := now
+		blocked := false
 		unknown := false
 		for _, wc := range []struct {
 			win *usage.Window
@@ -1060,6 +1106,7 @@ func nextAvailability(
 			if wc.win == nil || wc.win.Utilization < float64(wc.cap) {
 				continue
 			}
+			blocked = true
 			if wc.win.ResetsAt == nil {
 				unknown = true
 				break
@@ -1068,7 +1115,17 @@ func nextAvailability(
 				readyAt = *wc.win.ResetsAt
 			}
 		}
-		if unknown {
+		// An account under every threshold has capacity right now — there
+		// is nothing to wait for. Naming it as the one that "reaches its
+		// reset first" hands back a now-ish deadline that resetSlack pads
+		// into a bogus ~2½-minute countdown, and since it never actually
+		// gains capacity by waiting the session relaunches into the same
+		// verdict forever (issue #37: a 7%-utilised seat named as earliest
+		// reset). Skip it. Skip too when a capped window carries no reset
+		// stamp, or its reset already lies in the past (cache lag after a
+		// roll-over) — a re-poll on the wait cadence heals both, whereas a
+		// stale past timestamp would produce the same sub-slack deadline.
+		if !blocked || unknown || !readyAt.After(now) {
 			continue
 		}
 		if bestEmail == "" || readyAt.Before(best) {
