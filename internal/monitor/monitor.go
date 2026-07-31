@@ -36,6 +36,33 @@ const lockTimeout = 10 * time.Second
 // errors so the caller can surface them without aborting the whole
 // refresh — one expired token shouldn't poison the others.
 func RefreshAll() (usage.Cache, []error) {
+	return refreshAll(0)
+}
+
+// RefreshAllCoalesced refreshes only the accounts whose cached reading is
+// missing or older than maxAge. Because the refresh holds a cross-process
+// file lock, N sessions that all poll within the same maxAge window
+// collapse to a single API sweep: the first through the lock fetches, the
+// rest find a fresh-enough cache and skip. This is the relief for the
+// usage endpoint 429ing once many cux terminals poll at once (issue #39,
+// related to #21). A maxAge <= 0 is identical to RefreshAll — every
+// account is fetched — so freshness-critical callers keep using RefreshAll.
+func RefreshAllCoalesced(maxAge time.Duration) (usage.Cache, []error) {
+	return refreshAll(maxAge)
+}
+
+// freshEnough reports whether an entry polled at polledAt is recent enough
+// that a coalesced refresh may skip re-fetching it. A zero polledAt (never
+// polled) or a non-positive maxAge (coalescing off) is never fresh enough,
+// so those always fetch.
+func freshEnough(polledAt time.Time, maxAge time.Duration, now time.Time) bool {
+	if maxAge <= 0 || polledAt.IsZero() {
+		return false
+	}
+	return now.Sub(polledAt) < maxAge
+}
+
+func refreshAll(maxAge time.Duration) (usage.Cache, []error) {
 	if err := os.MkdirAll(paths.BackupRoot(), 0o700); err != nil {
 		return nil, []error{fmt.Errorf("monitor: mkdir data dir: %w", err)}
 	}
@@ -57,7 +84,12 @@ func RefreshAll() (usage.Cache, []error) {
 		cache = usage.Cache{}
 	}
 	// Fetch all accounts in parallel — latency is dominated by the API
-	// round-trip, so N sequential calls cost N× more than needed.
+	// round-trip, so N sequential calls cost N× more than needed. Under
+	// coalescing (maxAge > 0), skip any account another session already
+	// refreshed within maxAge — the shared cache holds a current-enough
+	// reading, gated per account so a newly-added or last-errored seat is
+	// still fetched.
+	now := time.Now()
 	type result struct {
 		cacheKey string
 		entry    usage.AccountUsage
@@ -66,7 +98,12 @@ func RefreshAll() (usage.Cache, []error) {
 	}
 	ch := make(chan result, len(state.Accounts))
 	var wg sync.WaitGroup
+	fetched := 0
 	for slot, a := range state.Accounts {
+		if u, ok := cache[a.CacheKey()]; ok && freshEnough(u.PolledAt, maxAge, now) {
+			continue
+		}
+		fetched++
 		wg.Add(1)
 		go func(slot int, a store.Account) {
 			defer wg.Done()
@@ -90,8 +127,12 @@ func RefreshAll() (usage.Cache, []error) {
 		}
 		cache[r.cacheKey] = r.entry
 	}
-	if err := usage.SaveCache(cache); err != nil {
-		errs = append(errs, err)
+	// When every account was fresh enough the cache is untouched, so skip
+	// the write entirely — that no-op is the whole point of coalescing.
+	if fetched > 0 {
+		if err := usage.SaveCache(cache); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return cache, errs
 }

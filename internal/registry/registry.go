@@ -109,6 +109,35 @@ func List() []Entry {
 	return out
 }
 
+// PruneDead removes session entries whose process is gone. List already
+// drops them as a side effect, but only when something calls it — on a
+// machine that never runs `cux sessions`, dead files pile up (issue #39:
+// 22 of 34 entries were for processes that no longer existed, some days
+// old). Called at wrapper startup, mirroring ReapStaleAttachSockets, so
+// the sessions directory is self-healing. The caller's own entry is
+// skipped: UpdateSelf may not have written it yet, and it is live anyway.
+func PruneDead() {
+	entries, err := os.ReadDir(dir())
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	for _, de := range entries {
+		name := de.Name()
+		if de.IsDir() || filepath.Ext(name) != ".json" {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSuffix(name, ".json"))
+		if err != nil || pid <= 0 || pid == self {
+			continue
+		}
+		if processAlive(pid) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir(), name))
+	}
+}
+
 // ReapStaleAttachSockets removes attach sockets left behind by wrappers
 // that crashed or were killed: the listener died with its process, so a
 // socket whose PID (its filename) is gone can never accept again — but
