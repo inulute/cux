@@ -924,17 +924,22 @@ func writeSessionStartUsageContext(stdout io.Writer) {
 	_, _ = stdout.Write(append(out, '\n'))
 }
 
-// RateLimit is `cux hook rate-limit`. Claude Code routes generic
-// PostToolUseFailure events through this; we filter only the "error"
-// field for rate-limit indicators before signalling.
+// RateLimit is `cux hook rate-limit`. Claude Code routes every
+// StopFailure and PostToolUseFailure through here; classifyFailure /
+// classifyRateLimit decide whether the payload is a genuine account-level
+// rate/usage cap (→ swap) or a retryable API failure (→ backoff), and drop
+// everything else. Because a swap restarts the wrapped process, that
+// decision is deliberately conservative — see classifyRateLimit for the
+// ordered guards: foreign-content and denylist rejects first, then strong
+// natural-language cap phrasings on any event, and technical tokens
+// (429, rate_limit_error) only on a turn-level StopFailure. In particular
+// a single PostToolUseFailure accepts strong prose only, so a failed
+// tool's stderr or a fetched web page can't rotate the seat (#39).
 //
-// We intentionally search only the error field — not tool_input or
-// the full payload — to avoid false positives when Claude generates or
-// executes code that happens to contain "rate_limit" as a variable
-// name or string literal.
-//
-// The "error" field can be a JSON string or a JSON object depending on
-// the Claude Code version; we extract its text from either shape.
+// Only the structured "error"/"error_details" fields and
+// last_assistant_message are searched — never tool_input or the full
+// payload — and each field may be a JSON string or object, which
+// extractErrorText normalises.
 func RateLimit(stdin io.Reader) error {
 	if !isWrapped() {
 		return nil
@@ -983,33 +988,8 @@ func classifyFailure(in rateLimitHookInput) (signals.Name, string) {
 	}
 
 	lower := strings.ToLower(combined)
-	isRateLimit := strings.Contains(lower, "rate_limit") ||
-		strings.Contains(lower, "rate limit") ||
-		strings.Contains(lower, "session limit") ||
-		strings.Contains(lower, "hit your session limit") ||
-		strings.Contains(lower, "usage limit") ||
-		// Claude Code's user-facing wording for the usage caps drops the
-		// word "usage" in several builds ("You've hit your limit —
-		// resets 7pm", "Weekly limit reached"). Missing these turned an
-		// exhausted account into an endless fixed-backoff retry loop in
-		// the wrapper instead of a swap / sleep-until-reset.
-		strings.Contains(lower, "hit your limit") ||
-		strings.Contains(lower, "reached your limit") ||
-		strings.Contains(lower, "limit reached") ||
-		strings.Contains(lower, "limit will reset") ||
-		strings.Contains(lower, "overloaded_error") ||
-		strings.Contains(lower, "too many requests") ||
-		strings.Contains(lower, "429")
-
-	if isRateLimit {
-		message := assistantText
-		if message == "" {
-			message = detailText
-		}
-		if message == "" {
-			message = errText
-		}
-		return signals.RateLimited, message
+	if name, message := classifyRateLimit(in, lower, errText, detailText, assistantText); name != "" {
+		return name, message
 	}
 
 	// Non-rate-limit API failure. Two extra guards beyond the rate-limit
@@ -1037,6 +1017,106 @@ func classifyFailure(in rateLimitHookInput) (signals.Name, string) {
 // apiStatusCode matches 5xx status codes as standalone tokens so a
 // number embedded in unrelated text ("215000 tokens") never counts.
 var apiStatusCode = regexp.MustCompile(`\b(500|502|503|504|529)\b`)
+
+// classifyRateLimit decides whether a failure payload is a genuine
+// account-level rate/usage limit that warrants a seat swap. A swap
+// restarts the wrapped Claude Code process (killing in-flight work), so
+// a false positive is destructive — this classifier is deliberately
+// conservative. Issue #39: v0.3.3 broadened the match to a bare
+// "limit reached", which then fired on "concurrent subagent limit
+// reached" (a Claude Code refusal, not a cap) and on fetched web pages
+// that merely document their own "rate limits". Both restarted healthy
+// accounts and one killed 20 running subagents.
+//
+// lower is the lower-cased join of all populated fields; the raw field
+// texts are passed through so the swap-history message stays readable.
+func classifyRateLimit(in rateLimitHookInput, lower, errText, detailText, assistantText string) (signals.Name, string) {
+	// Guard 1 — foreign content, checked before any signal. A genuine
+	// Anthropic rate-limit error is a short structured message; it is
+	// never a captured web page. When the payload carries a tool's fetched
+	// document — WebFetch prefixes a "URL: <link>" header, HTML starts
+	// with a doctype/tag — nothing inside it can be trusted as an API
+	// signal, not even a strong one (a docs page may literally read
+	// "usage limits"). Structural markers only: bare links appear in
+	// legitimate cap messages (upgrade / console URLs) and must not
+	// disqualify.
+	for _, marker := range []string{"url: http", "<!doctype", "<html", "<head", "<body"} {
+		if strings.Contains(lower, marker) {
+			return "", ""
+		}
+	}
+
+	// Guard 2 — denylist. These name a *different* limit than the account
+	// cap, or explicitly declare the condition non-retryable. They must
+	// never swap even though the word "limit" appears.
+	for _, deny := range []string{
+		"do not retry",
+		"concurrent subagent", "concurrent_subagents", "max_concurrent_subagents",
+		"context window", "context length", "maximum context",
+		"token limit", "output limit", "output token", "max tokens",
+		"character limit", "file size", "recursion limit",
+	} {
+		if strings.Contains(lower, deny) {
+			return "", ""
+		}
+	}
+
+	message := assistantText
+	if message == "" {
+		message = detailText
+	}
+	if message == "" {
+		message = errText
+	}
+
+	// Strong signals — natural-language account/usage-cap phrasings that
+	// do not occur incidentally in tool output or code. Trusted on any
+	// event: a real cap can surface through a tool call as well as a turn.
+	for _, s := range []string{
+		"usage limit",
+		"session limit",
+		"hit your limit", "reached your limit",
+		"weekly limit", "limit will reset",
+		"upgrade to increase your usage",
+	} {
+		if strings.Contains(lower, s) {
+			return signals.RateLimited, message
+		}
+	}
+
+	// The remaining signals are technical tokens that can legitimately
+	// appear in a failed tool's own output (another service's 429, a
+	// linter flagging a `rate_limit` identifier). Restrict them to a
+	// turn-level StopFailure — the whole turn dying after Claude Code
+	// exhausted its retries — never a single PostToolUseFailure.
+	if in.HookEventName != "StopFailure" {
+		return "", ""
+	}
+	// Anthropic API error types are unambiguous on a StopFailure.
+	for _, s := range []string{"rate_limit_error", "rate_limit", "overloaded_error"} {
+		if strings.Contains(lower, s) {
+			return signals.RateLimited, message
+		}
+	}
+	// Generic phrasings still need an API/Anthropic context token nearby,
+	// so a turn that merely discusses "rate limit" or fails for an
+	// unrelated reason does not rotate the seat.
+	generic := false
+	for _, s := range []string{"429", "too many requests", "quota exceeded", "rate limit"} {
+		if strings.Contains(lower, s) {
+			generic = true
+			break
+		}
+	}
+	if generic {
+		for _, ctx := range []string{"api", "anthropic", "claude", "http", "status", "response", "overloaded", "retry-after", "retry after"} {
+			if strings.Contains(lower, ctx) {
+				return signals.RateLimited, message
+			}
+		}
+	}
+	return "", ""
+}
 
 // isAPIFailure reports whether an error string from StopFailure looks
 // like a transport- or server-side API failure worth retrying, as
