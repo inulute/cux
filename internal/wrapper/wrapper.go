@@ -115,6 +115,10 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	// can show every concurrent session at a glance.
 	registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateRunning })
 	defer registry.RemoveSelf()
+	// Sweep entries left by wrappers that crashed or were killed, so the
+	// sessions directory doesn't accumulate dead PIDs on a long-lived,
+	// many-terminal machine (issue #39). Best-effort; never blocks launch.
+	registry.PruneDead()
 
 	// Attachable sessions: when stdin is a real terminal, run claude on
 	// a wrapper-owned PTY and serve mirrors on a Unix socket. The PTY
@@ -169,8 +173,11 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		// One-shot background refresh so threshold checks have something
 		// to work with on the first turn. Errors are ignored — a fresh
 		// install with no usage data is fine; threshold logic falls back
-		// to "no decision" rather than guessing.
-		go func() { _, _ = monitor.RefreshAll() }()
+		// to "no decision" rather than guessing. Coalesced: when many
+		// terminals start together this is the burst that 429s the usage
+		// endpoint (#39), and a reading a sibling took seconds ago is
+		// exactly as good for a first-turn warm-up.
+		go func() { _, _ = monitor.RefreshAllCoalesced(refreshCoalesceWindow) }()
 	}
 
 	var resumeRetryPending bool
@@ -897,6 +904,11 @@ const (
 	// resetBuffer is extra margin on top of resetSlack so a resume lands
 	// a bit after the reset rather than exactly on it.
 	resetBuffer = time.Minute
+	// refreshCoalesceWindow is how recent a sibling's usage poll must be
+	// for a startup warm-up to reuse it instead of hitting the API. Kept
+	// well under waitPollInterval so no freshness-sensitive caller could
+	// ever be starved of a current reading by coalescing.
+	refreshCoalesceWindow = 20 * time.Second
 )
 
 func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (string, error) {

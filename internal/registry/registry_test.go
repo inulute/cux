@@ -83,6 +83,36 @@ func TestListReapsDeadProcesses(t *testing.T) {
 	}
 }
 
+func TestPruneDead(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	// A real process that has already exited — its PID is dead.
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadPID := cmd.Process.Pid
+	_ = cmd.Wait()
+
+	// Our own live entry, plus a forged dead-PID entry alongside it.
+	UpdateSelf(func(e *Entry) { e.State = StateRunning })
+	dead := file(deadPID)
+	data := []byte(`{"pid":` + itoa(deadPID) + `,"cwd":"/x","state":"running","startedAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}`)
+	if err := os.WriteFile(dead, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	PruneDead()
+
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Error("PruneDead should have removed the dead-PID entry")
+	}
+	if _, err := os.Stat(file(os.Getpid())); err != nil {
+		t.Errorf("PruneDead removed the live self entry: %v", err)
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
