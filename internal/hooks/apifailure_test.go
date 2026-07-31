@@ -81,6 +81,73 @@ func TestClassifyFailure(t *testing.T) {
 			},
 			want: signals.RateLimited,
 		},
+		{
+			// Issue #39 case 1: a Claude Code concurrency refusal, not a
+			// cap. Dropped by event scoping (no strong prose, and the weak
+			// tiers require StopFailure) *and* by the denylist. The account
+			// was at 9%/36% — a swap here restarted 20 live subagents.
+			name: "concurrent subagent limit refusal is NOT a rate limit",
+			in: rateLimitHookInput{
+				HookEventName: "PostToolUseFailure",
+				Error: rawStr("Concurrent subagent limit reached. You can run 20 subagents at once. " +
+					"Do not retry. If the user wants more concurrent subagents, ask them to increase " +
+					"CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS."),
+			},
+			want: "",
+		},
+		{
+			// Issue #39 case 2: a WebFetch of a docs page that documents its
+			// own "Rate limits". The "URL: http" header marks it as fetched
+			// content, so no substring in it is trusted.
+			name: "fetched page documenting rate limits is NOT a rate limit",
+			in: rateLimitHookInput{
+				HookEventName: "PostToolUseFailure",
+				Error: rawStr("Exit code 1\nURL: https://developers.pinterest.com/apps/\r\n" +
+					"Entwicklerplattform\r\nRate limits\r\n1000/Tag\r\n"),
+			},
+			want: "",
+		},
+		{
+			// Guard ordering: foreign-content is checked before strong
+			// signals, so a fetched page that literally contains "usage
+			// limit" still does not swap — even on a StopFailure.
+			name: "foreign content beats a strong signal inside it",
+			in: rateLimitHookInput{
+				HookEventName: "StopFailure",
+				Error:         rawStr("URL: https://docs.example.com/pricing\r\nYour plan usage limit is 5000 calls."),
+			},
+			want: "",
+		},
+		{
+			// A genuine account cap surfaced through a tool call: strong
+			// prose, no foreign marker, no denylist term → still swaps.
+			name: "genuine usage-limit prose swaps even via a tool failure",
+			in: rateLimitHookInput{
+				HookEventName: "PostToolUseFailure",
+				Error:         rawStr("Claude usage limit reached. Your limit will reset at 3pm."),
+			},
+			want: signals.RateLimited,
+		},
+		{
+			// A bare 429 in a failed tool's own stderr must not swap: the
+			// weak tiers require a turn-level StopFailure.
+			name: "bare 429 from a tool failure does NOT swap",
+			in: rateLimitHookInput{
+				HookEventName: "PostToolUseFailure",
+				Error:         rawStr("HTTP 429 Too Many Requests from api.github.com"),
+			},
+			want: "",
+		},
+		{
+			// The same 429 on a StopFailure, with API context present, is
+			// a real cap and swaps.
+			name: "429 with API context on a StopFailure swaps",
+			in: rateLimitHookInput{
+				HookEventName: "StopFailure",
+				Error:         rawStr("HTTP 429 too many requests from api.anthropic.com"),
+			},
+			want: signals.RateLimited,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
