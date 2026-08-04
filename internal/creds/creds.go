@@ -4,7 +4,7 @@
 //
 //   - "Live" credentials are wherever Claude Code itself reads from.
 //     cux must write here to actually change the active account.
-//     macOS:     Keychain, generic password, service "Claude Code-credentials".
+//     macOS:     Keychain generic password; see macKeychainServices.
 //     Linux/Win: File at ~/.claude/.credentials.json, mode 0600.
 //
 //   - "Backup" credentials are cux's per-account stash. On macOS/Windows
@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -46,10 +47,25 @@ import (
 	"github.com/inulute/cux/internal/paths"
 )
 
-// macKeychainService is the service name Claude Code itself uses on macOS.
-// We read and write under this exact string so a fresh `claude login`
-// followed by `cux add` finds the credentials in the expected place.
-const macKeychainService = "Claude Code-credentials"
+// macKeychainServices are the generic-password service names Claude Code is
+// known to keep its credentials under on macOS, in the order we try them.
+//
+// Most installs have only the first, and it holds everything. Some installs
+// — the name suggests managed/enterprise provisioning — also have the
+// second, and then the account login lives there while the classic item is
+// left holding just the `mcpOAuth` block for MCP servers (issue #42).
+// Because the classic item still *exists* in that case, selecting by name
+// silently yields credentials with no account token, so the live item is
+// chosen by content instead: see selectLiveItem.
+var macKeychainServices = []string{
+	"Claude Code-credentials",
+	"Orca Claude Code Managed Credentials",
+}
+
+// keychainExitNotFound is `security`'s exit code for "no such item".
+// Any other non-zero exit is a real failure (a denied keychain prompt, a
+// locked keychain) and must not be reported as "not logged in".
+const keychainExitNotFound = 44
 
 // backupKeyringService is cux's own namespace inside the OS keystore on
 // macOS/Windows. Distinct from claude-swap's "claude-code" so a user who
@@ -70,6 +86,17 @@ const (
 // (user never logged in, or just logged out).
 var ErrNotFound = errors.New("creds: live credentials not found")
 
+// ErrNoAccountToken is returned when credentials *were* found but carry no
+// claudeAiOauth.accessToken — an MCP-only keychain item, or a backup blob
+// captured from one.
+//
+// Kept distinct from ErrNotFound on purpose. The two conditions send a user
+// looking in completely different places: ErrNotFound means "log in",
+// ErrNoAccountToken means "the login is somewhere cux did not look, or the
+// stored copy is not a login at all". Issue #42 was hard to diagnose
+// precisely because both reported "live credentials not found".
+var ErrNoAccountToken = errors.New("creds: credentials found but they carry no account token (claudeAiOauth)")
+
 // envCredsBackend forces the plain-file storage backend on any
 // platform when set to "file". Its primary purpose is test isolation:
 // on macOS/Windows both the live and backup stores live in the OS
@@ -84,12 +111,31 @@ func fileBackendForced() bool {
 }
 
 // ReadLive returns the active credential blob Claude Code is currently
-// using. The format is an opaque JSON string — we don't parse it.
+// using. The format is otherwise opaque to us — we only check that it
+// carries an account token.
+//
+// Credentials that exist but hold no claudeAiOauth.accessToken come back as
+// ErrNoAccountToken rather than as a blob, so no caller can stash one as a
+// backup or write it back live. The macOS path already selects by content;
+// the check lives here so the file backends answer identically and the
+// sentinel is not a platform quirk.
 func ReadLive() (string, error) {
+	var (
+		blob string
+		err  error
+	)
 	if runtime.GOOS == "darwin" && !fileBackendForced() {
-		return readLiveMacOS()
+		blob, err = readLiveMacOS()
+	} else {
+		blob, err = readLiveFile()
 	}
-	return readLiveFile()
+	if err != nil {
+		return "", err
+	}
+	if err := requireAccountToken(blob); err != nil {
+		return "", err
+	}
+	return blob, nil
 }
 
 // WriteLive replaces the live credential blob Claude Code reads.
@@ -98,6 +144,9 @@ func ReadLive() (string, error) {
 func WriteLive(blob string) error {
 	if blob == "" {
 		return errors.New("creds: refusing to write empty live credentials")
+	}
+	if err := requireAccountToken(blob); err != nil {
+		return fmt.Errorf("creds: refusing to write live credentials with no account token — that would sign you out: %w", err)
 	}
 	if runtime.GOOS == "darwin" && !fileBackendForced() {
 		return writeLiveMacOS(blob)
@@ -122,6 +171,9 @@ func WriteBackup(slot int, email, blob string) error {
 	if blob == "" {
 		return errors.New("creds: refusing to write empty backup credentials")
 	}
+	if err := requireAccountToken(blob); err != nil {
+		return fmt.Errorf("creds: refusing to back up credentials with no account token — the slot would sign you out when switched to: %w", err)
+	}
 	switch {
 	case runtime.GOOS == "linux" || fileBackendForced():
 		return writeBackupFile(slot, email, blob)
@@ -133,7 +185,8 @@ func WriteBackup(slot int, email, blob string) error {
 
 // ExtractAccessToken pulls the OAuth bearer token out of a credentials
 // blob (the same JSON shape Claude Code writes to .credentials.json).
-// Returns ErrNotFound if the blob is missing the expected field.
+// Returns ErrNotFound for an empty blob and ErrNoAccountToken for a blob
+// that parses but has no claudeAiOauth.accessToken.
 //
 // The token is never logged; this helper does not surface it in any
 // error message that propagates out of the package.
@@ -150,9 +203,31 @@ func ExtractAccessToken(blob string) (string, error) {
 		return "", fmt.Errorf("creds: parse blob: %w", err)
 	}
 	if doc.ClaudeAIOAuth.AccessToken == "" {
-		return "", ErrNotFound
+		return "", ErrNoAccountToken
 	}
 	return doc.ClaudeAIOAuth.AccessToken, nil
+}
+
+// hasAccountToken reports whether blob carries a usable account token.
+func hasAccountToken(blob string) bool {
+	_, err := ExtractAccessToken(blob)
+	return err == nil
+}
+
+// requireAccountToken rejects a blob that is not a usable login. Writing
+// one over the live credentials signs the user out with no visible error,
+// and stashing one as a backup builds a slot that signs them out later when
+// it is switched to — the second-order damage in issue #42, where an MCP-only
+// keychain item was captured by `cux add` as if it were an account login.
+func requireAccountToken(blob string) error {
+	_, err := ExtractAccessToken(blob)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrNotFound) {
+		return ErrNoAccountToken
+	}
+	return err
 }
 
 // IsTokenExpired reports whether the access token in blob has already
@@ -286,31 +361,149 @@ func DeleteBackup(slot int, email string) error {
 // password, no extra metadata) and don't risk the Go library prompting
 // the user for keychain access on every read.
 
-func readLiveMacOS() (string, error) {
-	cmd := exec.Command("security", "find-generic-password",
-		"-s", macKeychainService, "-w")
-	out, err := cmd.Output()
+// macKeychainItem is one existing generic-password item we found.
+type macKeychainItem struct {
+	service string
+	blob    string
+}
+
+// errKeychainItemAbsent marks `security` exit 44 (no such item) so the
+// enumeration can skip a missing service without hiding a real failure.
+var errKeychainItemAbsent = errors.New("creds: keychain item absent")
+
+// readMacKeychainSecret returns the secret stored under one service name.
+func readMacKeychainSecret(service string) (string, error) {
+	out, err := exec.Command("security", "find-generic-password",
+		"-s", service, "-w").Output()
 	if err != nil {
-		// `security` returns exit 44 when the item isn't found.
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return "", ErrNotFound
+			if ee.ExitCode() == keychainExitNotFound {
+				return "", errKeychainItemAbsent
+			}
+			return "", fmt.Errorf("creds: security find %q: exit %d: %s",
+				service, ee.ExitCode(), strings.TrimSpace(string(ee.Stderr)))
 		}
-		return "", fmt.Errorf("creds: security find: %w", err)
+		return "", fmt.Errorf("creds: security find %q: %w", service, err)
 	}
 	return trimTrailingNewline(string(out)), nil
 }
 
+// findMacKeychainItems returns every known credentials item that exists, in
+// macKeychainServices order. A missing item is not an error; a keychain that
+// refuses to be read is, but only when it leaves us with nothing at all.
+func findMacKeychainItems() ([]macKeychainItem, error) {
+	var (
+		out      []macKeychainItem
+		firstErr error
+	)
+	for _, service := range macKeychainServices {
+		blob, err := readMacKeychainSecret(service)
+		if err != nil {
+			if !errors.Is(err, errKeychainItemAbsent) && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		out = append(out, macKeychainItem{service: service, blob: blob})
+	}
+	if len(out) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, ErrNotFound
+	}
+	return out, nil
+}
+
+// selectLiveItem picks the item cux should treat as the live credentials:
+// the first one whose blob actually carries an account token.
+//
+// When no item has one it returns the first item that exists along with
+// ErrNoAccountToken. The item is still useful to the write path — restoring
+// a backup should land in the item that is already there rather than
+// creating a new one — while the read path discards it and surfaces the
+// error, so no caller can mistake an MCP-only blob for a login.
+func selectLiveItem(items []macKeychainItem) (macKeychainItem, error) {
+	if len(items) == 0 {
+		return macKeychainItem{}, ErrNotFound
+	}
+	for _, it := range items {
+		if hasAccountToken(it.blob) {
+			return it, nil
+		}
+	}
+	return items[0], ErrNoAccountToken
+}
+
+func readLiveMacOS() (string, error) {
+	items, err := findMacKeychainItems()
+	if err != nil {
+		return "", err
+	}
+	it, err := selectLiveItem(items)
+	if err != nil {
+		return "", err
+	}
+	return it.blob, nil
+}
+
+// keychainAcctRe matches the `acct` attribute in `security`'s item dump.
+// Only the quoted form is accepted: the attribute can also print as <NULL>
+// or as a hex literal, and in both cases we would rather fall back to $USER
+// than write under a mangled account name.
+var keychainAcctRe = regexp.MustCompile(`(?m)^\s*"acct"<blob>="(.*)"\s*$`)
+
+// macKeychainAccount reads an item's own account name back from the
+// keychain, returning "" when it cannot be determined.
+//
+// This matters because `security add-generic-password -U` matches on the
+// (service, account) pair: writing under the wrong account name creates a
+// *second* item beside the real one, exits 0, and leaves Claude Code still
+// reading the original — a switch that reports success and changes nothing
+// (issue #42). Note that `find-generic-password` reports only the first
+// match for a service, so a machine that already accumulated duplicates
+// from that bug needs them removed by hand.
+func macKeychainAccount(service string) string {
+	out, err := exec.Command("security", "find-generic-password",
+		"-s", service).Output()
+	if err != nil {
+		return ""
+	}
+	return parseKeychainAccount(string(out))
+}
+
+func parseKeychainAccount(dump string) string {
+	m := keychainAcctRe.FindStringSubmatch(dump)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
 func writeLiveMacOS(blob string) error {
-	user := os.Getenv("USER")
+	// Write into whichever item the read path selects, so a switch lands
+	// where Claude Code is actually looking. Falling back to the classic
+	// service only when nothing exists keeps a first-ever write working.
+	service := macKeychainServices[0]
+	account := ""
+	if items, err := findMacKeychainItems(); err == nil {
+		if it, _ := selectLiveItem(items); it.service != "" {
+			service = it.service
+			account = macKeychainAccount(service)
+		}
+	}
+	if account == "" {
+		account = os.Getenv("USER")
+	}
 	cmd := exec.Command("security", "add-generic-password",
 		"-U", // update if already present
-		"-s", macKeychainService,
-		"-a", user,
+		"-s", service,
+		"-a", account,
 		"-w", blob,
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("creds: security add: %w (%s)", err, out)
+		return fmt.Errorf("creds: security add %q: %w (%s)", service, err, out)
 	}
 	return nil
 }
@@ -397,10 +590,13 @@ func readBackupKeychainMacOS(slot int, email string) (string, error) {
 		"-wa", backupKeyringUser(slot, email))
 	out, err := cmd.Output()
 	if err != nil {
-		// `security` returns exit 44 when the item isn't found.
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return "", ErrNotFound
+			if ee.ExitCode() == keychainExitNotFound {
+				return "", ErrNotFound
+			}
+			return "", fmt.Errorf("creds: security find backup: exit %d: %s",
+				ee.ExitCode(), strings.TrimSpace(string(ee.Stderr)))
 		}
 		return "", fmt.Errorf("creds: security find backup: %w", err)
 	}
