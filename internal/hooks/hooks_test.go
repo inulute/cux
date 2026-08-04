@@ -3,6 +3,8 @@ package hooks
 import (
 	"bytes"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,12 +140,24 @@ func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// RefreshAll runs inside the hook, so point the usage API at a local
+	// server that always fails. The seeded cache below then survives the
+	// refresh — refreshOne returns the fetch error without caching — which
+	// is what this test needs, and it stays hermetic.
+	//
+	// This used to be achieved with a credential blob that had no
+	// accessToken, so refreshOne bailed before the API call. That blob is no
+	// longer writable: creds.WriteLive refuses credentials with no account
+	// token, because writing them over a live login silently signs the user
+	// out (issue #42).
+	apiDown := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "usage endpoint unavailable in test", http.StatusInternalServerError)
+	}))
+	defer apiDown.Close()
+	t.Setenv("CUX_USAGE_ENDPOINT", apiDown.URL)
+
 	// Backup credentials for slot 2 (target account). The hook calls
 	// switcher.SwitchTo directly, which reads these files to swap creds.
-	// The credential blob intentionally omits "accessToken" so that
-	// RefreshAll's refreshOne call hits ExtractAccessToken error and
-	// returns before making a real API call — avoiding a 401 that would
-	// mark the account as TokenExpired and prevent PickNext from selecting it.
 	// Resolve the directory through paths.AccountDir rather than
 	// hand-building it: the backup root differs per platform (XDG on
 	// Linux, ~/.cux elsewhere) and a hardcoded layout only matched Linux.
@@ -151,7 +165,7 @@ func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 	if err := os.MkdirAll(acct2Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	fakeCreds := `{"cux-test-slot":"2"}` // no accessToken → no API call
+	fakeCreds := `{"cux-test-slot":"2","claudeAiOauth":{"accessToken":"test-token-2"}}`
 	if err := os.WriteFile(filepath.Join(acct2Dir, "credentials.json"), []byte(fakeCreds), 0o600); err != nil {
 		t.Fatal(err)
 	}

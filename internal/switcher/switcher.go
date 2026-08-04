@@ -50,6 +50,17 @@ func AddCurrent(preferredSlot int, alias string, skipAutoAlias bool) (added stor
 		if errors.Is(err, creds.ErrNotFound) {
 			return store.Account{}, false, errors.New("no active Claude Code login found — run `claude login` first")
 		}
+		if errors.Is(err, creds.ErrNoAccountToken) {
+			// Credentials exist but hold no account token: the login is
+			// stored somewhere cux does not know about (issue #42). Capturing
+			// it anyway would build a slot that signs the user out later, so
+			// stop here and say what was actually found.
+			return store.Account{}, false, errors.New(
+				"Claude Code's stored credentials carry no account token, so there is nothing to capture — " +
+					"the login may be held by a credential provider cux does not recognise. " +
+					"Run `claude login`, then retry; if it persists, please report your Claude Code version at " +
+					"https://github.com/inulute/cux/issues")
+		}
 		return store.Account{}, false, err
 	}
 
@@ -175,6 +186,18 @@ func SwitchTo(identifier string) (from, to store.Account, err error) {
 	targetCreds, err := creds.ReadBackup(target.Slot, target.Email)
 	if err != nil {
 		return store.Account{}, store.Account{}, fmt.Errorf("target credentials missing: %w", err)
+	}
+	// A slot captured while cux was reading the wrong keychain item holds a
+	// blob with no account token (issue #42). Writing it live would sign the
+	// user out, and creds.WriteLive now refuses to — but refusing at the
+	// bottom of the stack only produces a confusing message, so say what is
+	// wrong with the slot and how to repair it while we still know which one
+	// it is.
+	if _, tokErr := creds.ExtractAccessToken(targetCreds); tokErr != nil {
+		return store.Account{}, store.Account{}, fmt.Errorf(
+			"slot %d (%s) has no usable stored login: its saved credentials carry no account token, "+
+				"so switching to it would sign you out — run `claude login` as %s, then `cux add` to recapture the slot",
+			target.Slot, target.Email, target.Email)
 	}
 	targetOAuth, err := store.ReadOAuthBlockBackup(target.Slot, target.Email)
 	if err != nil {
