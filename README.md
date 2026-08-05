@@ -290,6 +290,7 @@ cux config set update_check.enabled true            # opt in to update checks
 | `strategy.order`              | `[]`           | Drain mode priority (emails); empty = auto by highest 7d |
 | `auto_switch_on_threshold`    | `true`         | Master toggle for pre-emptive threshold swap |
 | `auto_switch_on_rate_limit`   | `true`         | Master toggle for swap on rate-limit hook |
+| `auto_swap_idle_after_seconds`| `900`          | Migrate a session idle this long off an over-threshold account, instead of waiting for you to come back and type. `0` = off. Needs `auto_resume`. |
 | `auto_resume`                 | `true`         | Pass `--resume <id>` to the relaunched claude |
 | `auto_message`                | `Go continue.` | First user turn after auto-swap; `""` = silent |
 | `wait_for_reset`              | `true`         | When every account is exhausted, sleep until the earliest reset and resume |

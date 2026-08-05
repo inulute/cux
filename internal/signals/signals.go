@@ -37,6 +37,7 @@ const (
 	RateLimited     Name = "rate-limited"
 	SwitchRequested Name = "switch-requested"
 	TurnFailed      Name = "turn-failed"
+	PromptSubmitted Name = "prompt-submitted"
 )
 
 // Payloads. Match claude-revolver's shapes for hook-emitted signals so
@@ -72,6 +73,19 @@ type SwitchRequestedPayload struct {
 type TurnFailedPayload struct {
 	Timestamp time.Time `json:"timestamp"`
 	Message   string    `json:"message,omitempty"`
+}
+
+// PromptSubmittedPayload marks the user typing something — the wrapper's
+// only evidence that a human is present, since nothing else it observes
+// distinguishes a session parked at an empty prompt from one mid-turn.
+//
+// StartsTurn is false for a prompt the hook handled itself (a /switch, a
+// /cux:* command, an intercepted threshold swap): those never reach the
+// model, so no Stop will follow them. Treating one as the start of a turn
+// would leave the session looking busy forever.
+type PromptSubmittedPayload struct {
+	Timestamp  time.Time `json:"timestamp"`
+	StartsTurn bool      `json:"startsTurn"`
 }
 
 // Dir returns the absolute signal directory. Callers that intend to
@@ -163,6 +177,16 @@ func DecodeSessionStarted(b []byte) (SessionStartedPayload, error) {
 // DecodeStopped is a convenience for the wrapper.
 func DecodeStopped(b []byte) (StoppedPayload, error) {
 	var p StoppedPayload
+	if len(b) == 0 {
+		return p, nil
+	}
+	err := json.Unmarshal(b, &p)
+	return p, err
+}
+
+// DecodePromptSubmitted is a convenience for the wrapper.
+func DecodePromptSubmitted(b []byte) (PromptSubmittedPayload, error) {
+	var p PromptSubmittedPayload
 	if len(b) == 0 {
 		return p, nil
 	}

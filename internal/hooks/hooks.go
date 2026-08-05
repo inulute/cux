@@ -110,18 +110,40 @@ func UserPromptSubmit(stdin io.Reader, stdout io.Writer) error {
 	if prompt == "" {
 		return nil
 	}
+	// Every branch below reports the prompt to the wrapper, which uses it
+	// as the "a human is here" clock for idle migration (#39). Only the
+	// fall-through at the end starts a model turn; the branches that handle
+	// the prompt themselves block it, so no Stop ever follows them.
 	if prompt == "/switch" || strings.HasPrefix(prompt, "/switch ") {
+		notePromptSubmitted(false)
 		target := strings.TrimSpace(strings.TrimPrefix(prompt, "/switch"))
 		writePromptSwitch(target, stdout)
 		return nil
 	}
 	if handled, err := handleCuxPromptCommand(prompt, stdout); handled || err != nil {
+		notePromptSubmitted(false)
 		return err
 	}
 	if handled, err := handleAutoSwitchPrompt(prompt, stdout); handled || err != nil {
+		notePromptSubmitted(false)
 		return err
 	}
+	notePromptSubmitted(true)
 	return nil
+}
+
+// notePromptSubmitted tells the wrapper the user just typed something.
+// Best-effort by design: a failed write must never block the prompt, it
+// only costs this session an idle migration it might otherwise have got.
+func notePromptSubmitted(startsTurn bool) {
+	pid, err := wrapperPID()
+	if err != nil {
+		return
+	}
+	_ = signals.Write(pid, signals.PromptSubmitted, signals.PromptSubmittedPayload{
+		Timestamp:  time.Now().UTC(),
+		StartsTurn: startsTurn,
+	})
 }
 
 func UserPromptExpansion(stdin io.Reader, stdout io.Writer) error {
