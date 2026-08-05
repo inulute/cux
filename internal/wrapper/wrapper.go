@@ -522,6 +522,7 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 	)
 	var stopRequested atomic.Bool
 	var hadTurns atomic.Bool // true once the first Stop signal fires
+	act := newActivity(time.Now())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -536,7 +537,7 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				step(wrapperPID, cfg, manualTarget, &mu, &sessionID, &swap, &stopRequested, &hadTurns, ch, w)
+				step(wrapperPID, cfg, manualTarget, &mu, &sessionID, &swap, &stopRequested, &hadTurns, act, ch, w)
 			}
 		}
 	}()
@@ -585,6 +586,7 @@ func step(
 	swap **pending,
 	stopRequested *atomic.Bool,
 	hadTurns *atomic.Bool,
+	act *activity,
 	ch child,
 	w io.Writer,
 ) {
@@ -682,6 +684,22 @@ func step(
 		}
 	}
 
+	// 3b. Prompt submitted: the user is at the keyboard. Resets the idle
+	//     clock, and marks a turn in flight when the prompt actually
+	//     reached the model.
+	if b, ok, _ := signals.Read(wrapperPID, signals.PromptSubmitted); ok {
+		_ = signals.Consume(wrapperPID, signals.PromptSubmitted)
+		p, _ := signals.DecodePromptSubmitted(b)
+		mu.Lock()
+		act.lastAt = time.Now()
+		act.turnInFlight = p.StartsTurn
+		mu.Unlock()
+		// Registry heartbeat. Before this, updatedAt only moved on a swap,
+		// so `cux sessions` reported "running" identically for a session
+		// working and one untouched for six days (#39).
+		registry.UpdateSelf(func(e *registry.Entry) {})
+	}
+
 	// 4. Stop signal: a turn just ended cleanly.
 	//
 	// Order matters here. We refresh the active account's usage
@@ -698,6 +716,11 @@ func step(
 			*sessionID = p.SessionID
 			mu.Unlock()
 		}
+		mu.Lock()
+		act.lastAt = time.Now()
+		act.turnInFlight = false
+		mu.Unlock()
+		registry.UpdateSelf(func(e *registry.Entry) {})
 		if email, err := switcher.CurrentLiveEmail(); err == nil {
 			_ = monitor.RefreshActive(email)
 		}
@@ -714,6 +737,77 @@ func step(
 			return
 		}
 	}
+
+	// 5. Idle migration: nobody is here, and this session is sitting on an
+	//    account that is over threshold.
+	//
+	//    Both trigger paths above need an event from this session — a
+	//    prompt, or a turn ending. A terminal left at an empty prompt
+	//    produces neither, so its seat stayed frozen wherever it was at
+	//    launch, however far past the threshold that seat drifted
+	//    afterwards (#39). Moving it while nobody is waiting is also
+	//    strictly cheaper than moving it on the prompt that starts real
+	//    work, which is when it used to happen.
+	if idleSwapDue(cfg, act, mu, swap) {
+		// Coalesced across processes: with many idle terminals this must
+		// not become one usage poll per terminal per check. Errors are
+		// dropped on purpose — including a lock timeout under contention.
+		// A missed idle migration costs nothing: the next tick retries, and
+		// the turn-end path still catches this seat the moment anyone uses
+		// the session.
+		_, _ = monitor.RefreshAllCoalesced(idleRefreshCoalesce)
+		mu.Lock()
+		if *swap == nil {
+			if p := evaluateThresholdSwap(cfg, manualTarget); p != nil {
+				p.reason += " while idle"
+				*swap = p
+			}
+		}
+		hasSwap := *swap != nil
+		mu.Unlock()
+		if hasSwap && stopRequested.CompareAndSwap(false, true) {
+			fmt.Fprintf(w, "\ncux: idle on an account over threshold — migrating now rather than when you come back\n")
+			go gracefulExit(ch, w)
+			return
+		}
+	}
+}
+
+// idleSwapDue reports whether this tick should evaluate an idle migration,
+// advancing the throttle when it does.
+//
+// Requires auto_resume. A rate-limit swap has to restart the session
+// whatever the cost, but this one is cux's own initiative against a
+// session the user has not touched — and relaunching without --resume
+// would silently discard their conversation. Off means no idle migration.
+func idleSwapDue(cfg *config.Config, act *activity, mu *sync.Mutex, swap **pending) bool {
+	if cfg.AutoSwapIdleAfterSeconds <= 0 || !cfg.AutoSwitchOnThreshold || !cfg.AutoResume {
+		return false
+	}
+	now := time.Now()
+	mu.Lock()
+	defer mu.Unlock()
+	if *swap != nil {
+		return false
+	}
+	// Cheap checks first, and the throttle last: everything above this is
+	// an in-memory compare that costs nothing at the 100 ms poll rate, so
+	// only the tick that is actually going to refresh usage and evaluate a
+	// swap should consume the once-a-minute slot. Advancing earlier would
+	// let a check that did no work — a session mid-turn, or one not yet
+	// past its window — push the real evaluation a minute further out.
+	idle, ok := act.idleFor(now)
+	if !ok {
+		return false
+	}
+	if idle < time.Duration(cfg.AutoSwapIdleAfterSeconds)*time.Second {
+		return false
+	}
+	if now.Before(act.nextCheck) {
+		return false
+	}
+	act.nextCheck = now.Add(idleCheckInterval)
+	return true
 }
 
 // snapshotActiveUsage returns whatever the cache currently has for the
@@ -909,7 +1003,60 @@ const (
 	// well under waitPollInterval so no freshness-sensitive caller could
 	// ever be starved of a current reading by coalescing.
 	refreshCoalesceWindow = 20 * time.Second
+
+	// idleCheckInterval is how often an otherwise-quiet wrapper evaluates
+	// itself for idle migration. The signal poll runs every 100 ms; this
+	// throttle is what keeps a feature that only matters on the scale of
+	// minutes from doing anything at that cadence.
+	idleCheckInterval = time.Minute
+	// idleRefreshCoalesce must be >= idleCheckInterval. This is the only
+	// path that adds a network call to a wrapper with nothing happening,
+	// so the window is what stops N idle terminals from becoming N usage
+	// polls a minute — the endpoint 429s that #39 was partly filed for.
+	// Larger than the check interval means a terminal cannot trigger more
+	// than one sweep per window no matter how the ticks line up.
+	idleRefreshCoalesce = 2 * time.Minute
 )
+
+// activity is the wrapper's model of whether a human is present, kept for
+// the lifetime of one claude launch.
+//
+// The wrapper sees only hook signals, and until #39 none of them said "the
+// user typed something" — so a session parked at an empty prompt and one
+// twenty minutes into a turn looked identical. Both would have been
+// migrated by an idle check reading time-since-last-Stop, and restarting
+// the second kills live work.
+//
+// Owned by the single poll goroutine. The mutex taken around reads and
+// writes below is the one that already guards `swap` in the same critical
+// sections — it is not making `activity` safe for a second reader, and
+// anyone adding one should not assume it does.
+type activity struct {
+	lastAt time.Time
+	// turnInFlight vetoes migration outright. It is set by a prompt that
+	// goes to the model and cleared by the Stop that ends it. If a turn
+	// dies without a Stop it stays set and this session simply never
+	// migrates: the safe direction, and the next completed turn clears it.
+	turnInFlight bool
+	nextCheck    time.Time
+}
+
+func newActivity(now time.Time) *activity {
+	// Launch counts as activity, so a fresh terminal gets the full idle
+	// window before it can be moved. A wrapper started and never touched
+	// becomes eligible one window later, which is the case in #39: those
+	// terminals were pinned to a capped seat from launch.
+	return &activity{lastAt: now, nextCheck: now.Add(idleCheckInterval)}
+}
+
+// idleFor reports how long the session has been without a prompt or a
+// completed turn. A turn in flight is never idle, whatever the clock says.
+func (a *activity) idleFor(now time.Time) (time.Duration, bool) {
+	if a.turnInFlight {
+		return 0, false
+	}
+	return now.Sub(a.lastAt), true
+}
 
 func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (string, error) {
 	for {

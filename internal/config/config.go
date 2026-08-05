@@ -59,18 +59,22 @@ type UpdateCheckConfig struct {
 // the right knobs when you want auto-swap off but `/switch` rotation
 // to keep working.
 type Config struct {
-	Thresholds            usage.Thresholds  `json:"thresholds"`
-	Strategy              StrategyConfig    `json:"strategy"`
-	AutoSwitchOnThreshold bool              `json:"auto_switch_on_threshold"`
-	AutoSwitchOnRateLimit bool              `json:"auto_switch_on_rate_limit"`
-	AutoResume            bool              `json:"auto_resume"`
-	AutoMessage           string            `json:"auto_message"`
-	WaitForReset          bool              `json:"wait_for_reset"`
-	RetryOnAPIError       bool              `json:"retry_on_api_error"`
-	Notify                bool              `json:"notify"`
-	PollIntervalSeconds   int               `json:"poll_interval_seconds"`
-	UpdateCheck           UpdateCheckConfig `json:"update_check"`
-	Theme                 string            `json:"theme"`
+	Thresholds            usage.Thresholds `json:"thresholds"`
+	Strategy              StrategyConfig   `json:"strategy"`
+	AutoSwitchOnThreshold bool             `json:"auto_switch_on_threshold"`
+	AutoSwitchOnRateLimit bool             `json:"auto_switch_on_rate_limit"`
+	AutoResume            bool             `json:"auto_resume"`
+	AutoMessage           string           `json:"auto_message"`
+	WaitForReset          bool             `json:"wait_for_reset"`
+	RetryOnAPIError       bool             `json:"retry_on_api_error"`
+	Notify                bool             `json:"notify"`
+	PollIntervalSeconds   int              `json:"poll_interval_seconds"`
+	// AutoSwapIdleAfterSeconds migrates a session that is sitting at an
+	// empty prompt off an over-threshold account, instead of waiting for
+	// its owner to come back and type. 0 disables it. See #39.
+	AutoSwapIdleAfterSeconds int               `json:"auto_swap_idle_after_seconds"`
+	UpdateCheck              UpdateCheckConfig `json:"update_check"`
+	Theme                    string            `json:"theme"`
 	// Attach exposes each session on a local Unix socket so `cux attach`
 	// (and compatible tools) can mirror the terminal; AttachInput
 	// additionally lets attached clients type into the session.
@@ -98,8 +102,13 @@ func Defaults() Config {
 		RetryOnAPIError:       true,
 		Notify:                true,
 		PollIntervalSeconds:   60,
-		UpdateCheck:           UpdateCheckConfig{Enabled: true, CadenceHours: 6},
-		Theme:                 "claude",
+		// 15 minutes: long enough that a user reading output or thinking
+		// between prompts is never treated as gone, short enough that a
+		// terminal left overnight moves off a capped seat during the quiet
+		// hours rather than on the prompt that starts real work (#39).
+		AutoSwapIdleAfterSeconds: 900,
+		UpdateCheck:              UpdateCheckConfig{Enabled: true, CadenceHours: 6},
+		Theme:                    "claude",
 		// Off by default: an always-on PTY proxy taxes every session
 		// (resize corruption/jitter, extra CPU on output — see #33). Most
 		// users never attach, so keep claude sitting directly on the real
@@ -268,6 +277,12 @@ func Set(c Config, key, value string) (Config, error) {
 			return c, fmt.Errorf("config: poll_interval_seconds must be a non-negative integer, got %q", value)
 		}
 		c.PollIntervalSeconds = n
+	case "auto_swap_idle_after_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return c, fmt.Errorf("config: auto_swap_idle_after_seconds must be a non-negative integer, got %q", value)
+		}
+		c.AutoSwapIdleAfterSeconds = n
 	case "theme":
 		v := strings.ToLower(strings.TrimSpace(value))
 		switch v {
@@ -357,6 +372,11 @@ func Keys(c Config) []KeyInfo {
 			Key: "poll_interval_seconds", Default: "60",
 			Description: "background usage poll interval (reserved for v0.3)",
 			Current:     strconv.Itoa(c.PollIntervalSeconds),
+		},
+		{
+			Key: "auto_swap_idle_after_seconds", Default: "900",
+			Description: "migrate a session idle this long off an over-threshold account (0 = off)",
+			Current:     strconv.Itoa(c.AutoSwapIdleAfterSeconds),
 		},
 		{
 			Key: "update_check.enabled", Default: "false",

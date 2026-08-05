@@ -37,7 +37,18 @@
       "Bash(go clean *)",
       "Bash(/tmp/cux-test --version)",
       "Bash(gh issue *)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(cd *)",
+      "Bash(cux history *)",
+      "Bash(awk '/func \\\\\\(h \\\\*Host\\\\\\) Pump/,/^}/' internal/ptyhost/ptyhost.go)",
+      "Bash(awk '/func \\\\\\(h \\\\*Host\\\\\\) broadcast/,/^}/' internal/ptyhost/ptyhost.go)",
+      "Bash(gh pr *)",
+      "Bash(git fetch *)",
+      "Bash(git worktree *)",
+      "Bash(git pull *)",
+      "Bash(grep -nA6 'type clientState struct' internal/ptyhost/ptyhost.go)",
+      "Bash(git checkout *)",
+      "Bash(git add *)"
     ]
   }
 }
