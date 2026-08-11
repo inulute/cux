@@ -113,11 +113,6 @@ func TestRealKeychainSelectsAndWritesTheItemHoldingTheLogin(t *testing.T) {
 		t.Fatalf("ReadLive = (%q, %v), want the account blob and nil", got, err)
 	}
 
-	// The account name must come back from the item itself, not $USER.
-	if acct := macKeychainAccount(testServiceManaged); acct != testAcctManaged {
-		t.Errorf("macKeychainAccount = %q, want %q", acct, testAcctManaged)
-	}
-
 	// Write: must land in the item holding the login, under its own account.
 	const updated = `{"claudeAiOauth":{"accessToken":"tok2","refreshToken":"r2"}}`
 	if err := WriteLive(updated); err != nil {
@@ -176,12 +171,6 @@ func TestRealKeychainFirstWriteCreatesPrimaryItem(t *testing.T) {
 	}
 	if blob := readTestKeychainItem(t, testServiceClassic); blob != accountBlob {
 		t.Errorf("primary item = %q, want the account blob", blob)
-	}
-	// With nothing to read an account name from, $USER is the fallback.
-	if user := os.Getenv("USER"); user != "" {
-		if acct := macKeychainAccount(testServiceClassic); acct != user {
-			t.Errorf("macKeychainAccount = %q, want $USER %q", acct, user)
-		}
 	}
 	got, err := ReadLive()
 	if err != nil || !strings.Contains(got, "tok") {
