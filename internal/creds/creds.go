@@ -364,6 +364,7 @@ func DeleteBackup(slot int, email string) error {
 // macKeychainItem is one existing generic-password item we found.
 type macKeychainItem struct {
 	service string
+	account string
 	blob    string
 }
 
@@ -372,9 +373,15 @@ type macKeychainItem struct {
 var errKeychainItemAbsent = errors.New("creds: keychain item absent")
 
 // readMacKeychainSecret returns the secret stored under one service name.
-func readMacKeychainSecret(service string) (string, error) {
-	out, err := exec.Command("security", "find-generic-password",
-		"-s", service, "-w").Output()
+// When account is supplied, it selects that exact item instead of whichever
+// item `security` happens to return first for the service.
+func readMacKeychainSecret(service string, account ...string) (string, error) {
+	args := []string{"find-generic-password", "-s", service}
+	if len(account) > 0 {
+		args = append(args, "-a", account[0])
+	}
+	args = append(args, "-w")
+	out, err := exec.Command("security", args...).Output()
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
@@ -390,14 +397,43 @@ func readMacKeychainSecret(service string) (string, error) {
 }
 
 // findMacKeychainItems returns every known credentials item that exists, in
-// macKeychainServices order. A missing item is not an error; a keychain that
-// refuses to be read is, but only when it leaves us with nothing at all.
+// macKeychainServices order. `security find-generic-password -s` returns an
+// arbitrary single match, so the metadata-only dump supplies every account
+// and each secret is then read by its exact (service, account) pair.
+//
+// This deliberately enumerates on every read. A fast name-only result that
+// has a token can still be stale while another account under the same service
+// is Claude Code's active item, so its contents cannot safely skip the dump.
+// The name-only lookup still runs afterward so an unquoted account or an
+// empty successful dump cannot make an item reachable by the old path vanish.
 func findMacKeychainItems() ([]macKeychainItem, error) {
+	dump, err := exec.Command("security", "dump-keychain").Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return nil, fmt.Errorf("creds: security dump-keychain: exit %d: %s",
+				ee.ExitCode(), strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, fmt.Errorf("creds: security dump-keychain: %w", err)
+	}
+
 	var (
 		out      []macKeychainItem
 		firstErr error
 	)
 	for _, service := range macKeychainServices {
+		accounts := parseMacKeychainAccounts(string(dump), service)
+		for _, account := range accounts {
+			blob, err := readMacKeychainSecret(service, account)
+			if err != nil {
+				if !errors.Is(err, errKeychainItemAbsent) && firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			out = append(out, macKeychainItem{service: service, account: account, blob: blob})
+		}
+
 		blob, err := readMacKeychainSecret(service)
 		if err != nil {
 			if !errors.Is(err, errKeychainItemAbsent) && firstErr == nil {
@@ -405,7 +441,16 @@ func findMacKeychainItems() ([]macKeychainItem, error) {
 			}
 			continue
 		}
-		out = append(out, macKeychainItem{service: service, blob: blob})
+		duplicate := false
+		for _, item := range out {
+			if item.service == service && item.blob == blob {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, macKeychainItem{service: service, blob: blob})
+		}
 	}
 	if len(out) == 0 {
 		if firstErr != nil {
@@ -416,8 +461,9 @@ func findMacKeychainItems() ([]macKeychainItem, error) {
 	return out, nil
 }
 
-// selectLiveItem picks the item cux should treat as the live credentials:
-// the first one whose blob actually carries an account token.
+// selectLiveItem picks the item cux should treat as the live credentials.
+// Service order wins first; among items for one service, a non-expired token
+// wins, or the first expired token is kept so the refresh path can recover it.
 //
 // When no item has one it returns the first item that exists along with
 // ErrNoAccountToken. The item is still useful to the write path — restoring
@@ -428,9 +474,21 @@ func selectLiveItem(items []macKeychainItem) (macKeychainItem, error) {
 	if len(items) == 0 {
 		return macKeychainItem{}, ErrNotFound
 	}
-	for _, it := range items {
-		if hasAccountToken(it.blob) {
-			return it, nil
+	for _, service := range macKeychainServices {
+		firstToken := -1
+		for i := range items {
+			if items[i].service != service || !hasAccountToken(items[i].blob) {
+				continue
+			}
+			if firstToken == -1 {
+				firstToken = i
+			}
+			if !IsTokenExpired(items[i].blob) {
+				return items[i], nil
+			}
+		}
+		if firstToken != -1 {
+			return items[firstToken], nil
 		}
 	}
 	return items[0], ErrNoAccountToken
@@ -448,30 +506,16 @@ func readLiveMacOS() (string, error) {
 	return it.blob, nil
 }
 
-// keychainAcctRe matches the `acct` attribute in `security`'s item dump.
+// keychainAcctRe and keychainServiceRe match attributes in `security`'s item
+// dump. Each record starts with a keychain line, which lets the parser keep an
+// account paired with its own service rather than matching across records.
 // Only the quoted form is accepted: the attribute can also print as <NULL>
 // or as a hex literal, and in both cases we would rather fall back to $USER
 // than write under a mangled account name.
-var keychainAcctRe = regexp.MustCompile(`(?m)^\s*"acct"<blob>="(.*)"\s*$`)
-
-// macKeychainAccount reads an item's own account name back from the
-// keychain, returning "" when it cannot be determined.
-//
-// This matters because `security add-generic-password -U` matches on the
-// (service, account) pair: writing under the wrong account name creates a
-// *second* item beside the real one, exits 0, and leaves Claude Code still
-// reading the original — a switch that reports success and changes nothing
-// (issue #42). Note that `find-generic-password` reports only the first
-// match for a service, so a machine that already accumulated duplicates
-// from that bug needs them removed by hand.
-func macKeychainAccount(service string) string {
-	out, err := exec.Command("security", "find-generic-password",
-		"-s", service).Output()
-	if err != nil {
-		return ""
-	}
-	return parseKeychainAccount(string(out))
-}
+var (
+	keychainAcctRe    = regexp.MustCompile(`(?m)^\s*"acct"<blob>="(.*)"\s*$`)
+	keychainServiceRe = regexp.MustCompile(`(?m)^\s*"svce"<blob>="(.*)"\s*$`)
+)
 
 func parseKeychainAccount(dump string) string {
 	m := keychainAcctRe.FindStringSubmatch(dump)
@@ -479,6 +523,18 @@ func parseKeychainAccount(dump string) string {
 		return ""
 	}
 	return m[1]
+}
+
+func parseMacKeychainAccounts(dump, service string) []string {
+	var accounts []string
+	for _, item := range strings.Split(dump, "\nkeychain:") {
+		account := parseKeychainAccount(item)
+		match := keychainServiceRe.FindStringSubmatch(item)
+		if account != "" && match != nil && match[1] == service {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts
 }
 
 func writeLiveMacOS(blob string) error {
@@ -490,7 +546,7 @@ func writeLiveMacOS(blob string) error {
 	if items, err := findMacKeychainItems(); err == nil {
 		if it, _ := selectLiveItem(items); it.service != "" {
 			service = it.service
-			account = macKeychainAccount(service)
+			account = it.account
 		}
 	}
 	if account == "" {

@@ -2,9 +2,11 @@ package creds
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/inulute/cux/internal/paths"
 )
@@ -72,6 +74,47 @@ func TestSelectLiveItemPicksTheItemHoldingTheAccountToken(t *testing.T) {
 				t.Errorf("selectLiveItem service = %q, want %q", got.service, c.wantService)
 			}
 		})
+	}
+}
+
+func TestSelectLiveItemPrefersUnexpiredTokenInEitherOrder(t *testing.T) {
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+	expired := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"old","expiresAt":%d}}`,
+		time.Now().Add(-time.Hour).UnixMilli())
+	valid := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"live","expiresAt":%d}}`,
+		time.Now().Add(time.Hour).UnixMilli())
+
+	for _, items := range [][]macKeychainItem{
+		{{service: "Claude Code-credentials", blob: expired}, {service: "Claude Code-credentials", blob: valid}},
+		{{service: "Claude Code-credentials", blob: valid}, {service: "Claude Code-credentials", blob: expired}},
+	} {
+		got, err := selectLiveItem(items)
+		if err != nil {
+			t.Fatalf("selectLiveItem: %v", err)
+		}
+		if got.blob != valid {
+			t.Errorf("selectLiveItem blob = %q, want %q", got.blob, valid)
+		}
+	}
+}
+
+func TestSelectLiveItemKeepsServiceOrderBeforeExpiry(t *testing.T) {
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+	expired := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"old","expiresAt":%d}}`,
+		time.Now().Add(-time.Hour).UnixMilli())
+	valid := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"live","expiresAt":%d}}`,
+		time.Now().Add(time.Hour).UnixMilli())
+	items := []macKeychainItem{
+		{service: "Claude Code-credentials", blob: expired},
+		{service: "Orca Claude Code Managed Credentials", blob: valid},
+	}
+
+	got, err := selectLiveItem(items)
+	if err != nil {
+		t.Fatalf("selectLiveItem: %v", err)
+	}
+	if got.service != "Claude Code-credentials" {
+		t.Errorf("selectLiveItem service = %q, want %q", got.service, "Claude Code-credentials")
 	}
 }
 
@@ -174,6 +217,54 @@ attributes:
 	} {
 		if got := parseKeychainAccount(in); got != "" {
 			t.Errorf("parseKeychainAccount(%q) = %q, want \"\"", strings.TrimSpace(in), got)
+		}
+	}
+}
+
+func TestMultipleKeychainItemsPerServiceSelectsAccountTokenInEitherOrder(t *testing.T) {
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+	const (
+		service = "Claude Code-credentials"
+		unknown = `keychain: "/Users/x/Library/Keychains/login.keychain-db"
+class: "genp"
+attributes:
+    "acct"<blob>="unknown"
+    "svce"<blob>="Claude Code-credentials"
+`
+		marvin = `keychain: "/Users/x/Library/Keychains/login.keychain-db"
+class: "genp"
+attributes:
+    "acct"<blob>="marvin"
+    "svce"<blob>="Claude Code-credentials"
+`
+	)
+
+	for _, c := range []struct {
+		dump string
+		want string
+	}{
+		{unknown + marvin, "unknown,marvin"},
+		{marvin + unknown, "marvin,unknown"},
+	} {
+		accounts := parseMacKeychainAccounts(c.dump, service)
+		if got := strings.Join(accounts, ","); got != c.want {
+			t.Fatalf("parseMacKeychainAccounts = %q, want %q", got, c.want)
+		}
+		items := make([]macKeychainItem, 0, len(accounts))
+		for _, account := range accounts {
+			blob := mcpOnlyBlob
+			if account == "marvin" {
+				blob = accountBlob
+			}
+			items = append(items, macKeychainItem{service: service, account: account, blob: blob})
+		}
+
+		got, err := selectLiveItem(items)
+		if err != nil {
+			t.Fatalf("selectLiveItem: %v", err)
+		}
+		if got.account != "marvin" {
+			t.Errorf("selectLiveItem account = %q, want %q", got.account, "marvin")
 		}
 	}
 }
