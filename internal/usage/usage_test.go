@@ -130,3 +130,76 @@ func stringIndex(s, sub string) int {
 	}
 	return -1
 }
+
+// TestStaleReadingNeedsAProvenAge separates the two conditions that both
+// used to render as a confident percentage: a reading that is old, and a
+// reading whose age is unknown. Only the first is stale (issue #46).
+func TestStaleReadingNeedsAProvenAge(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name      string
+		polledAt  time.Time
+		wantStale bool
+	}{
+		{"never polled — unknown age, not stale", time.Time{}, false},
+		{"just polled", now.Add(-30 * time.Second), false},
+		{"inside the idle coalescing window", now.Add(-2 * time.Minute), false},
+		{"just inside the bound", now.Add(-StaleAfter + time.Minute), false},
+		{"just past the bound", now.Add(-StaleAfter - time.Minute), true},
+		{"the reported case: 12.8 days", now.Add(-307 * time.Hour), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := AccountUsage{PolledAt: tc.polledAt}
+			if got := u.StaleReading(now); got != tc.wantStale {
+				t.Fatalf("StaleReading = %v, want %v", got, tc.wantStale)
+			}
+		})
+	}
+}
+
+// TestStaleAfterClearsTheCoalescingWindows is the regression guard the
+// bound exists for: the wrapper collapses sibling polls into one API sweep
+// (issue #39), and a bound near those windows would mark the whole pool
+// unknown during exactly the burst they absorb.
+func TestStaleAfterClearsTheCoalescingWindows(t *testing.T) {
+	const widestCoalesceWindow = 2 * time.Minute
+	if StaleAfter < 10*widestCoalesceWindow {
+		t.Fatalf("StaleAfter = %s, too close to the %s coalescing window", StaleAfter, widestCoalesceWindow)
+	}
+}
+
+func TestStalenessSummarisesOnlyDatedEntries(t *testing.T) {
+	now := time.Now()
+	c := Cache{
+		"fresh":     {PolledAt: now.Add(-time.Minute)},
+		"stale":     {PolledAt: now.Add(-4 * time.Hour)},
+		"staler":    {PolledAt: now.Add(-48 * time.Hour)},
+		"undated":   {},
+		"unrelated": {PolledAt: now.Add(-99 * time.Hour)},
+	}
+	sn := c.Staleness([]string{"fresh", "stale", "staler", "undated", "missing"}, now)
+	if sn.Total != 3 {
+		t.Fatalf("Total = %d, want 3 (undated and missing keys excluded)", sn.Total)
+	}
+	if sn.Stale != 2 {
+		t.Fatalf("Stale = %d, want 2", sn.Stale)
+	}
+	if sn.Oldest < 47*time.Hour || sn.Oldest > 49*time.Hour {
+		t.Fatalf("Oldest = %s, want ~48h", sn.Oldest)
+	}
+	if !sn.Any() {
+		t.Fatal("Any() = false with two stale entries")
+	}
+	if sn.All() {
+		t.Fatal("All() = true but one entry is fresh")
+	}
+
+	allStale := Cache{"a": {PolledAt: now.Add(-4 * time.Hour)}}
+	if sn := allStale.Staleness([]string{"a"}, now); !sn.All() {
+		t.Fatal("All() = false when every dated entry is stale")
+	}
+	if sn := c.Staleness(nil, now); sn.Any() || sn.All() {
+		t.Fatal("an empty key set reported staleness")
+	}
+}

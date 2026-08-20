@@ -537,9 +537,11 @@ func renderPromptUsage(refresh bool) (string, error) {
 	anyUsable := false
 	slots := state.SortedSlots()
 	sort.Ints(slots)
+	now := time.Now()
 	for i, slot := range slots {
 		acct := state.Accounts[slot]
 		u, _ := cachedUsage(cache, acct.CacheKey(), acct.Email)
+		stale := u.StaleReading(now)
 		stateLabel := ""
 		if acct.Email == liveEmail {
 			stateLabel = "active"
@@ -555,9 +557,13 @@ func renderPromptUsage(refresh bool) (string, error) {
 			anyUsable = true
 		}
 		if stateLabel == "" {
-			stateLabel = capacityLabel(u, cfg.Thresholds)
+			if stale {
+				stateLabel = "stale"
+			} else {
+				stateLabel = capacityLabel(u, cfg.Thresholds)
+			}
 		}
-		b.WriteString(renderAccountRow(slot, acct.Email, u, stateLabel))
+		b.WriteString(renderAccountRow(slot, acct.Email, u, stateLabel, stale))
 		if i != len(slots)-1 {
 			b.WriteString("│      │                           │        │                      │                      │        │\n")
 		}
@@ -569,11 +575,27 @@ func renderPromptUsage(refresh bool) (string, error) {
 			b.WriteString(fmt.Sprintf("\nNEXT RESET : SLOT [%02d] %s  IN %s", slot, email, reset))
 		}
 		b.WriteString("\nACTION : WAIT FOR RESET OR ADD ANOTHER ACCOUNT")
-	} else if slot, email, reset, ok := nextUsableSlot(state, cache, cfg.Thresholds); ok {
+	} else if slot, email, reset, ok := nextUsableSlot(state, cache, cfg.Thresholds, now); ok {
 		b.WriteString(fmt.Sprintf("\n\nNEXT USABLE : SLOT [%02d] %s", slot, email))
 		if reset != "" {
 			b.WriteString("  RESET " + reset)
 		}
+	}
+	// Independent of the refresh flag: the warnings below only exist when
+	// this invocation tried to poll, but a frozen cache has to announce
+	// itself on every read (issue #46).
+	keys := make([]string, 0, len(state.Accounts))
+	for _, slot := range slots {
+		keys = append(keys, state.Accounts[slot].CacheKey())
+	}
+	if sn := cache.Staleness(keys, now); sn.Any() {
+		scope := fmt.Sprintf("%d OF %d ACCOUNTS", sn.Stale, sn.Total)
+		if sn.All() {
+			scope = "EVERY ACCOUNT"
+		}
+		b.WriteString(fmt.Sprintf("\n\nWARNING: USAGE DATA STALE — %s LAST POLLED %s AGO. "+
+			"THE FIGURES ABOVE ARE NOT CURRENT; RUN `cux usage refresh` IN A SHELL TO SEE WHY POLLING IS FAILING.",
+			scope, strings.ToUpper(usage.HumanAge(sn.Oldest))))
 	}
 	for _, warning := range warnings {
 		b.WriteString("\n\nWARNING: ")
@@ -644,14 +666,21 @@ func displayConfigValue(v string) string {
 	return v
 }
 
-func renderAccountRow(slot int, email string, u usage.AccountUsage, stateLabel string) string {
+func renderAccountRow(slot int, email string, u usage.AccountUsage, stateLabel string, stale bool) string {
+	five, seven, reset := usageBlock(u.FiveHour), usageBlock(u.SevenDay), resetForAccount(u)
+	if stale {
+		// This is the surface the reporter of issue #46 was reading while the
+		// cache sat twelve days old, so it is the one that most needs to stop
+		// printing percentages it cannot stand behind.
+		five, seven, reset = "?", "?", "?"
+	}
 	line := fmt.Sprintf("│ %-4s │ %-25s │ %-6s │ %-20s │ %-20s │ %-6s │\n",
 		fmt.Sprintf("%02d", slot),
 		clipDisplay(email, 25),
 		clipDisplay(strings.ToUpper(stateLabel), 6),
-		usageBlock(u.FiveHour),
-		usageBlock(u.SevenDay),
-		clipDisplay(resetForAccount(u), 6),
+		five,
+		seven,
+		clipDisplay(reset, 6),
 	)
 	if u.TokenExpired {
 		line += fmt.Sprintf("│ %-96s │\n", "TOKEN EXPIRED: RE-LOGIN AND RUN /cux:add")
@@ -749,7 +778,12 @@ func capacityLabel(u usage.AccountUsage, thresholds usage.Thresholds) string {
 	return "usable"
 }
 
-func nextUsableSlot(state *store.State, cache usage.Cache, thresholds usage.Thresholds) (slot int, email, reset string, ok bool) {
+// nextUsableSlot names the account to move to next. It is advisory text, not
+// the swap decision itself, but naming a candidate off a reading days out of
+// date is how issue #46 came to recommend a cancelled account — so a stale
+// entry disqualifies a slot from being suggested. Recommending nothing is a
+// worse experience and a better answer.
+func nextUsableSlot(state *store.State, cache usage.Cache, thresholds usage.Thresholds, now time.Time) (slot int, email, reset string, ok bool) {
 	slots := state.SortedSlots()
 	sort.Ints(slots)
 	for _, s := range slots {
@@ -758,6 +792,9 @@ func nextUsableSlot(state *store.State, cache usage.Cache, thresholds usage.Thre
 			continue
 		}
 		u, _ := cachedUsage(cache, acct.CacheKey(), acct.Email)
+		if u.StaleReading(now) {
+			continue
+		}
 		return s, acct.Email, resetForWindow(u.FiveHour), true
 	}
 	return 0, "", "", false

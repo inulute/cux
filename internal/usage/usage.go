@@ -62,6 +62,100 @@ type AccountUsage struct {
 // Cache is the on-disk usage cache, keyed by account email.
 type Cache map[string]AccountUsage
 
+// StaleAfter is how long a cached reading may stand in for a live one.
+// Past it the entry records what was true once, not what is true now, and
+// every surface that shows it must say so.
+//
+// A failed poll leaves the previous entry in place — deliberately, so a
+// network blip doesn't erase the pool's last known state — which means age
+// is the only evidence that a reading has stopped tracking reality. When
+// credentials become unreadable, nothing else distinguishes a twelve-day-old
+// number from one fetched a second ago (issue #46).
+//
+// The bound has to clear the wrapper's coalescing windows (20 s between
+// sibling sessions, 2 min for idle ones) by a wide margin. Those windows
+// exist so a burst of sessions collapses into a single API sweep instead of
+// getting rate-limited (issue #39); a bound anywhere near them would mark
+// the whole pool unknown during exactly the load they were built to absorb.
+const StaleAfter = 30 * time.Minute
+
+// Age reports how long ago u was polled. ok is false for an entry that was
+// never polled, which has no age rather than an age of zero.
+func (u AccountUsage) Age(now time.Time) (age time.Duration, ok bool) {
+	if u.PolledAt.IsZero() {
+		return 0, false
+	}
+	return now.Sub(u.PolledAt), true
+}
+
+// StaleReading reports whether u is old enough to mislead: it was polled,
+// and that poll is now too far in the past to stand for the present.
+//
+// Deliberately not the negation of "fresh". An entry carrying no polled_at
+// has an *unknown* age, not a proven stale one — cache files written before
+// the field existed look like that — and relabelling those as stale would
+// declare a whole pool untrustworthy on no evidence. Surfaces already have
+// wording for "no usage data"; that case belongs to them.
+func (u AccountUsage) StaleReading(now time.Time) bool {
+	age, ok := u.Age(now)
+	return ok && age >= StaleAfter
+}
+
+// Staleness summarises how much of the cache has stopped tracking reality.
+// It is what the banner line is built from.
+type Staleness struct {
+	Stale  int           // entries present but older than StaleAfter
+	Total  int           // entries present for the requested keys
+	Oldest time.Duration // age of the oldest stale entry
+}
+
+// Any reports whether at least one reading is too old to act on.
+func (s Staleness) Any() bool { return s.Stale > 0 }
+
+// All reports whether every reading the pool has is too old to act on.
+func (s Staleness) All() bool { return s.Total > 0 && s.Stale == s.Total }
+
+// Staleness measures the entries stored under cacheKeys. Only entries that
+// carry a poll time are counted, so Total is the number of readings whose
+// age is knowable and Oldest is always a real measured age.
+func (c Cache) Staleness(cacheKeys []string, now time.Time) Staleness {
+	var out Staleness
+	for _, k := range cacheKeys {
+		u, ok := c[k]
+		if !ok {
+			continue
+		}
+		age, dated := u.Age(now)
+		if !dated {
+			continue
+		}
+		out.Total++
+		if age < StaleAfter {
+			continue
+		}
+		out.Stale++
+		if age > out.Oldest {
+			out.Oldest = age
+		}
+	}
+	return out
+}
+
+// HumanAge renders a duration the way the status surfaces do: coarse, and
+// never more precise than the number deserves.
+func HumanAge(d time.Duration) string {
+	switch {
+	case d >= 48*time.Hour:
+		return fmt.Sprintf("%.1f d", d.Hours()/24)
+	case d >= 2*time.Hour:
+		return fmt.Sprintf("%.0f h", d.Hours())
+	case d >= time.Minute:
+		return fmt.Sprintf("%.0f min", d.Minutes())
+	default:
+		return "under a minute"
+	}
+}
+
 // Thresholds are integer percentages 0–100. A threshold of 100 means
 // "reactive only" — never preemptively swap on this window.
 type Thresholds struct {

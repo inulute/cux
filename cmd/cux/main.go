@@ -1401,12 +1401,33 @@ func cmdUsage(args []string) {
 	}
 	switch args[0] {
 	case "refresh":
-		_, errs := monitor.RefreshAll()
+		sweepStart := time.Now().UTC()
+		cache, errs := monitor.RefreshAll()
 		for _, e := range errs {
 			fmt.Fprintln(os.Stderr, "warning:", e)
 		}
 		// Re-display so the user sees what was fetched.
 		cmdList(nil)
+		// Exit non-zero when the sweep polled nothing at all, so a cron job
+		// or a wrapper can detect the condition instead of reading a
+		// success it did not get (issue #46).
+		//
+		// The cache answers this directly: an entry stamped at or after the
+		// sweep began is one that came back. Counting errors instead would
+		// misfire, because RefreshAll appends a cache-write failure to the
+		// same slice as the per-account ones — two failed accounts plus a
+		// bad write would look like a total blackout on a pool of two.
+		polled := 0
+		for _, u := range cache {
+			if !u.PolledAt.Before(sweepStart) {
+				polled++
+			}
+		}
+		// Requiring an error too keeps the empty pool at exit 0: with no
+		// accounts there is nothing to poll and nothing has gone wrong.
+		if polled == 0 && len(errs) > 0 {
+			os.Exit(1)
+		}
 	case "show":
 		cache, err := usage.LoadCache()
 		if err != nil {
@@ -1793,12 +1814,18 @@ func renderColorBar(pct float64, barW int) string {
 }
 
 // accountState returns the display label for one row in the account table.
-func accountState(email, liveEmail string, au usage.AccountUsage) string {
+func accountState(email, liveEmail string, au usage.AccountUsage, stale bool) string {
 	if au.TokenExpired {
 		return "EXPRD"
 	}
 	if email == liveEmail {
 		return "ACTIVE"
+	}
+	// Below this point every verdict is read off the usage numbers, so a
+	// reading that has stopped tracking reality can only produce a guess
+	// dressed as a fact — say STALE instead of picking one (issue #46).
+	if stale {
+		return "STALE"
 	}
 	if au.FiveHour != nil && au.FiveHour.Utilization >= 100 {
 		return "FULL"
@@ -1914,10 +1941,16 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 
 	noBar := strings.Repeat(" ", 10) + g + "─" + r + strings.Repeat(" ", 11)
 
+	// A stale row shows "?" rather than a number, because a percentage and a
+	// bar are claims about right now and the reading no longer supports one.
+	unknownBar := strings.Repeat(" ", 10) + colorYellow + "?" + r + strings.Repeat(" ", 11)
+
+	now := time.Now()
 	for _, slot := range slots {
 		a := st.Accounts[slot]
 		au := cachedAccountUsage(cache, a)
-		sl := accountState(a.Email, liveEmail, au)
+		stale := au.StaleReading(now)
+		sl := accountState(a.Email, liveEmail, au, stale)
 
 		var sc string
 		switch sl {
@@ -1925,22 +1958,35 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 			sc = colorGreen
 		case "FULL", "EXPRD":
 			sc = colorYellow
+		case "STALE":
+			sc = colorYellow
 		default:
 			sc = t
 		}
 
 		resetStr := nextReset(au)
+		if stale {
+			// nextReset renders any elapsed instant as "now", which for a
+			// reading days out of date is the most confident possible way to
+			// be wrong.
+			resetStr = "?"
+		}
 
 		var barFive, barSeven string
-		if au.FiveHour != nil {
-			barFive = " " + renderColorBar(au.FiveHour.Utilization, barBlocks) + " "
-		} else {
-			barFive = noBar
-		}
-		if au.SevenDay != nil {
-			barSeven = " " + renderColorBar(au.SevenDay.Utilization, barBlocks) + " "
-		} else {
-			barSeven = noBar
+		switch {
+		case stale:
+			barFive, barSeven = unknownBar, unknownBar
+		default:
+			if au.FiveHour != nil {
+				barFive = " " + renderColorBar(au.FiveHour.Utilization, barBlocks) + " "
+			} else {
+				barFive = noBar
+			}
+			if au.SevenDay != nil {
+				barSeven = " " + renderColorBar(au.SevenDay.Utilization, barBlocks) + " "
+			} else {
+				barSeven = noBar
+			}
 		}
 
 		slotCell := "  " + b + fmt.Sprintf("%02d", slot) + r + "  "
@@ -1968,6 +2014,28 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 	}
 
 	fmt.Fprintln(w, tableSep("└", "┴", "┘"))
+	printStaleBanner(w, st, cache, now)
+}
+
+// printStaleBanner says out loud that some of the table above is not a
+// current reading. Without it a frozen cache is indistinguishable from a
+// fresh one on the surface users actually look at (issue #46).
+func printStaleBanner(w io.Writer, st *store.State, cache usage.Cache, now time.Time) {
+	keys := make([]string, 0, len(st.Accounts))
+	for _, slot := range st.SortedSlots() {
+		keys = append(keys, st.Accounts[slot].CacheKey())
+	}
+	sn := cache.Staleness(keys, now)
+	if !sn.Any() {
+		return
+	}
+	scope := fmt.Sprintf("%d of %d accounts", sn.Stale, sn.Total)
+	if sn.All() {
+		scope = "every account"
+	}
+	fmt.Fprintf(w, "\n %s⚠ USAGE DATA STALE%s — %s last polled %s ago; the numbers above are not current.\n",
+		colorYellow, colorReset, scope, usage.HumanAge(sn.Oldest))
+	fmt.Fprintf(w, " %sRun `cux usage refresh` to see why polling is failing.%s\n\n", colorGray, colorReset)
 }
 
 func cachedAccountUsage(cache usage.Cache, acct store.Account) usage.AccountUsage {

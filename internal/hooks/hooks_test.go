@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/signals"
@@ -267,4 +268,109 @@ func hookAccountUsage(five, seven float64) usage.AccountUsage {
 	w5 := usage.Window{Utilization: five}
 	w7 := usage.Window{Utilization: seven}
 	return usage.AccountUsage{FiveHour: &w5, SevenDay: &w7}
+}
+
+// agedAccountUsage is hookAccountUsage with a poll time, so a test can build
+// the reading a frozen cache actually holds.
+func agedAccountUsage(five, seven float64, age time.Duration) usage.AccountUsage {
+	u := hookAccountUsage(five, seven)
+	u.PolledAt = time.Now().UTC().Add(-age)
+	return u
+}
+
+// TestRenderPromptUsageMarksAStaleCacheUnknown reproduces issue #46 on the
+// exact surface that hid it: the slash-command output, with no refresh, over
+// a cache twelve days old. Every figure there is a claim about now, and none
+// of them is supported.
+func TestRenderPromptUsageMarksAStaleCacheUnknown(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+	t.Setenv("CUX_CONFIG_FILE", t.TempDir()+"/config.json")
+
+	state := &store.State{
+		ActiveSlot: 2,
+		Sequence:   []int{1, 2, 3},
+		Accounts: map[int]store.Account{
+			1: {Slot: 1, Email: "cancelled@x.test"},
+			2: {Slot: 2, Email: "active@x.test"},
+			3: {Slot: 3, Email: "other@x.test"},
+		},
+	}
+	if err := state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	const stale = 307 * time.Hour // 12.8 days, as reported
+	if err := usage.SaveCache(usage.Cache{
+		"cancelled@x.test": agedAccountUsage(0, 23, stale),
+		"active@x.test":    agedAccountUsage(0, 0, stale),
+		"other@x.test":     agedAccountUsage(4, 42, stale),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := renderPromptUsage(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "USAGE DATA STALE") {
+		t.Fatalf("no staleness warning on the slash-command surface:\n%s", out)
+	}
+	if !strings.Contains(out, "12.8 D") {
+		t.Fatalf("warning did not report the age of the reading:\n%s", out)
+	}
+	// The frozen percentages must not be rendered as if measured.
+	for _, pct := range []string{"23%", "42%"} {
+		if strings.Contains(out, pct) {
+			t.Fatalf("stale percentage %s still rendered as a live figure:\n%s", pct, out)
+		}
+	}
+	// And no account may be advertised as the one to move to.
+	if strings.Contains(out, "NEXT USABLE") {
+		t.Fatalf("a stale reading was used to recommend an account:\n%s", out)
+	}
+	if !strings.Contains(out, "STALE") {
+		t.Fatalf("rows did not carry a stale state label:\n%s", out)
+	}
+}
+
+// TestRenderPromptUsageLeavesAFreshCacheAlone is the other half: the
+// staleness plumbing must be invisible when polling is working.
+func TestRenderPromptUsageLeavesAFreshCacheAlone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+	t.Setenv("CUX_CONFIG_FILE", t.TempDir()+"/config.json")
+
+	state := &store.State{
+		ActiveSlot: 1,
+		Sequence:   []int{1, 2},
+		Accounts: map[int]store.Account{
+			1: {Slot: 1, Email: "a@x.test"},
+			2: {Slot: 2, Email: "b@x.test"},
+		},
+	}
+	if err := state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := usage.SaveCache(usage.Cache{
+		"a@x.test": agedAccountUsage(10, 20, time.Minute),
+		"b@x.test": agedAccountUsage(5, 15, time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := renderPromptUsage(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "USAGE DATA STALE") {
+		t.Fatalf("fresh cache reported as stale:\n%s", out)
+	}
+	if !strings.Contains(out, "NEXT USABLE") {
+		t.Fatalf("fresh cache should still recommend an account:\n%s", out)
+	}
+	if !strings.Contains(out, "20%") {
+		t.Fatalf("fresh figures should render as measured:\n%s", out)
+	}
 }
