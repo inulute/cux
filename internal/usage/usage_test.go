@@ -203,3 +203,58 @@ func TestStalenessSummarisesOnlyDatedEntries(t *testing.T) {
 		t.Fatal("an empty key set reported staleness")
 	}
 }
+
+// TestSettledClearsWindowsThatHaveRolledOver covers the finding that is
+// independent of staleness: a *freshly polled* reading can still carry a
+// window whose reset instant has passed, and its recorded utilization
+// describes a period that is over.
+func TestSettledClearsWindowsThatHaveRolledOver(t *testing.T) {
+	now := time.Now()
+	past, future := now.Add(-5*time.Minute), now.Add(2*time.Hour)
+	u := AccountUsage{
+		FiveHour:     &Window{Utilization: 100, ResetsAt: &past},
+		SevenDay:     &Window{Utilization: 42, ResetsAt: &future},
+		SevenDayOpus: &Window{Utilization: 100, ResetsAt: &past},
+		PolledAt:     now.Add(-time.Minute),
+	}
+	got := u.Settled(now)
+	if got.FiveHour != nil {
+		t.Error("an elapsed 5h window should read as unknown")
+	}
+	if got.SevenDayOpus != nil {
+		t.Error("an elapsed model window should read as unknown")
+	}
+	if got.SevenDay == nil || got.SevenDay.Utilization != 42 {
+		t.Error("a window still running must be left alone")
+	}
+	if !got.PolledAt.Equal(u.PolledAt) {
+		t.Error("Settled must preserve PolledAt so staleness stays knowable")
+	}
+	// A window with no reset stamp has no elapsed-ness to judge.
+	noStamp := AccountUsage{FiveHour: &Window{Utilization: 100}}
+	if noStamp.Settled(now).FiveHour == nil {
+		t.Error("a window with no resets_at must not be cleared")
+	}
+}
+
+// TestIsOverThresholdAtIgnoresAnElapsedWindow is the consequence that matters:
+// cux must not move a session off an account whose window has just reset.
+func TestIsOverThresholdAtIgnoresAnElapsedWindow(t *testing.T) {
+	now := time.Now()
+	past, future := now.Add(-time.Minute), now.Add(time.Hour)
+	th := Thresholds{FiveHour: 98, SevenDay: 98}
+
+	reset := AccountUsage{FiveHour: &Window{Utilization: 100, ResetsAt: &past}}
+	if over, why := IsOverThresholdAt(reset, th, now); over {
+		t.Fatalf("a window that already reset reported over threshold: %s", why)
+	}
+	// The plain predicate is unchanged — rendering still sees the raw number.
+	if over, _ := IsOverThreshold(reset, th); !over {
+		t.Fatal("IsOverThreshold should still report the recorded utilization")
+	}
+
+	live := AccountUsage{FiveHour: &Window{Utilization: 100, ResetsAt: &future}}
+	if over, _ := IsOverThresholdAt(live, th, now); !over {
+		t.Fatal("a window still running at 100% must remain over threshold")
+	}
+}

@@ -29,7 +29,7 @@ func TestPickNextDistinguishesTwinSeats(t *testing.T) {
 	// email's healthy org seat. With email-keyed comparison both twins
 	// were excluded and the pick failed (or fell through to the also
 	// exhausted third account).
-	pick, ok := PickNext(KindDrain, nil, accounts, current, cache, th)
+	pick, ok := PickNext(KindDrain, nil, accounts, current, cache, th, now())
 	if !ok {
 		t.Fatal("expected a pick, got none — twin seat was excluded along with current")
 	}
@@ -45,7 +45,7 @@ func TestPickBalancedDistinguishesTwinSeats(t *testing.T) {
 	accounts, current, cache := twinFixture()
 	th := usage.Thresholds{FiveHour: 100, SevenDay: 100}
 
-	pick, ok := PickNext(KindBalanced, nil, accounts, current, cache, th)
+	pick, ok := PickNext(KindBalanced, nil, accounts, current, cache, th, now())
 	if !ok || pick.Slot != 2 {
 		t.Errorf("got (slot %d, %v), want the twin org seat (slot 2, true)", pick.Slot, ok)
 	}
@@ -57,7 +57,7 @@ func TestOrderedTwinSeatsBothConsidered(t *testing.T) {
 
 	// The priority list can only speak in emails; both seats behind an
 	// email must be considered, minus the current one.
-	pick, ok := PickNext(KindDrain, []string{"me@x.test", "other@x.test"}, accounts, current, cache, th)
+	pick, ok := PickNext(KindDrain, []string{"me@x.test", "other@x.test"}, accounts, current, cache, th, now())
 	if !ok || pick.Slot != 2 {
 		t.Errorf("got (slot %d, %v), want the twin org seat (slot 2, true)", pick.Slot, ok)
 	}
@@ -84,7 +84,7 @@ func TestPickNextMixedPersonalAndOrgSeats(t *testing.T) {
 
 	// Personal seat exhausted → must rotate onto the org seat even
 	// though the seat keys use different shapes (email vs uuid|org).
-	pick, ok := PickNext(KindDrain, nil, []Candidate{personal, orgSeat}, personal, cache, th)
+	pick, ok := PickNext(KindDrain, nil, []Candidate{personal, orgSeat}, personal, cache, th, now())
 	if !ok || pick.Slot != 2 {
 		t.Errorf("got (slot %d, %v), want the org seat (slot 2, true)", pick.Slot, ok)
 	}
@@ -92,7 +92,7 @@ func TestPickNextMixedPersonalAndOrgSeats(t *testing.T) {
 	// And the reverse: org seat exhausted → personal picks up.
 	cache["me@x.test"] = usage.AccountUsage{FiveHour: &usage.Window{Utilization: 10}, SevenDay: &usage.Window{Utilization: 20}}
 	cache["u-me|org-corp"] = usage.AccountUsage{FiveHour: &usage.Window{Utilization: 100}, SevenDay: &usage.Window{Utilization: 50}}
-	pick, ok = PickNext(KindDrain, nil, []Candidate{personal, orgSeat}, orgSeat, cache, th)
+	pick, ok = PickNext(KindDrain, nil, []Candidate{personal, orgSeat}, orgSeat, cache, th, now())
 	if !ok || pick.Slot != 1 {
 		t.Errorf("got (slot %d, %v), want the personal seat (slot 1, true)", pick.Slot, ok)
 	}
@@ -109,7 +109,7 @@ func TestPickNextToleratesMissingWindows(t *testing.T) {
 		"u-a|org": {FiveHour: &usage.Window{Utilization: 100}}, // no 7d window at all
 		"u-b|org": {FiveHour: &usage.Window{Utilization: 5}},   // no 7d window at all
 	}
-	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b}, a, cache, th)
+	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b}, a, cache, th, now())
 	if !ok || pick.Slot != 2 {
 		t.Errorf("got (slot %d, %v), want slot 2 despite missing 7d windows", pick.Slot, ok)
 	}

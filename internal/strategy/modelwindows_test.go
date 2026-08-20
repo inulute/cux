@@ -31,7 +31,7 @@ func TestDrainPrefersModelClearCandidate(t *testing.T) {
 		"b": mw(10, 60, pct(100)), // healthiest overall but Opus-capped
 		"c": mw(10, 30, nil),      // model-clear
 	}
-	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b, c}, a, cache, th)
+	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b, c}, a, cache, th, now())
 	if !ok || pick.Email != "c@x.test" {
 		t.Errorf("got (%q, %v), want the model-clear c@x.test", pick.Email, ok)
 	}
@@ -49,7 +49,7 @@ func TestDrainFallsBackWhenAllModelCapped(t *testing.T) {
 		"b": mw(10, 60, pct(100)),
 		"c": mw(20, 30, pct(100)),
 	}
-	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b, c}, a, cache, th)
+	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b, c}, a, cache, th, now())
 	if !ok {
 		t.Fatal("expected a fallback pick, pool must never be stranded by the preference")
 	}
@@ -68,7 +68,7 @@ func TestDrainUnchangedWhenModelWindowsAbsent(t *testing.T) {
 		"a": mw(100, 80, nil),
 		"b": mw(10, 60, nil),
 	}
-	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b}, a, cache, th)
+	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b}, a, cache, th, now())
 	if !ok || pick.Email != "b@x.test" {
 		t.Errorf("got (%q, %v), want b@x.test unchanged", pick.Email, ok)
 	}
@@ -84,14 +84,14 @@ func TestBalancedSortsModelCappedLastButEligible(t *testing.T) {
 		"b": mw(5, 10, pct(100)), // lowest 7d but Opus-capped
 		"c": mw(5, 40, nil),      // model-clear, higher 7d
 	}
-	pick, ok := PickNext(KindBalanced, nil, []Candidate{a, b, c}, a, cache, th)
+	pick, ok := PickNext(KindBalanced, nil, []Candidate{a, b, c}, a, cache, th, now())
 	if !ok || pick.Email != "c@x.test" {
 		t.Errorf("got (%q, %v), want model-clear c@x.test first", pick.Email, ok)
 	}
 
 	// b alone must still be pickable — capped means deprioritised, not
 	// ineligible.
-	pick, ok = PickNext(KindBalanced, nil, []Candidate{a, b}, a, cache, th)
+	pick, ok = PickNext(KindBalanced, nil, []Candidate{a, b}, a, cache, th, now())
 	if !ok || pick.Email != "b@x.test" {
 		t.Errorf("got (%q, %v), want b@x.test as the only candidate", pick.Email, ok)
 	}
@@ -108,14 +108,14 @@ func TestRebalanceRefusesModelCappedPriority(t *testing.T) {
 	// Rebalance is proactive: hopping onto a model-capped seat trades a
 	// working account for an instant rate limit and a bounce back.
 	if pick, ok := ShouldRebalance(KindDrain, []string{"prio@x.test"},
-		[]Candidate{priority, temp}, temp, cache, th); ok {
+		[]Candidate{priority, temp}, temp, cache, th, now()); ok {
 		t.Errorf("expected no rebalance onto model-capped priority, got %q", pick.Email)
 	}
 
 	// Once the model window resets, the rebalance resumes.
 	cache["p"] = mw(5, 10, pct(40))
 	if pick, ok := ShouldRebalance(KindDrain, []string{"prio@x.test"},
-		[]Candidate{priority, temp}, temp, cache, th); !ok || pick.Email != "prio@x.test" {
+		[]Candidate{priority, temp}, temp, cache, th, now()); !ok || pick.Email != "prio@x.test" {
 		t.Errorf("got (%q, %v), want rebalance to prio@x.test", pick.Email, ok)
 	}
 }

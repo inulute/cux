@@ -858,15 +858,25 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 	if !ok {
 		return nil
 	}
-	over, reason := usage.IsOverThreshold(u, cfg.Thresholds)
+	now := time.Now()
+	// A threshold swap is cux's own initiative against a session that is
+	// working fine, and it costs a process restart. A reading too old to
+	// describe the present cannot justify that — issue #39 is what paying
+	// that cost on bad evidence looks like — and staying put is safe, so an
+	// unverifiable reading means "do nothing". Part of why this is
+	// tolerable: the reactive rate-limit path does not come through here,
+	// so a session that genuinely hits a cap still recovers.
+	if u.StaleReading(now) {
+		return nil
+	}
+	over, reason := usage.IsOverThresholdAt(u, cfg.Thresholds, now)
 	if !over {
 		return nil
 	}
 
 	// Hard-limit check: 5h or 7d at exactly 100% → bypass both guards.
 	// At soft-threshold triggers we still respect manual choices.
-	atHardLimit := (u.FiveHour != nil && u.FiveHour.Utilization >= 100) ||
-		(u.SevenDay != nil && u.SevenDay.Utilization >= 100)
+	atHardLimit := isHardLimitUsage(u.Settled(now))
 	if !atHardLimit {
 		// Layer 1: in-wrapper guard.
 		if manualTarget != "" && email == manualTarget {
@@ -897,7 +907,7 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 		}
 	}
 	pick, ok := strategy.PickNext(cfg.ResolvedStrategy(), cfg.Strategy.Order, candidates,
-		current, cache, cfg.Thresholds)
+		current, cache, cfg.Thresholds, time.Now())
 	if !ok {
 		// Nothing to swap to — let claude continue on the maxed-out
 		// account; the rate-limit hook will catch the actual cap.
@@ -972,7 +982,13 @@ func isActiveHardLimited() bool {
 		return false
 	}
 	u, ok := cachedUsage(cache, cacheKey, email)
-	return ok && isHardLimitUsage(u)
+	if !ok || u.StaleReading(time.Now()) {
+		// Refusing to launch, or announcing an exhausted pool, on a reading
+		// nobody can vouch for is the #37 failure mode. Unknown is not
+		// exhausted.
+		return false
+	}
+	return isHardLimitUsage(u.Settled(time.Now()))
 }
 
 // waitForReset blocks until a managed account is usable again, then
@@ -1153,9 +1169,18 @@ func allTokensExpired(accounts map[int]store.Account, cache usage.Cache) bool {
 	if len(accounts) == 0 {
 		return true
 	}
+	now := time.Now()
 	for _, a := range accounts {
 		u, found := cachedUsage(cache, a.CacheKey(), a.Email)
 		if !found || !u.TokenExpired {
+			return false
+		}
+		// "Waiting cannot help" ends the session, so it has to be provable.
+		// A TokenExpired flag from a poll days ago proves nothing about now:
+		// the user may have logged back in since, and the refresh that would
+		// show it is the very thing failing. Treat it as healable and keep
+		// waiting — waitForReset re-polls every round.
+		if u.StaleReading(now) {
 			return false
 		}
 	}
@@ -1501,7 +1526,7 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 		return rotateFallback(state, cache, cfg)
 	}
 	if pick, ok := strategy.PickNext(kind, cfg.Strategy.Order, candidates,
-		strategy.Candidate{Email: current, CacheKey: currentCacheKey}, cache, cfg.Thresholds); ok {
+		strategy.Candidate{Email: current, CacheKey: currentCacheKey}, cache, cfg.Thresholds, time.Now()); ok {
 		return pick.Identifier(), nil
 	}
 	return rotateFallback(state, cache, cfg)

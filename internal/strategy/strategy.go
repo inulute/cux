@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/inulute/cux/internal/usage"
 )
@@ -135,7 +136,20 @@ func PickNext(
 	current Candidate,
 	cache usage.Cache,
 	thresholds usage.Thresholds,
+	now time.Time,
 ) (Pick, bool) {
+	// Every reading below is a claim about the present, so windows that have
+	// already rolled over are cleared before anything reads them. Doing it
+	// once here keeps the helpers underneath free of clock handling.
+	//
+	// Staleness deliberately does *not* disqualify a candidate here. PickNext
+	// answers "where do we go" for a move that has already been decided —
+	// most sharply on the reactive path, where the API has just refused the
+	// current seat. Refusing to name a target because its reading is old
+	// would strand a live session, which is the failure #37 and #39 were
+	// about; landing somewhere unexpected only costs another swap. The
+	// existing treatment of a missing entry as available is the same call.
+	cache = settledCache(cache, now)
 	switch kind {
 	case KindManual:
 		return Pick{}, false
@@ -160,10 +174,17 @@ func ShouldRebalance(
 	current Candidate,
 	cache usage.Cache,
 	thresholds usage.Thresholds,
+	now time.Time,
 ) (Pick, bool) {
 	if kind != KindDrain {
 		return Pick{}, false
 	}
+	// Unlike PickNext, this hop is cux's own initiative: nothing is wrong
+	// with where the session is, and the whole claim is that some other
+	// account has recovered. A reading too old to support that claim must
+	// not produce a swap and a process restart (issue #39) — so here, and
+	// only here, stale disqualifies a candidate.
+	cache = settledCache(cache, now)
 
 	var priority *Candidate
 	if len(order) > 0 {
@@ -174,6 +195,9 @@ func ShouldRebalance(
 				continue
 			}
 			if !isAvailable(cache, c.cacheKey()) {
+				continue
+			}
+			if staleReading(cache, c.cacheKey(), now) {
 				continue
 			}
 			if u, ok := cache[c.cacheKey()]; ok {
@@ -202,6 +226,9 @@ func ShouldRebalance(
 				continue
 			}
 			if !isAvailable(cache, c.cacheKey()) {
+				continue
+			}
+			if staleReading(cache, c.cacheKey(), now) {
 				continue
 			}
 			if u, ok := cache[c.cacheKey()]; ok {
@@ -376,6 +403,25 @@ func modelCapped(cache usage.Cache, key string) bool {
 		}
 	}
 	return false
+}
+
+// settledCache clears every reading's elapsed windows (usage.Settled), so
+// the helpers below never have to reason about the clock. PolledAt survives
+// the copy, which is what keeps staleReading usable afterwards.
+func settledCache(cache usage.Cache, now time.Time) usage.Cache {
+	out := make(usage.Cache, len(cache))
+	for k, u := range cache {
+		out[k] = u.Settled(now)
+	}
+	return out
+}
+
+// staleReading reports whether key's reading is too old to act on. A key
+// with no entry is not stale — it is unpolled, and the callers treat that as
+// available so a fresh install can still pick an account.
+func staleReading(cache usage.Cache, key string, now time.Time) bool {
+	u, ok := cache[key]
+	return ok && u.StaleReading(now)
 }
 
 func isAvailable(cache usage.Cache, email string) bool {

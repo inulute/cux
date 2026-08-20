@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/inulute/cux/internal/usage"
+	"time"
 )
 
 func u(five, seven float64) usage.AccountUsage {
@@ -51,7 +52,7 @@ func TestPickNextManual_NeverPicks(t *testing.T) {
 	t.Parallel()
 	accts := threeAccounts()
 	cache := usage.Cache{}
-	if _, ok := PickNext(KindManual, nil, accts, accts[0], cache, defaultThresholds()); ok {
+	if _, ok := PickNext(KindManual, nil, accts, accts[0], cache, defaultThresholds(), now()); ok {
 		t.Fatal("manual mode must never auto-pick")
 	}
 }
@@ -66,7 +67,7 @@ func TestPickNextBalanced_PicksLowest7d(t *testing.T) {
 		"b@x": u(50, 30), // lowest 7d
 		"c@x": u(10, 60),
 	}
-	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "b@x" {
 		t.Fatalf("balanced should pick b@x; got %+v ok=%v", pick, ok)
 	}
@@ -80,7 +81,7 @@ func TestPickNextBalanced_TiebreaksByLower5h(t *testing.T) {
 		"b@x": u(50, 30), // 7d 30, 5h 50
 		"c@x": u(15, 30), // 7d 30, 5h 15 — wins
 	}
-	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "c@x" {
 		t.Fatalf("balanced should tiebreak to c@x; got %+v ok=%v", pick, ok)
 	}
@@ -94,7 +95,7 @@ func TestPickNextBalanced_SkipsExpired(t *testing.T) {
 		"b@x": expired(),
 		"c@x": u(10, 60),
 	}
-	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "c@x" {
 		t.Fatalf("balanced should skip expired b@x and pick c@x; got %+v ok=%v", pick, ok)
 	}
@@ -108,7 +109,7 @@ func TestPickNextBalanced_SkipsFull5h(t *testing.T) {
 		"b@x": u(100, 10), // lowest 7d, but unusable now
 		"c@x": u(10, 60),
 	}
-	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "c@x" {
 		t.Fatalf("balanced should skip 5h-full b@x and pick c@x; got %+v ok=%v", pick, ok)
 	}
@@ -120,7 +121,7 @@ func TestPickNextBalanced_NoCacheTreatsAsAvailable(t *testing.T) {
 	// non-current account so a manual /switch from a fresh user works.
 	accts := threeAccounts()
 	cache := usage.Cache{}
-	if _, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds()); !ok {
+	if _, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds(), now()); !ok {
 		t.Fatal("balanced should still pick when cache is empty")
 	}
 }
@@ -129,7 +130,7 @@ func TestPickNextBalanced_OnlyOneAccount(t *testing.T) {
 	t.Parallel()
 	accts := []Candidate{{Email: "a@x"}}
 	cache := usage.Cache{"a@x": u(20, 80)}
-	if _, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds()); ok {
+	if _, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds(), now()); ok {
 		t.Fatal("balanced should not pick when there are no other accounts")
 	}
 }
@@ -144,7 +145,7 @@ func TestPickNextDrain_AutoOrder_PicksHighest7dUnderCap(t *testing.T) {
 		"b@x": u(10, 90), // highest 7d that's under 95
 		"c@x": u(5, 20),
 	}
-	pick, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "b@x" {
 		t.Fatalf("drain auto should pick highest-7d under cap (b@x); got %+v ok=%v", pick, ok)
 	}
@@ -159,7 +160,7 @@ func TestPickNextDrain_PriorityOrder(t *testing.T) {
 		"c@x": u(5, 20),
 	}
 	order := []string{"c@x", "b@x", "a@x"}
-	pick, ok := PickNext(KindDrain, order, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindDrain, order, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "c@x" {
 		t.Fatalf("drain should follow priority order, picking c@x first; got %+v ok=%v", pick, ok)
 	}
@@ -174,7 +175,7 @@ func TestPickNextDrain_SkipsAccountOver7dCap(t *testing.T) {
 		"c@x": u(5, 20),
 	}
 	order := []string{"b@x", "c@x"}
-	pick, ok := PickNext(KindDrain, order, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindDrain, order, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "c@x" {
 		t.Fatalf("drain should skip 7d-maxed b@x and pick c@x; got %+v ok=%v", pick, ok)
 	}
@@ -189,7 +190,7 @@ func TestPickNextDrain_SkipsAccountFull5hEvenWhenUnder7dCap(t *testing.T) {
 		"c@x": u(10, 20),
 	}
 	order := []string{"b@x", "c@x"}
-	pick, ok := PickNext(KindDrain, order, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindDrain, order, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "c@x" {
 		t.Fatalf("drain should skip 5h-full b@x and pick c@x; got %+v ok=%v", pick, ok)
 	}
@@ -204,7 +205,7 @@ func TestPickNextDrain_FallsBackTo5hCapacity(t *testing.T) {
 		"b@x": u(50, 96), // 7d maxed but 5h has room
 		"c@x": u(95, 96), // 7d and 5h both maxed
 	}
-	pick, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "b@x" {
 		t.Fatalf("drain second pass should pick 5h-availble b@x; got %+v ok=%v", pick, ok)
 	}
@@ -220,7 +221,7 @@ func TestPickNextDrain_NeverPicks7DayHardFull(t *testing.T) {
 		"b@x": u(50, 100), // 5h has room but 7d hard-full
 		"c@x": u(95, 96),  // 5h maxed
 	}
-	if _, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds()); ok {
+	if _, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds(), now()); ok {
 		t.Fatal("drain should not pick 7d-hard-full b@x even with 5h room")
 	}
 }
@@ -233,7 +234,7 @@ func TestPickNextBalanced_NeverPicks7DayHardFull(t *testing.T) {
 		"b@x": u(10, 100), // 7d hard-full
 		"c@x": u(30, 20),
 	}
-	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds())
+	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "c@x" {
 		t.Fatalf("balanced should skip 7d-hard-full b@x and pick c@x; got %+v ok=%v", pick, ok)
 	}
@@ -248,7 +249,7 @@ func TestPickNextDrain_NoCandidates(t *testing.T) {
 		"b@x": u(95, 96),
 		"c@x": u(95, 96),
 	}
-	if _, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds()); ok {
+	if _, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds(), now()); ok {
 		t.Fatal("drain should report ok=false when nothing has capacity")
 	}
 }
@@ -262,7 +263,7 @@ func TestShouldRebalance_PriorityOrder_ReturnsHealthyPriority(t *testing.T) {
 		"a@x": u(10, 40),
 		"b@x": u(30, 10),
 	}
-	pick, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[1], cache, defaultThresholds())
+	pick, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[1], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "a@x" {
 		t.Fatalf("on b@x, priority a@x is healthy → rebalance to a@x; got %+v ok=%v", pick, ok)
 	}
@@ -275,7 +276,7 @@ func TestShouldRebalance_OnPriorityAlready(t *testing.T) {
 		"a@x": u(10, 40),
 		"b@x": u(30, 10),
 	}
-	if _, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[0], cache, defaultThresholds()); ok {
+	if _, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[0], cache, defaultThresholds(), now()); ok {
 		t.Fatal("already on priority a@x → no rebalance")
 	}
 }
@@ -289,7 +290,7 @@ func TestShouldRebalance_PriorityStillOverThreshold(t *testing.T) {
 	}
 	// Use explicit 90% FiveHour threshold so IsOverThreshold fires for a@x.
 	thresholds := usage.Thresholds{FiveHour: 90, SevenDay: 95}
-	if _, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[1], cache, thresholds); ok {
+	if _, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[1], cache, thresholds, now()); ok {
 		t.Fatal("priority a@x still over threshold → don't rebalance")
 	}
 }
@@ -301,10 +302,62 @@ func TestShouldRebalance_NotAvailableInDrainMode(t *testing.T) {
 		"a@x": u(10, 40),
 		"b@x": u(30, 10),
 	}
-	if _, ok := ShouldRebalance(KindBalanced, nil, accts, accts[1], cache, defaultThresholds()); ok {
+	if _, ok := ShouldRebalance(KindBalanced, nil, accts, accts[1], cache, defaultThresholds(), now()); ok {
 		t.Fatal("balanced mode should never rebalance")
 	}
-	if _, ok := ShouldRebalance(KindManual, nil, accts, accts[1], cache, defaultThresholds()); ok {
+	if _, ok := ShouldRebalance(KindManual, nil, accts, accts[1], cache, defaultThresholds(), now()); ok {
 		t.Fatal("manual mode should never rebalance")
+	}
+}
+
+// now is the decision instant the tests evaluate at. Fixtures below carry no
+// poll time, so they read as unknown-age rather than stale — the staleness
+// gate is exercised separately.
+func now() time.Time { return time.Now() }
+
+// TestShouldRebalanceRefusesAStaleCandidate — rebalancing is cux's own
+// initiative, and the entire claim is that some other account has recovered.
+// A reading too old to support that claim must not buy a process restart.
+func TestShouldRebalanceRefusesAStaleCandidate(t *testing.T) {
+	accts := []Candidate{{Email: "a@x", Slot: 1}, {Email: "b@x", Slot: 2}}
+	stale := usage.Cache{
+		"a@x": {FiveHour: &usage.Window{Utilization: 0}, SevenDay: &usage.Window{Utilization: 10},
+			PolledAt: time.Now().Add(-307 * time.Hour)},
+		"b@x": {FiveHour: &usage.Window{Utilization: 50}, SevenDay: &usage.Window{Utilization: 30},
+			PolledAt: time.Now().Add(-307 * time.Hour)},
+	}
+	if pick, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[1], stale, defaultThresholds(), now()); ok {
+		t.Fatalf("rebalanced onto a stale candidate: %+v", pick)
+	}
+
+	fresh := usage.Cache{
+		"a@x": {FiveHour: &usage.Window{Utilization: 0}, SevenDay: &usage.Window{Utilization: 10},
+			PolledAt: time.Now().Add(-time.Minute)},
+		"b@x": {FiveHour: &usage.Window{Utilization: 50}, SevenDay: &usage.Window{Utilization: 30},
+			PolledAt: time.Now().Add(-time.Minute)},
+	}
+	if _, ok := ShouldRebalance(KindDrain, []string{"a@x", "b@x"}, accts, accts[1], fresh, defaultThresholds(), now()); !ok {
+		t.Fatal("a fresh recovered priority account should still be rebalanced onto")
+	}
+}
+
+// TestPickNextStillPicksFromAStaleCache is the deliberate asymmetry: PickNext
+// answers "where do we go" for a move already decided, most sharply after the
+// API has refused the current seat. Refusing to name a target there would
+// strand a live session (issues #37, #39).
+func TestPickNextStillPicksFromAStaleCache(t *testing.T) {
+	accts := []Candidate{{Email: "a@x", Slot: 1}, {Email: "b@x", Slot: 2}}
+	stale := usage.Cache{
+		"a@x": {FiveHour: &usage.Window{Utilization: 99}, SevenDay: &usage.Window{Utilization: 60},
+			PolledAt: time.Now().Add(-307 * time.Hour)},
+		"b@x": {FiveHour: &usage.Window{Utilization: 5}, SevenDay: &usage.Window{Utilization: 20},
+			PolledAt: time.Now().Add(-307 * time.Hour)},
+	}
+	pick, ok := PickNext(KindBalanced, nil, accts, accts[0], stale, defaultThresholds(), now())
+	if !ok {
+		t.Fatal("PickNext must still name a target when every reading is stale")
+	}
+	if pick.Email != "b@x" {
+		t.Fatalf("picked %q, want b@x", pick.Email)
 	}
 }

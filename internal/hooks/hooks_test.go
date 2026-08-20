@@ -374,3 +374,66 @@ func TestRenderPromptUsageLeavesAFreshCacheAlone(t *testing.T) {
 		t.Fatalf("fresh figures should render as measured:\n%s", out)
 	}
 }
+
+// TestPromptSwitchHasTargetDoesNotBlockOnAStaleCache is the #37 failure mode
+// reached through issue #46: this function can refuse the user's prompt with
+// "all managed accounts are exhausted", and a frozen cache must never be what
+// produces that verdict.
+func TestPromptSwitchHasTargetDoesNotBlockOnAStaleCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+	t.Setenv("CUX_CONFIG_FILE", t.TempDir()+"/config.json")
+
+	state := &store.State{
+		ActiveSlot: 1,
+		Sequence:   []int{1, 2},
+		Accounts: map[int]store.Account{
+			1: {Slot: 1, Email: "a@x.test"},
+			2: {Slot: 2, Email: "b@x.test"},
+		},
+	}
+	if err := state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// Both accounts look completely exhausted — on readings 12.8 days old.
+	if err := usage.SaveCache(usage.Cache{
+		"a@x.test": agedAccountUsage(100, 100, 307*time.Hour),
+		"b@x.test": agedAccountUsage(100, 100, 307*time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, msg := promptSwitchHasTarget(); !ok {
+		t.Fatalf("a stale cache blocked the prompt: %s", msg)
+	}
+}
+
+// TestPromptSwitchHasTargetStillBlocksOnAFreshExhaustedPool is the control:
+// failing open on stale data must not mean never failing at all.
+func TestPromptSwitchHasTargetStillBlocksOnAFreshExhaustedPool(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+	t.Setenv("CUX_CONFIG_FILE", t.TempDir()+"/config.json")
+
+	state := &store.State{
+		ActiveSlot: 1,
+		Sequence:   []int{1, 2},
+		Accounts: map[int]store.Account{
+			1: {Slot: 1, Email: "a@x.test"},
+			2: {Slot: 2, Email: "b@x.test"},
+		},
+	}
+	if err := state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := usage.SaveCache(usage.Cache{
+		"a@x.test": agedAccountUsage(100, 100, time.Minute),
+		"b@x.test": agedAccountUsage(100, 100, time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := promptSwitchHasTarget(); ok {
+		t.Fatal("a genuinely exhausted pool should still block the prompt")
+	}
+}

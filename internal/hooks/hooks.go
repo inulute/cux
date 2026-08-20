@@ -202,7 +202,16 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 	if !uOK {
 		return false, nil
 	}
-	over, why := usage.IsOverThreshold(u, cfg.Thresholds)
+	hookNow := time.Now()
+	// This hook can hold up the user's prompt and restart their session, so
+	// it must not fire on a reading that no longer describes the present
+	// (issue #46). The refresh below would heal an ordinary lag; when it
+	// cannot — credentials unreadable — doing nothing is the safe answer,
+	// and the pool view now says why rather than looking healthy.
+	if u.StaleReading(hookNow) {
+		return false, nil
+	}
+	over, why := usage.IsOverThresholdAt(u, cfg.Thresholds, hookNow)
 	if !over {
 		return false, nil
 	}
@@ -218,8 +227,13 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 		if freshU, ok := cachedUsage(fresh, cacheKey, email); ok {
 			u = freshU
 			// If the current account itself has recovered (e.g. its 5h window
-			// just reset), don't switch — let the prompt through.
-			if newOver, _ := usage.IsOverThreshold(u, cfg.Thresholds); !newOver {
+			// just reset), don't switch — let the prompt through. A refresh
+			// that failed leaves the old reading here, so re-check staleness
+			// too rather than acting on what the refresh could not replace.
+			if u.StaleReading(hookNow) {
+				return false, nil
+			}
+			if newOver, _ := usage.IsOverThresholdAt(u, cfg.Thresholds, hookNow); !newOver {
 				return false, nil
 			}
 		}
@@ -241,7 +255,7 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 		}
 	}
 	pick, picked := strategy.PickNext(cfg.ResolvedStrategy(), cfg.Strategy.Order, candidates,
-		current, cache, cfg.Thresholds)
+		current, cache, cfg.Thresholds, time.Now())
 
 	if picked && !isReplay {
 		// /rate-limit-options is Claude Code's internally-issued slash command
@@ -463,7 +477,7 @@ func promptSwitchHasTarget() (bool, string) {
 		candidates = append(candidates, strategy.Candidate{Email: a.Email})
 	}
 	if _, ok := strategy.PickNext(cfg.ResolvedStrategy(), cfg.Strategy.Order, candidates,
-		strategy.Candidate{Email: current}, cache, cfg.Thresholds); ok {
+		strategy.Candidate{Email: current}, cache, cfg.Thresholds, time.Now()); ok {
 		return true, ""
 	}
 	for _, slot := range state.SortedSlots() {
@@ -809,6 +823,15 @@ func accountHasPromptCapacity(cache usage.Cache, acct store.Account, thresholds 
 }
 
 func usageHasPromptCapacity(u usage.AccountUsage, thresholds usage.Thresholds) bool {
+	// A "no capacity" answer here can block the user's prompt with "all
+	// managed accounts are exhausted" (promptSwitchHasTarget), which is
+	// exactly what issue #37 was. A reading too old to trust is not evidence
+	// of exhaustion, so it reads as room — the same way a missing entry
+	// already does in accountHasPromptCapacity.
+	if u.StaleReading(time.Now()) {
+		return true
+	}
+	u = u.Settled(time.Now())
 	if u.TokenExpired {
 		return false
 	}

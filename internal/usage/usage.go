@@ -302,6 +302,49 @@ func IsOverThreshold(u AccountUsage, t Thresholds) (over bool, reason string) {
 	return false, ""
 }
 
+// Settled returns u with every window whose reset instant has already
+// passed cleared to nil. That window has rolled over, so the utilization
+// recorded against it describes a period that is over, not the budget the
+// account has now.
+//
+// nil rather than 0 on purpose: nil is the "unknown" every consumer here
+// already handles — IsOverThreshold skips it, usageHasPromptCapacity reads
+// it as room, isHardLimitUsage as not-capped — whereas 0 would be a number
+// cux invented. The direction is the same one staleness takes: an answer we
+// cannot support must not become a reason to move a session.
+func (u AccountUsage) Settled(now time.Time) AccountUsage {
+	elapsed := func(w *Window) bool {
+		return w != nil && w.ResetsAt != nil && !w.ResetsAt.After(now)
+	}
+	out := u
+	if elapsed(out.FiveHour) {
+		out.FiveHour = nil
+	}
+	if elapsed(out.SevenDay) {
+		out.SevenDay = nil
+	}
+	if elapsed(out.SevenDaySonnet) {
+		out.SevenDaySonnet = nil
+	}
+	if elapsed(out.SevenDayOpus) {
+		out.SevenDayOpus = nil
+	}
+	return out
+}
+
+// IsOverThresholdAt is IsOverThreshold over a Settled reading, and is what
+// every swap decision should call.
+//
+// IsOverThreshold itself consults only utilization, so a window that reset
+// minutes ago still reports its pre-reset figure — enough to swap a session
+// off an account that has in fact just recovered. Kept as a separate
+// function rather than a signature change so the plain predicate stays
+// available for rendering, where the raw recorded number is what a caller
+// asking for it wants.
+func IsOverThresholdAt(u AccountUsage, t Thresholds, now time.Time) (over bool, reason string) {
+	return IsOverThreshold(u.Settled(now), t)
+}
+
 // --- internals -------------------------------------------------------------
 
 // apiResponse mirrors the documented (and observed) shape of the
