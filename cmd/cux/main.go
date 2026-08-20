@@ -172,9 +172,10 @@ func cmdAdd(args []string) {
 	slot := fs.Int("slot", 0, "specific slot number (default: next free)")
 	alias := fs.String("alias", "", "short alias for this account (e.g. work, personal)")
 	noAlias := fs.Bool("no-alias", false, "skip auto-alias from display name")
+	force := fs.Bool("force", false, "capture even if the stored token looks like another account's")
 	_ = fs.Parse(args)
 
-	acct, refreshed, err := switcher.AddCurrent(*slot, *alias, *noAlias)
+	acct, refreshed, err := switcher.AddCurrent(*slot, *alias, *noAlias, *force)
 	if err != nil {
 		fail(err)
 	}
@@ -1999,7 +2000,8 @@ func printHelp() {
 USAGE
   cux [claude-args...]                    run claude under the wrapper (default)
   cux run [claude-args...]                same, explicit
-  cux add [--slot N] [--alias NAME] [--no-alias]  add the currently logged-in account
+  cux add [--slot N] [--alias NAME] [--no-alias] [--force]
+                                          add the currently logged-in account
   cux list                                list managed accounts
   cux alias <slot|email|alias> <name>     set a short alias (e.g. work, personal)
   cux project create <name> [--dir PATH]  scope a directory to its own seat pool

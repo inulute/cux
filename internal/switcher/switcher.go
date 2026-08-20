@@ -5,6 +5,8 @@
 package switcher
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -30,7 +32,12 @@ const lockTimeout = 10 * time.Second
 // alias is optional: pass "" to auto-derive from the account's displayName.
 // Pass skipAutoAlias=true to store the account with no alias at all.
 // When alias is non-empty it must pass store.ValidateAlias and be unique.
-func AddCurrent(preferredSlot int, alias string, skipAutoAlias bool) (added store.Account, refreshed bool, err error) {
+//
+// force skips the identity/token cross-check (see slotSharingToken). The
+// check is a heuristic about tokens, and being wrong about it would block
+// the very command a user runs to repair a broken pool, so there is a way
+// past it — but taking it stores a pairing cux believes is inconsistent.
+func AddCurrent(preferredSlot int, alias string, skipAutoAlias, force bool) (added store.Account, refreshed bool, err error) {
 	if err := ensureBackupRoot(); err != nil {
 		return store.Account{}, false, err
 	}
@@ -73,6 +80,21 @@ func AddCurrent(preferredSlot int, alias string, skipAutoAlias bool) (added stor
 	}
 	if err := store.ValidateEmail(parsed.EmailAddress); err != nil {
 		return store.Account{}, false, err
+	}
+
+	// The identity above and the token below come from two different files
+	// that can disagree; capturing a mismatched pair is silent corruption,
+	// so refuse before anything is written. See slotSharingToken.
+	if !force {
+		if slot, other := slotSharingToken(state, state.FindByIdentity(parsed.EmailAddress, parsed.OrganizationUUID), liveCreds); slot != 0 {
+			return store.Account{}, false, fmt.Errorf(
+				"%w: Claude Code names %s, but the credentials it has stored carry the same account token already saved for slot %d (%s). "+
+					"Capturing this would file one account's token under the other's name, and both slots would then report identical usage — "+
+					"a threshold swap could move onto an exhausted account. "+
+					"Check CLAUDE_CONFIG_DIR points where you expect, run `claude login` as %s, then retry. "+
+					"Pass --force to capture the pair anyway",
+				ErrTokenIdentityMismatch, parsed.EmailAddress, slot, other, parsed.EmailAddress)
+		}
 	}
 
 	// Validate alias early so we fail before touching any files.
@@ -152,6 +174,77 @@ func AddCurrent(preferredSlot int, alias string, skipAutoAlias bool) (added stor
 	return state.Accounts[slot], false, nil
 }
 
+// ErrTokenIdentityMismatch is returned by AddCurrent when the live
+// credentials carry an account token that is already stored under a
+// different managed slot — the fingerprint of Claude Code's identity file
+// and its credential store describing two different accounts.
+var ErrTokenIdentityMismatch = errors.New("switcher: stored credentials belong to a different account than Claude Code's identity file names")
+
+// tokenFingerprint hashes the account token inside a credentials blob so
+// two slots can be compared for token identity without a raw bearer being
+// held for comparison or reaching an error message. The second return is
+// false for a blob that cannot be parsed or carries no account token.
+func tokenFingerprint(blob string) (string, bool) {
+	tok, err := creds.ExtractAccessToken(blob)
+	if err != nil {
+		return "", false
+	}
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:]), true
+}
+
+// slotSharingToken reports the managed slot, other than skipSlot, whose
+// stored credentials carry the same account token as blob. It returns
+// (0, "") when no other slot does.
+//
+// Claude Code keeps the account identity (the oauthAccount block) and the
+// account token (the credential store) in two separate places, and they can
+// legitimately disagree: `claude auth login` has been seen writing the token
+// to the default location while CLAUDE_CONFIG_DIR pointed elsewhere and
+// oauthAccount still named the previous account (issue #46). Capturing that
+// pair files account B's token under account A's name, after which both
+// slots poll usage with the same token and each reports the other's limits —
+// so a threshold swap can move onto an account that is actually exhausted,
+// or refuse to move off one that has recovered. Nothing downstream can
+// detect it, because every reading looks plausible.
+//
+// A shared token is the reliable fingerprint. Two real logins never have the
+// same access token, and that holds even for twin seats — one email in a
+// personal and an organization account (issue #23) — which authenticate
+// separately and so carry distinct tokens. A token already present under
+// another slot is therefore always this bug, never a legitimate add.
+//
+// skipSlot is the slot the caller is about to write, excluded because
+// re-running `cux add` for an account that is already managed is the normal
+// way to refresh its token and would otherwise match itself.
+//
+// Best-effort by design: a slot whose backup cannot be read, or which holds
+// no account token, is skipped rather than treated as an error. Unreadable
+// credentials are themselves a live failure mode (issue #46) and must not
+// turn into a refusal to add a perfectly good account.
+func slotSharingToken(state *store.State, skipSlot int, blob string) (int, string) {
+	want, ok := tokenFingerprint(blob)
+	if !ok {
+		return 0, ""
+	}
+	// Slot order, not map order, so the reported collision is deterministic
+	// when more than one slot has been corrupted.
+	for _, slot := range state.SortedSlots() {
+		if slot == skipSlot {
+			continue
+		}
+		acct := state.Accounts[slot]
+		stored, err := creds.ReadBackup(slot, acct.Email)
+		if err != nil {
+			continue
+		}
+		if got, ok := tokenFingerprint(stored); ok && got == want {
+			return slot, acct.Email
+		}
+	}
+	return 0, ""
+}
+
 // SwitchTo activates the target account: backs up the current account's
 // (possibly refreshed) credentials, then writes the target's credentials
 // and oauthAccount block to Claude Code's live storage.
@@ -213,11 +306,19 @@ func SwitchTo(identifier string) (from, to store.Account, err error) {
 	if liveErr == nil && cfgErr == nil {
 		if slot := state.FindByIdentity(currentParsed.EmailAddress, currentParsed.OrganizationUUID); slot != 0 {
 			current = state.Accounts[slot]
-			if err := creds.WriteBackup(slot, current.Email, currentLive); err != nil {
-				return store.Account{}, store.Account{}, fmt.Errorf("backing up current creds: %w", err)
-			}
-			if err := store.WriteOAuthBlockBackup(slot, current.Email, currentRaw); err != nil {
-				return store.Account{}, store.Account{}, fmt.Errorf("backing up current oauth: %w", err)
+			// This refresh trusts the same identity/token pairing AddCurrent
+			// now verifies, and a mismatched pair here would overwrite a
+			// good backup with another account's token (slotSharingToken).
+			// Skipping the refresh only forgoes a token rotation; clobbering
+			// the slot would corrupt it, so prefer the stale copy and let
+			// the switch proceed.
+			if bad, _ := slotSharingToken(state, slot, currentLive); bad == 0 {
+				if err := creds.WriteBackup(slot, current.Email, currentLive); err != nil {
+					return store.Account{}, store.Account{}, fmt.Errorf("backing up current creds: %w", err)
+				}
+				if err := store.WriteOAuthBlockBackup(slot, current.Email, currentRaw); err != nil {
+					return store.Account{}, store.Account{}, fmt.Errorf("backing up current oauth: %w", err)
+				}
 			}
 		}
 		// If the live account isn't managed, we silently proceed — we
