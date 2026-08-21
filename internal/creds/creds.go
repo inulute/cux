@@ -166,6 +166,65 @@ func ReadBackup(slot int, email string) (string, error) {
 	return readBackupKeyring(slot, email)
 }
 
+// BackupState is the health of one slot's stored login, as reported by
+// CheckBackup.
+type BackupState int
+
+const (
+	// BackupOK: a login is stored and carries an account token.
+	BackupOK BackupState = iota
+	// BackupMissing: nothing is stored for this slot at all. On
+	// macOS/Windows the keystore item is gone; on Linux the file is.
+	BackupMissing
+	// BackupNoToken: something is stored but carries no account token, so
+	// switching to the slot would sign the user out (issue #42).
+	BackupNoToken
+	// BackupUnreadable: the store itself refused the read — a locked
+	// keychain, a denied prompt. Kept apart from BackupMissing because the
+	// login may well still be there; the two need different advice.
+	BackupUnreadable
+)
+
+// Describe renders the state as a short phrase for a status line.
+func (b BackupState) Describe() string {
+	switch b {
+	case BackupOK:
+		return "stored login OK"
+	case BackupMissing:
+		return "no stored login"
+	case BackupNoToken:
+		return "stored login carries no account token"
+	case BackupUnreadable:
+		return "stored login could not be read"
+	}
+	return "unknown"
+}
+
+// CheckBackup reports whether slot's stored login could actually be used,
+// by reading it rather than inferring from a failed poll.
+//
+// This is the question `cux status` could not answer. When the credential
+// store empties out, every symptom shows up somewhere else — usage stops
+// refreshing, swaps stop firing — and none of them names the cause, so a
+// pool can look merely quiet for as long as it takes someone to run a
+// direct read (issue #46). Any error is returned alongside the state for
+// callers that want the detail; the state alone is enough to act on.
+func CheckBackup(slot int, email string) (BackupState, error) {
+	blob, err := ReadBackup(slot, email)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return BackupMissing, err
+	case err != nil:
+		return BackupUnreadable, err
+	case blob == "":
+		return BackupMissing, ErrNotFound
+	}
+	if _, err := ExtractAccessToken(blob); err != nil {
+		return BackupNoToken, err
+	}
+	return BackupOK, nil
+}
+
 // WriteBackup saves the credential blob for one account.
 func WriteBackup(slot int, email, blob string) error {
 	if blob == "" {

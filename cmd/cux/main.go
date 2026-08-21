@@ -29,6 +29,7 @@ import (
 
 	"github.com/inulute/cux/internal/branding"
 	"github.com/inulute/cux/internal/config"
+	"github.com/inulute/cux/internal/creds"
 	"github.com/inulute/cux/internal/history"
 	"github.com/inulute/cux/internal/hookinstall"
 	"github.com/inulute/cux/internal/hooks"
@@ -652,12 +653,57 @@ func cmdStatus(args []string) {
 		if len(cache) == 0 {
 			fmt.Printf("\n %s(No usage data — run `cux usage refresh` to fetch.)%s\n\n", colorGray, colorReset)
 		}
+		printCredentialHealth(os.Stdout, state)
 	} else {
 		fmt.Printf(" %sNo accounts managed yet. Run `cux add` while logged in.%s\n\n", colorGray, colorReset)
 	}
 	for _, e := range warnings {
 		fmt.Fprintln(os.Stderr, "warning:", e)
 	}
+}
+
+// printCredentialHealth reports slots whose stored login cannot be used.
+//
+// It answers the question that went unanswered while a reporter's pool sat
+// broken for twelve days: the usage numbers had stopped moving and no swap
+// would fire, but nothing said the credential store had emptied out
+// (issue #46). Every other symptom of that is indirect, so this reads the
+// slots and says so plainly, with the repair.
+//
+// Lives on `cux status` rather than `cux list` on purpose. On macOS and
+// Windows each read hits the OS keystore, and `cux list` is run often
+// enough — including by other tools — that adding N keystore reads to it
+// would be a real cost. `cux status` is where someone goes to ask what is
+// wrong.
+func printCredentialHealth(w io.Writer, st *store.State) {
+	type problem struct {
+		slot  int
+		email string
+		state creds.BackupState
+	}
+	var problems []problem
+	for _, slot := range st.SortedSlots() {
+		acct := st.Accounts[slot]
+		if bs, _ := creds.CheckBackup(slot, acct.Email); bs != creds.BackupOK {
+			problems = append(problems, problem{slot, acct.Email, bs})
+		}
+	}
+	if len(problems) == 0 {
+		return
+	}
+
+	scope := fmt.Sprintf("%d of %d accounts", len(problems), len(st.Accounts))
+	if len(problems) == len(st.Accounts) {
+		scope = "every account"
+	}
+	fmt.Fprintf(w, " %s⚠ STORED LOGINS UNUSABLE%s — %s. cux cannot poll usage for\n", colorYellow, colorReset, scope)
+	fmt.Fprintf(w, " %sthese accounts, and cannot switch to them.%s\n\n", colorGray, colorReset)
+	for _, p := range problems {
+		fmt.Fprintf(w, "   %s[%02d]%s %s — %s%s%s\n",
+			colorGray, p.slot, colorReset, p.email, colorYellow, p.state.Describe(), colorReset)
+	}
+	fmt.Fprintf(w, "\n %sTo repair, for each account above: run `claude login` as that account,%s\n", colorGray, colorReset)
+	fmt.Fprintf(w, " %sthen `cux add` to recapture the slot.%s\n\n", colorGray, colorReset)
 }
 
 func cmdSwitch(args []string) {

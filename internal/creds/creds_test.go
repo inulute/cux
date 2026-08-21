@@ -303,3 +303,40 @@ func TestDecodeBackupValueRejectsGarbage(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckBackupClassifiesWhatIsActuallyStored covers the question
+// `cux status` could not answer: not "did a poll fail" but "is there a
+// usable login here at all" (issue #46).
+func TestCheckBackupClassifiesWhatIsActuallyStored(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+
+	// Nothing stored at all — the reporter's state once the keyring emptied.
+	if got, _ := CheckBackup(1, "a@x.test"); got != BackupMissing {
+		t.Fatalf("CheckBackup on an empty store = %v, want BackupMissing", got)
+	}
+
+	if err := WriteBackup(1, "a@x.test", accountBlob); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := CheckBackup(1, "a@x.test"); got != BackupOK || err != nil {
+		t.Fatalf("CheckBackup on a good slot = %v (%v), want BackupOK", got, err)
+	}
+
+	// An MCP-only blob is stored but would sign the user out (issue #42).
+	// WriteBackup refuses those, so write it underneath to model a slot
+	// captured by an older build.
+	if err := writeBackupFile(2, "b@x.test", mcpOnlyBlob); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := CheckBackup(2, "b@x.test"); got != BackupNoToken {
+		t.Fatalf("CheckBackup on a token-less slot = %v, want BackupNoToken", got)
+	}
+
+	for _, bs := range []BackupState{BackupOK, BackupMissing, BackupNoToken, BackupUnreadable} {
+		if bs.Describe() == "unknown" {
+			t.Errorf("BackupState %d has no description", bs)
+		}
+	}
+}
