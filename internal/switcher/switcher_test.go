@@ -164,22 +164,22 @@ func TestSlotSharingTokenSkipsSlotsItCannotRead(t *testing.T) {
 // TestTokenFingerprintIgnoresBlobsWithoutAnAccountToken covers the MCP-only
 // blob from issue #42: no token means no fingerprint, so such a slot can
 // never collide with anything.
-func TestTokenFingerprintIgnoresBlobsWithoutAnAccountToken(t *testing.T) {
+func TestCredsTokenFingerprintIgnoresBlobsWithoutAnAccountToken(t *testing.T) {
 	for _, blob := range []string{
 		"",
 		"not json",
 		`{"mcpOAuth":{"srv":{"accessToken":"x"}}}`,
 		`{"claudeAiOauth":{"refreshToken":"r"}}`,
 	} {
-		if _, ok := tokenFingerprint(blob); ok {
-			t.Fatalf("tokenFingerprint(%q) reported a usable token", blob)
+		if _, ok := creds.TokenFingerprint(blob); ok {
+			t.Fatalf("creds.TokenFingerprint(%q) reported a usable token", blob)
 		}
 	}
-	a, ok := tokenFingerprint(blobFor("token-a"))
+	a, ok := creds.TokenFingerprint(blobFor("token-a"))
 	if !ok {
 		t.Fatal("tokenFingerprint rejected a valid blob")
 	}
-	if b, _ := tokenFingerprint(blobFor("token-b")); a == b {
+	if b, _ := creds.TokenFingerprint(blobFor("token-b")); a == b {
 		t.Fatal("distinct tokens produced the same fingerprint")
 	}
 }

@@ -105,11 +105,17 @@ func refreshAll(maxAge time.Duration) (usage.Cache, []error) {
 		}
 		fetched++
 		wg.Add(1)
-		go func(slot int, a store.Account) {
+		others := make([]store.Account, 0, len(state.Accounts))
+		for otherSlot, other := range state.Accounts {
+			if otherSlot != slot {
+				others = append(others, other)
+			}
+		}
+		go func(slot int, a store.Account, others []store.Account) {
 			defer wg.Done()
-			entry, err := refreshOne(slot, a.Email, a.OrgUUID)
+			entry, err := refreshOne(slot, a.Email, a.OrgUUID, others)
 			ch <- result{cacheKey: a.CacheKey(), entry: entry, err: err, email: a.Email}
-		}(slot, a)
+		}(slot, a, others)
 	}
 	wg.Wait()
 	close(ch)
@@ -162,7 +168,13 @@ func RefreshActive(email string) error {
 		return fmt.Errorf("monitor: %s not managed by cux", email)
 	}
 	acct := state.Accounts[slot]
-	entry, err := refreshOne(slot, acct.Email, acct.OrgUUID)
+	others := make([]store.Account, 0, len(state.Accounts))
+	for otherSlot, other := range state.Accounts {
+		if otherSlot != slot {
+			others = append(others, other)
+		}
+	}
+	entry, err := refreshOne(slot, acct.Email, acct.OrgUUID, others)
 	cache, cacheErr := usage.LoadCache()
 	if cacheErr != nil {
 		return cacheErr
@@ -187,7 +199,11 @@ func RefreshActive(email string) error {
 //  2. If the API still returns 401 (e.g. the refresh token itself expired):
 //     fall back to the live credentials file, but only when the live account
 //     email and orgUUID match, to avoid using a different account's token.
-func refreshOne(slot int, email, orgUUID string) (usage.AccountUsage, error) {
+//
+// refreshOne polls one account. others is the rest of the managed pool, used
+// only on the post-401 fallback path to check a live token is not already
+// filed under another slot; pass nil to skip that check.
+func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.AccountUsage, error) {
 	blob, err := creds.ReadBackup(slot, email)
 	if err != nil {
 		return usage.AccountUsage{}, err
@@ -252,9 +268,35 @@ func refreshOne(slot int, email, orgUUID string) (usage.AccountUsage, error) {
 	if err2 != nil {
 		return u, err
 	}
-	// Live token worked — update the backup so the next refresh uses it.
-	// Best-effort: if this fails we still return the valid usage data.
-	_ = creds.WriteBackup(slot, email, liveBlob)
+	// Live token worked, so adopt it into the slot — that is what makes a
+	// `claude login` without a `cux add` self-heal on the next refresh.
+	//
+	// But the check that got us here compared the *identity file* against
+	// this slot's email, and that file is exactly what can disagree with the
+	// credential store (issue #46). Passing it does not establish that the
+	// live token belongs to this account, so adopting on that basis alone is
+	// how one account's token ends up filed under another's name — the same
+	// corruption `cux add` and `cux switch` now refuse, arriving through a
+	// background refresh instead of a command.
+	//
+	// So prove it negatively before writing: if this token is already stored
+	// under a different slot, it is not this account's. The scan reads the
+	// other slots' backups, which is why it lives here on the post-401 path
+	// rather than in the refresh proper — a dead stored token is rare, while
+	// refreshAll runs at every session start, Stop signal and idle check.
+	//
+	// On a collision, keep the reading and skip the write. The figure is
+	// still worth having, and leaving the stale backup in place keeps the
+	// slot repairable by `cux add`, which can attribute the token properly.
+	// `cux status` reports pools already in this state.
+	refs := make([]creds.SlotRef, 0, len(others))
+	for _, o := range others {
+		refs = append(refs, creds.SlotRef{Slot: o.Slot, Email: o.Email})
+	}
+	if _, shared := creds.SlotHoldingToken(refs, slot, liveBlob); !shared {
+		// Best-effort: if this fails we still return the valid usage data.
+		_ = creds.WriteBackup(slot, email, liveBlob)
+	}
 	return u2, nil
 }
 

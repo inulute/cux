@@ -340,3 +340,69 @@ func TestCheckBackupClassifiesWhatIsActuallyStored(t *testing.T) {
 		}
 	}
 }
+
+// TestSlotHoldingTokenFindsAMisfiledToken covers the check that guards every
+// write path: a token already stored under another slot cannot belong to the
+// account being written (issue #46).
+func TestSlotHoldingTokenFindsAMisfiledToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+
+	blobA := `{"claudeAiOauth":{"accessToken":"tok-a","refreshToken":"r"}}`
+	blobB := `{"claudeAiOauth":{"accessToken":"tok-b","refreshToken":"r"}}`
+	if err := WriteBackup(1, "a@x.test", blobA); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteBackup(2, "b@x.test", blobB); err != nil {
+		t.Fatal(err)
+	}
+	slots := []SlotRef{{1, "a@x.test"}, {2, "b@x.test"}}
+
+	// Writing a's token into slot 2 is the corruption — slot 1 already has it.
+	if ref, ok := SlotHoldingToken(slots, 2, blobA); !ok || ref.Slot != 1 {
+		t.Fatalf("SlotHoldingToken = %+v (%v), want slot 1", ref, ok)
+	}
+	// Re-writing a slot's own token is the ordinary refresh, not a collision.
+	if ref, ok := SlotHoldingToken(slots, 1, blobA); ok {
+		t.Fatalf("a slot's own token reported as a collision: %+v", ref)
+	}
+	// A genuinely new token for slot 2 is fine.
+	fresh := `{"claudeAiOauth":{"accessToken":"tok-b2","refreshToken":"r"}}`
+	if ref, ok := SlotHoldingToken(slots, 2, fresh); ok {
+		t.Fatalf("a rotated token reported as a collision: %+v", ref)
+	}
+}
+
+// TestSharedTokenSlotsFindsAnAlreadyCorruptedPool is the diagnostic side:
+// pools captured by a build with no write guard are already in this state and
+// nothing else would say so.
+func TestSharedTokenSlotsFindsAnAlreadyCorruptedPool(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("CUX_CREDS_BACKEND", "file")
+
+	same := `{"claudeAiOauth":{"accessToken":"one-token","refreshToken":"r"}}`
+	other := `{"claudeAiOauth":{"accessToken":"distinct","refreshToken":"r"}}`
+	for _, w := range []struct {
+		slot  int
+		email string
+		blob  string
+	}{{1, "a@x.test", same}, {2, "b@x.test", same}, {3, "c@x.test", other}} {
+		if err := WriteBackup(w.slot, w.email, w.blob); err != nil {
+			t.Fatal(err)
+		}
+	}
+	slots := []SlotRef{{1, "a@x.test"}, {2, "b@x.test"}, {3, "c@x.test"}}
+	groups := SharedTokenSlots(slots)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(groups))
+	}
+	if len(groups[0]) != 2 || groups[0][0].Slot != 1 || groups[0][1].Slot != 2 {
+		t.Fatalf("group = %+v, want slots 1 and 2", groups[0])
+	}
+	// A healthy pool reports nothing.
+	if got := SharedTokenSlots([]SlotRef{{3, "c@x.test"}}); len(got) != 0 {
+		t.Fatalf("healthy pool reported %+v", got)
+	}
+}

@@ -654,6 +654,7 @@ func cmdStatus(args []string) {
 			fmt.Printf("\n %s(No usage data — run `cux usage refresh` to fetch.)%s\n\n", colorGray, colorReset)
 		}
 		printCredentialHealth(os.Stdout, state)
+		printSharedTokenWarning(os.Stdout, state)
 	} else {
 		fmt.Printf(" %sNo accounts managed yet. Run `cux add` while logged in.%s\n\n", colorGray, colorReset)
 	}
@@ -704,6 +705,37 @@ func printCredentialHealth(w io.Writer, st *store.State) {
 	}
 	fmt.Fprintf(w, "\n %sTo repair, for each account above: run `claude login` as that account,%s\n", colorGray, colorReset)
 	fmt.Fprintf(w, " %sthen `cux add` to recapture the slot.%s\n\n", colorGray, colorReset)
+}
+
+// printSharedTokenWarning reports slots that hold the same account token as
+// each other.
+//
+// A pool in that state reports one account's usage under two names, so both
+// rows look plausible and neither is right — a threshold swap can move onto
+// an account that is actually exhausted. The write paths now refuse to create
+// it, but a pool captured by an earlier build can already be in it, and
+// nothing else would ever say so.
+func printSharedTokenWarning(w io.Writer, st *store.State) {
+	slots := make([]creds.SlotRef, 0, len(st.Accounts))
+	for _, slot := range st.SortedSlots() {
+		slots = append(slots, creds.SlotRef{Slot: slot, Email: st.Accounts[slot].Email})
+	}
+	groups := creds.SharedTokenSlots(slots)
+	if len(groups) == 0 {
+		return
+	}
+	fmt.Fprintf(w, " %s⚠ SLOTS SHARING ONE LOGIN%s — these slots hold the same account token,\n",
+		colorYellow, colorReset)
+	fmt.Fprintf(w, " %sso their usage figures describe one account under several names.%s\n\n", colorGray, colorReset)
+	for _, group := range groups {
+		var labels []string
+		for _, ref := range group {
+			labels = append(labels, fmt.Sprintf("[%02d] %s", ref.Slot, ref.Email))
+		}
+		fmt.Fprintf(w, "   %s\n", strings.Join(labels, "  =  "))
+	}
+	fmt.Fprintf(w, "\n %sTo repair: run `claude login` as each account in turn, then `cux add`.%s\n", colorGray, colorReset)
+	fmt.Fprintf(w, " %sCheck CLAUDE_CONFIG_DIR points where you expect before each one.%s\n\n", colorGray, colorReset)
 }
 
 func cmdSwitch(args []string) {

@@ -25,6 +25,7 @@
 package creds
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -164,6 +165,100 @@ func ReadBackup(slot int, email string) (string, error) {
 		return readBackupKeychainMacOS(slot, email)
 	}
 	return readBackupKeyring(slot, email)
+}
+
+// SlotRef names one managed slot for the backup-scanning helpers below,
+// which cannot take a store.State without creds ceasing to be a leaf.
+type SlotRef struct {
+	Slot  int
+	Email string
+}
+
+// TokenFingerprint hashes the account token inside a credentials blob, so two
+// slots can be compared for token identity without a raw bearer being held
+// for comparison or reaching an error message. ok is false for a blob that
+// cannot be parsed or carries no account token.
+func TokenFingerprint(blob string) (fingerprint string, ok bool) {
+	tok, err := ExtractAccessToken(blob)
+	if err != nil {
+		return "", false
+	}
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:]), true
+}
+
+// SlotHoldingToken returns the first slot in slots, other than skipSlot,
+// whose stored credentials carry the same account token as blob.
+//
+// This is the check that catches an identity and a token belonging to
+// different accounts. Claude Code keeps the two in separate places and they
+// can disagree — `claude auth login` has been seen writing the token to the
+// default location while the identity file still named the previous account
+// (issue #46) — and pairing them files account B's token under account A's
+// name. Both slots then poll usage with the same token and each reports the
+// other's limits, which nothing downstream can detect because every figure
+// looks plausible.
+//
+// A shared token is the reliable tell. Two real logins never carry the same
+// access token, and that holds for twin seats — one email across a personal
+// and an organization account — which authenticate separately. So a token
+// already present under another slot is always this bug.
+//
+// Best-effort by design: a slot whose backup cannot be read, or which holds
+// no account token, is skipped rather than treated as an error. Unreadable
+// credentials are their own live failure mode and must not turn into a
+// refusal to do the caller's work.
+func SlotHoldingToken(slots []SlotRef, skipSlot int, blob string) (SlotRef, bool) {
+	want, ok := TokenFingerprint(blob)
+	if !ok {
+		return SlotRef{}, false
+	}
+	for _, ref := range slots {
+		if ref.Slot == skipSlot {
+			continue
+		}
+		stored, err := ReadBackup(ref.Slot, ref.Email)
+		if err != nil {
+			continue
+		}
+		if got, ok := TokenFingerprint(stored); ok && got == want {
+			return ref, true
+		}
+	}
+	return SlotRef{}, false
+}
+
+// SharedTokenSlots returns the groups of slots that hold the same account
+// token as each other. Every group is a pair of accounts reporting one
+// account's usage under two names.
+//
+// Diagnostic counterpart to SlotHoldingToken: that one prevents the pairing
+// at the write boundary, this one finds pools already corrupted by a build
+// that had no such guard.
+func SharedTokenSlots(slots []SlotRef) [][]SlotRef {
+	byFingerprint := map[string][]SlotRef{}
+	var order []string
+	for _, ref := range slots {
+		stored, err := ReadBackup(ref.Slot, ref.Email)
+		if err != nil {
+			continue
+		}
+		fp, ok := TokenFingerprint(stored)
+		if !ok {
+			continue
+		}
+		if _, seen := byFingerprint[fp]; !seen {
+			order = append(order, fp)
+		}
+		byFingerprint[fp] = append(byFingerprint[fp], ref)
+	}
+	var out [][]SlotRef
+	for _, fp := range order {
+		if group := byFingerprint[fp]; len(group) > 1 {
+			out = append(out, group)
+		}
+	}
+	return out
 }
 
 // BackupState is the health of one slot's stored login, as reported by

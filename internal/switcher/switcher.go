@@ -5,8 +5,6 @@
 package switcher
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -180,67 +178,23 @@ func AddCurrent(preferredSlot int, alias string, skipAutoAlias, force bool) (add
 // and its credential store describing two different accounts.
 var ErrTokenIdentityMismatch = errors.New("switcher: stored credentials belong to a different account than Claude Code's identity file names")
 
-// tokenFingerprint hashes the account token inside a credentials blob so
-// two slots can be compared for token identity without a raw bearer being
-// held for comparison or reaching an error message. The second return is
-// false for a blob that cannot be parsed or carries no account token.
-func tokenFingerprint(blob string) (string, bool) {
-	tok, err := creds.ExtractAccessToken(blob)
-	if err != nil {
-		return "", false
-	}
-	sum := sha256.Sum256([]byte(tok))
-	return hex.EncodeToString(sum[:]), true
-}
-
 // slotSharingToken reports the managed slot, other than skipSlot, whose
-// stored credentials carry the same account token as blob. It returns
-// (0, "") when no other slot does.
-//
-// Claude Code keeps the account identity (the oauthAccount block) and the
-// account token (the credential store) in two separate places, and they can
-// legitimately disagree: `claude auth login` has been seen writing the token
-// to the default location while CLAUDE_CONFIG_DIR pointed elsewhere and
-// oauthAccount still named the previous account (issue #46). Capturing that
-// pair files account B's token under account A's name, after which both
-// slots poll usage with the same token and each reports the other's limits —
-// so a threshold swap can move onto an account that is actually exhausted,
-// or refuse to move off one that has recovered. Nothing downstream can
-// detect it, because every reading looks plausible.
-//
-// A shared token is the reliable fingerprint. Two real logins never have the
-// same access token, and that holds even for twin seats — one email in a
-// personal and an organization account (issue #23) — which authenticate
-// separately and so carry distinct tokens. A token already present under
-// another slot is therefore always this bug, never a legitimate add.
+// stored credentials carry the same account token as blob. See
+// creds.SlotHoldingToken for why a shared token is the reliable tell; this
+// wrapper only adapts the state's slot map to it.
 //
 // skipSlot is the slot the caller is about to write, excluded because
-// re-running `cux add` for an account that is already managed is the normal
-// way to refresh its token and would otherwise match itself.
-//
-// Best-effort by design: a slot whose backup cannot be read, or which holds
-// no account token, is skipped rather than treated as an error. Unreadable
-// credentials are themselves a live failure mode (issue #46) and must not
-// turn into a refusal to add a perfectly good account.
+// re-running `cux add` for an account already managed is the normal way to
+// refresh its token and would otherwise match itself.
 func slotSharingToken(state *store.State, skipSlot int, blob string) (int, string) {
-	want, ok := tokenFingerprint(blob)
-	if !ok {
-		return 0, ""
-	}
 	// Slot order, not map order, so the reported collision is deterministic
 	// when more than one slot has been corrupted.
+	slots := make([]creds.SlotRef, 0, len(state.Accounts))
 	for _, slot := range state.SortedSlots() {
-		if slot == skipSlot {
-			continue
-		}
-		acct := state.Accounts[slot]
-		stored, err := creds.ReadBackup(slot, acct.Email)
-		if err != nil {
-			continue
-		}
-		if got, ok := tokenFingerprint(stored); ok && got == want {
-			return slot, acct.Email
-		}
+		slots = append(slots, creds.SlotRef{Slot: slot, Email: state.Accounts[slot].Email})
+	}
+	if ref, ok := creds.SlotHoldingToken(slots, skipSlot, blob); ok {
+		return ref.Slot, ref.Email
 	}
 	return 0, ""
 }
