@@ -62,42 +62,6 @@ const (
 	donateURL = "https://support.inulute.com"
 )
 
-// knownSubcommands is the set of first-args cux handles itself.
-// Anything else (including `--resume`, `mcp`, `-c`, etc.) is forwarded
-// to the real claude binary via the wrapper.
-var knownSubcommands = map[string]bool{
-	"add":             true,
-	"project":         true,
-	"alias":           true,
-	"list":            true,
-	"ls":              true,
-	"remove":          true,
-	"rm":              true,
-	"status":          true,
-	"sessions":        true,
-	"attach":          true,
-	"support":         true,
-	"switch":          true,
-	"force-switch":    true,
-	"rescue-switch":   true,
-	"setup":           true,
-	"install-hooks":   true,
-	"uninstall-hooks": true,
-	"hook":            true,
-	"history":         true,
-	"config":          true,
-	"usage":           true,
-	"upgrade":         true,
-	"run":             true,
-	"docs":            true,
-	"help":            true,
-	"--help":          true,
-	"-h":              true,
-	"version":         true,
-	"--version":       true,
-	"__slash-switch":  true,
-}
-
 func main() {
 	initTerminalOutput()
 
@@ -109,60 +73,11 @@ func main() {
 	cmd := os.Args[1]
 	rest := os.Args[2:]
 
-	if !knownSubcommands[cmd] {
+	// The table in commands.go decides both what cux claims and where it
+	// goes, so the two cannot drift apart: a command that dispatches is
+	// exactly one cux does not forward to claude.
+	if !dispatch(cmd, rest) {
 		runWrapper(os.Args[1:])
-		return
-	}
-
-	switch cmd {
-	case "add":
-		cmdAdd(rest)
-	case "list", "ls":
-		cmdList(rest)
-	case "remove", "rm":
-		cmdRemove(rest)
-	case "alias":
-		cmdAlias(rest)
-	case "project":
-		cmdProject(rest)
-	case "status":
-		cmdStatus(rest)
-	case "attach":
-		os.Exit(cmdAttach(rest))
-	case "sessions":
-		cmdSessions(rest)
-	case "support":
-		cmdSupport(rest)
-	case "switch":
-		cmdSwitch(rest)
-	case "force-switch", "rescue-switch":
-		cmdForceSwitch(rest)
-	case "setup":
-		cmdSetup(rest)
-	case "install-hooks":
-		cmdInstallHooks(rest)
-	case "uninstall-hooks":
-		cmdUninstallHooks(rest)
-	case "hook":
-		cmdHook(rest)
-	case "history":
-		cmdHistory(rest)
-	case "config":
-		cmdConfig(rest)
-	case "usage":
-		cmdUsage(rest)
-	case "upgrade":
-		cmdUpgrade(rest)
-	case "run":
-		runWrapper(rest)
-	case "docs":
-		cmdDocs(rest)
-	case "help", "--help", "-h":
-		printHelp()
-	case "version", "--version":
-		cmdVersion(rest)
-	case "__slash-switch":
-		cmdSlashSwitch(rest)
 	}
 }
 
@@ -953,74 +868,70 @@ func cmdHistory(args []string) {
 	}
 }
 
-func cmdConfig(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: cux config show | cux config keys | cux config edit | cux config set <key> <value>")
+func cmdConfigShow(args []string) {
+	c, err := config.Load()
+	if err != nil {
+		fail(err)
+	}
+	out, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		fail(err)
+	}
+	fmt.Println(string(out))
+}
+
+func cmdConfigKeys(args []string) {
+	c, err := config.Load()
+	if err != nil {
+		fail(err)
+	}
+	keys := config.Keys(c)
+	// Compute column widths once so the output lines up.
+	var keyW, curW int
+	for _, k := range keys {
+		if l := len(k.Key); l > keyW {
+			keyW = l
+		}
+		if l := len(k.Current); l > curW {
+			curW = l
+		}
+	}
+	if curW > 30 {
+		curW = 30
+	}
+	fmt.Printf("%-*s  %-*s  %s\n", keyW, "KEY", curW, "CURRENT", "DESCRIPTION (default)")
+	for _, k := range keys {
+		cur := k.Current
+		if len(cur) > curW {
+			cur = cur[:curW-1] + "…"
+		}
+		fmt.Printf("%-*s  %-*s  %s (default: %s)\n", keyW, k.Key, curW, cur, k.Description, k.Default)
+	}
+}
+
+func cmdConfigEdit(args []string) {
+	if err := editConfigInteractive(); err != nil {
+		fail(err)
+	}
+}
+
+func cmdConfigSet(args []string) {
+	if len(args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: cux config set <key> <value>")
 		os.Exit(2)
 	}
-	switch args[0] {
-	case "show":
-		c, err := config.Load()
-		if err != nil {
-			fail(err)
-		}
-		out, err := json.MarshalIndent(c, "", "  ")
-		if err != nil {
-			fail(err)
-		}
-		fmt.Println(string(out))
-	case "keys":
-		c, err := config.Load()
-		if err != nil {
-			fail(err)
-		}
-		keys := config.Keys(c)
-		// Compute column widths once so the output lines up.
-		var keyW, curW int
-		for _, k := range keys {
-			if l := len(k.Key); l > keyW {
-				keyW = l
-			}
-			if l := len(k.Current); l > curW {
-				curW = l
-			}
-		}
-		if curW > 30 {
-			curW = 30
-		}
-		fmt.Printf("%-*s  %-*s  %s\n", keyW, "KEY", curW, "CURRENT", "DESCRIPTION (default)")
-		for _, k := range keys {
-			cur := k.Current
-			if len(cur) > curW {
-				cur = cur[:curW-1] + "…"
-			}
-			fmt.Printf("%-*s  %-*s  %s (default: %s)\n", keyW, k.Key, curW, cur, k.Description, k.Default)
-		}
-	case "edit":
-		if err := editConfigInteractive(); err != nil {
-			fail(err)
-		}
-	case "set":
-		if len(args) != 3 {
-			fmt.Fprintln(os.Stderr, "usage: cux config set <key> <value>")
-			os.Exit(2)
-		}
-		c, err := config.Load()
-		if err != nil {
-			fail(err)
-		}
-		c, err = config.Set(c, args[1], args[2])
-		if err != nil {
-			fail(err)
-		}
-		if err := config.Save(c); err != nil {
-			fail(err)
-		}
-		fmt.Printf("Set %s.\n", args[1])
-	default:
-		fmt.Fprintln(os.Stderr, "usage: cux config show | cux config keys | cux config edit | cux config set <key> <value>")
-		os.Exit(2)
+	c, err := config.Load()
+	if err != nil {
+		fail(err)
 	}
+	c, err = config.Set(c, args[0], args[1])
+	if err != nil {
+		fail(err)
+	}
+	if err := config.Save(c); err != nil {
+		fail(err)
+	}
+	fmt.Printf("Set %s.\n", args[0])
 }
 
 func editConfigInteractive() error {
@@ -1472,54 +1383,46 @@ func clip(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
-func cmdUsage(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: cux usage refresh | cux usage show")
-		os.Exit(2)
+func cmdUsageRefresh(args []string) {
+	sweepStart := time.Now().UTC()
+	cache, errs := monitor.RefreshAll()
+	for _, e := range errs {
+		fmt.Fprintln(os.Stderr, "warning:", e)
 	}
-	switch args[0] {
-	case "refresh":
-		sweepStart := time.Now().UTC()
-		cache, errs := monitor.RefreshAll()
-		for _, e := range errs {
-			fmt.Fprintln(os.Stderr, "warning:", e)
+	// Re-display so the user sees what was fetched.
+	cmdList(nil)
+	// Exit non-zero when the sweep polled nothing at all, so a cron job
+	// or a wrapper can detect the condition instead of reading a
+	// success it did not get (issue #46).
+	//
+	// The cache answers this directly: an entry stamped at or after the
+	// sweep began is one that came back. Counting errors instead would
+	// misfire, because RefreshAll appends a cache-write failure to the
+	// same slice as the per-account ones — two failed accounts plus a
+	// bad write would look like a total blackout on a pool of two.
+	polled := 0
+	for _, u := range cache {
+		if !u.PolledAt.Before(sweepStart) {
+			polled++
 		}
-		// Re-display so the user sees what was fetched.
-		cmdList(nil)
-		// Exit non-zero when the sweep polled nothing at all, so a cron job
-		// or a wrapper can detect the condition instead of reading a
-		// success it did not get (issue #46).
-		//
-		// The cache answers this directly: an entry stamped at or after the
-		// sweep began is one that came back. Counting errors instead would
-		// misfire, because RefreshAll appends a cache-write failure to the
-		// same slice as the per-account ones — two failed accounts plus a
-		// bad write would look like a total blackout on a pool of two.
-		polled := 0
-		for _, u := range cache {
-			if !u.PolledAt.Before(sweepStart) {
-				polled++
-			}
-		}
-		// Requiring an error too keeps the empty pool at exit 0: with no
-		// accounts there is nothing to poll and nothing has gone wrong.
-		if polled == 0 && len(errs) > 0 {
-			os.Exit(1)
-		}
-	case "show":
-		cache, err := usage.LoadCache()
-		if err != nil {
-			fail(err)
-		}
-		out, err := json.MarshalIndent(cache, "", "  ")
-		if err != nil {
-			fail(err)
-		}
-		fmt.Println(string(out))
-	default:
-		fmt.Fprintln(os.Stderr, "usage: cux usage refresh | cux usage show")
-		os.Exit(2)
 	}
+	// Requiring an error too keeps the empty pool at exit 0: with no
+	// accounts there is nothing to poll and nothing has gone wrong.
+	if polled == 0 && len(errs) > 0 {
+		os.Exit(1)
+	}
+}
+
+func cmdUsageShow(args []string) {
+	cache, err := usage.LoadCache()
+	if err != nil {
+		fail(err)
+	}
+	out, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		fail(err)
+	}
+	fmt.Println(string(out))
 }
 
 // --- Wrapper -------------------------------------------------------------
@@ -2140,8 +2043,10 @@ func renderSupport(useANSI bool) string {
 	return b.String()
 }
 
-func printHelp() {
-	fmt.Println(`cux — Run multiple Claude Code Pro/Max accounts as one
+// helpText is prose on purpose — it groups, annotates and wraps in ways a
+// generated list cannot. TestHelpCoversEveryPublicCommand keeps it honest
+// against the command table instead.
+const helpText = `cux — Run multiple Claude Code Pro/Max accounts as one
 
 USAGE
   cux [claude-args...]                    run claude under the wrapper (default)
@@ -2154,6 +2059,7 @@ USAGE
   cux project assign <name> <seat> [...]  add seats to a project (seats can be shared)
   cux project unassign <name> <seat> [...]
   cux project list [--refresh]            projects + live usage of their seats
+  cux project stats <name>                usage detail for one project
   cux project remove <name>               unbind a directory (accounts untouched)
   cux alias <slot|email|alias> --clear    remove alias
   cux switch <slot|email|alias>           swap the active account (manual; requires
@@ -2163,6 +2069,7 @@ USAGE
   cux remove [--force] <slot|email|alias> remove an account from cux
   cux status                              show live login + cux state
   cux sessions                            list running cux sessions (heartbeat registry)
+  cux attach [pid]                        watch and control a running session
   cux support                             show support URL
   cux docs                                show documentation URL
   cux setup                               install /switch, /cux:* + Claude Code hooks
@@ -2176,14 +2083,17 @@ USAGE
   cux config set <key> <value>            update a single setting
   cux usage refresh                       fetch fresh usage for every account
   cux usage show                          print the on-disk usage cache (JSON)
+  cux commands                            print cux's command surface (JSON)
   cux upgrade                             update cux using npm or the installer
   cux hook <event>                        internal: invoked by Claude Code
   cux version                             print version
+  cux help                                show this help
 
 INLINE SWITCHING
   Once set up, type /switch [<slot|email|alias>] from inside a Claude Code
   session started via cux. You can also use /cux:switch, /cux:add,
   /cux:list, /cux:status, /cux:support, /cux:config, /cux:remove,
   and /cux:usage-refresh from inside the
-  session. Manual and rate-limit swaps reconnect with --resume.`)
-}
+  session. Manual and rate-limit swaps reconnect with --resume.`
+
+func printHelp() { fmt.Println(helpText) }
