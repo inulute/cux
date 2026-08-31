@@ -147,6 +147,37 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		}
 	}
 
+	// Whatever ends this wrapper — a clean quit, a failed swap, a panic
+	// unwinding — the terminal goes back to the user in a usable state.
+	defer restoreTerminal(w)
+
+	// The session ID is the only way back into a conversation, and Claude
+	// Code prints it nowhere but its own running UI. Announce it on the way
+	// out and write it somewhere that outlives both the process and the
+	// scrollback, so no exit path can strand the transcript (#48).
+	var lastSessionID string
+	var startupFailed bool
+	defer func() {
+		if lastSessionID == "" {
+			return
+		}
+		// A wrapper that could not start claude has nothing to hand back;
+		// the line would read as reassurance next to the error above it.
+		// The record still gets written — a launch that fails mid-session
+		// is exactly when the way back matters.
+		if !startupFailed {
+			fmt.Fprintf(w, "cux --resume %s\n", lastSessionID)
+		}
+		seat, _ := switcher.CurrentLiveEmail()
+		cwd, _ := os.Getwd()
+		registry.RecordRecent(registry.Recent{
+			PID:       pid,
+			SessionID: lastSessionID,
+			CWD:       cwd,
+			Seat:      seat,
+		})
+	}()
+
 	// lastManualTarget holds the email the user explicitly switched to
 	// within this wrapper session. Threshold auto-switch is suppressed
 	// while the live account matches this value, so a manual choice is
@@ -157,7 +188,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	if shouldPreflightHardLimit(argv) {
 		_, _ = monitor.RefreshAll()
 		if p, _ := evaluatePrelaunchHardLimitSwap(&cfg); p != nil {
-			target, err := resolveTarget(p.explicitTarget, p.trigger, &cfg)
+			target, err := resolveTarget(p.explicitTarget, p.trigger, &cfg, nil)
 			if err != nil {
 				fmt.Fprintf(w, "cux: %v — staying on current account\n", err)
 			} else if from, to, err := switcher.SwitchTo(target); err != nil {
@@ -208,9 +239,11 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		}
 		exitCode, sessionID, hadTurns, p, err := launch(claudeBin, currentArgv, pid, &cfg, lastManualTarget, host, w)
 		if err != nil {
+			startupFailed = true
 			return exitCode, err
 		}
 		if sessionID != "" {
+			lastSessionID = sessionID
 			registry.UpdateSelf(func(e *registry.Entry) { e.SessionID = sessionID })
 		}
 
@@ -288,11 +321,6 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 					fmt.Fprintln(w)
 				}
 			}
-			// Print a cux-branded resume hint so the user knows to use
-			// `cux --resume` (not `claude --resume`) to reconnect.
-			if sessionID != "" {
-				fmt.Fprintf(w, "cux --resume %s\n", sessionID)
-			}
 			return exitCode, nil
 		}
 
@@ -321,54 +349,8 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 
 		cwd, _ := os.Getwd()
 		if swapped {
-			target, err := resolveTarget(p.explicitTarget, p.trigger, &cfg)
-			if err != nil && cfg.WaitForReset && p.explicitTarget == "" &&
-				(p.trigger == history.TriggerRateLimit || p.trigger == history.TriggerThreshold) {
-				// No other seat has capacity. Before sleeping until a
-				// reset, check whether the live seat itself still has real
-				// 5h/7d room: a rate-limit signal can fire on a healthy
-				// account — a transient 429 on the usage endpoint, or a
-				// session/burst sub-cap that never moves the tracked
-				// windows. Waiting there strands a usable session for the
-				// whole outage (often days on a 7d cap) while the live seat
-				// sits mostly free — the exact failure in issue #37. Resume
-				// in place on a backoff instead; fall through to
-				// wait-for-reset only when the live seat is out too.
-				if acct, ok := liveAccountWithCapacity(&cfg); ok {
-					if hadTurns {
-						inPlaceRetries = 0
-					}
-					delay := fibonacciDelay(inPlaceRetries)
-					inPlaceRetries++
-					fmt.Fprintf(w, "cux: %s hit a limit but no other account has capacity and it still has room — retrying in place in %s…\n",
-						acct.Email, shortDuration(delay))
-					registry.UpdateSelf(func(e *registry.Entry) {
-						e.State = registry.StateRetrying
-						e.Detail = fmt.Sprintf("retrying in place, next try in %s", shortDuration(delay))
-					})
-					time.Sleep(delay)
-					from, to, swapped, err = acct, acct, false, nil
-				} else {
-					target, err = waitForReset(p.trigger, &cfg, w)
-				}
-			}
+			from, to, swapped = completeSwap(p, &cfg, hadTurns, &inPlaceRetries, w)
 			if swapped {
-				// A real swap onto another seat is progress — clear any
-				// in-place backoff carried over from earlier iterations.
-				inPlaceRetries = 0
-				if err != nil {
-					fmt.Fprintf(w, "cux: %v — staying on current account\n", err)
-					return exitCode, nil
-				}
-
-				registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateSwapping })
-				var swapErr error
-				from, to, swapErr = switcher.SwitchTo(target)
-				if swapErr != nil {
-					fmt.Fprintf(w, "cux: switch failed: %v\n", swapErr)
-					return 1, swapErr
-				}
-
 				// Append swap to the history log. Best-effort — a failure
 				// here doesn't unwind the swap.
 				toUsageCache, _ := usage.LoadCache()
@@ -597,6 +579,11 @@ func step(
 			mu.Lock()
 			*sessionID = p.SessionID
 			mu.Unlock()
+			// Publish it now rather than at exit: a wrapper that is killed
+			// outright never reaches the exit path, and `cux sessions` is
+			// then the only remaining record of what was running here.
+			id := p.SessionID
+			registry.UpdateSelf(func(e *registry.Entry) { e.SessionID = id })
 		}
 	}
 
@@ -715,6 +702,8 @@ func step(
 			mu.Lock()
 			*sessionID = p.SessionID
 			mu.Unlock()
+			id := p.SessionID
+			registry.UpdateSelf(func(e *registry.Entry) { e.SessionID = id })
 		}
 		mu.Lock()
 		act.lastAt = time.Now()
@@ -1074,14 +1063,187 @@ func (a *activity) idleFor(now time.Time) (time.Duration, bool) {
 	return now.Sub(a.lastAt), true
 }
 
-func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (string, error) {
+// Seams for tests. completeSwap's two irreducible side effects are a real
+// credential swap against the OS keystore and a real multi-second sleep;
+// neither belongs in a unit test, and both are worth covering.
+var (
+	switchTo = switcher.SwitchTo
+	sleepFor = time.Sleep
+)
+
+// completeSwap carries out a pending swap and always comes back with the
+// session intact.
+//
+// Target selection is deliberately fail-open on a stale reading (#46): a
+// seat whose usage was last polled days ago still counts as a candidate,
+// because refusing would strand a live session while landing on the wrong
+// seat was supposed to self-correct. It only self-corrects if a refusal is
+// survivable, and it was not: a `SwitchTo` failure returned out of Run(),
+// which ended the very session the swap existed to save — a cancelled
+// account still reading "usable" from a ten-day-old cache took fourteen
+// sessions down at once in issue #48. So a target the switcher refuses is
+// excluded here and the choice retried, and a decision with nowhere at all
+// to go parks or backs off in place. No path out of this function ends the
+// session; the caller relaunches claude either way.
+//
+// swapped reports whether the live account actually changed. from and to
+// are the same account when it did not.
+func completeSwap(p *pending, cfg *config.Config, hadTurns bool, inPlaceRetries *int, w io.Writer) (from, to store.Account, swapped bool) {
+	// explicit starts as the pending target and is cleared once that seat
+	// has been refused, so rotation can offer another. A human naming a
+	// seat via /switch is never substituted — the threshold evaluator also
+	// fills explicitTarget in, and that one is only a preference.
+	explicit := p.explicitTarget
+	excluded := map[int]bool{}
+
+	for {
+		target, err := resolveTarget(explicit, p.trigger, cfg, excluded)
+		if err == nil {
+			registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateSwapping })
+			f, t, swapErr := switchTo(target)
+			if swapErr == nil {
+				// A real swap onto another seat is progress — clear any
+				// in-place backoff carried over from earlier iterations.
+				*inPlaceRetries = 0
+				return f, t, true
+			}
+			if t.Slot != 0 {
+				// SwitchTo names both seats only once the credentials are
+				// live: this is "swap complete but state save failed", not a
+				// refusal. Moving again would move a session that has
+				// already moved, and burn a second seat doing it.
+				fmt.Fprintf(w, "cux: switched to %s, but cux state did not save: %v\n", t.Email, swapErr)
+				*inPlaceRetries = 0
+				return f, t, true
+			}
+			fmt.Fprintf(w, "cux: cannot switch to %s: %v\n", target, swapErr)
+			if p.trigger == history.TriggerManual || !excludeTarget(target, excluded) {
+				// The refusal cannot be turned into a different choice: a
+				// human named this seat, or we cannot tell which seat it
+				// was. Waiting would only offer the same target again next
+				// pass — which is how a retry loop with no new information
+				// becomes a spin — so hold the session where it is and let
+				// the next launch decide with fresh data.
+				return holdInPlace(swapErr, hadTurns, inPlaceRetries, w)
+			}
+			// Every retry strictly grows the excluded set, so the loop can
+			// only go round as many times as the pool has seats.
+			explicit = ""
+			continue
+		}
+
+		if !waitEligible(explicit, p.trigger, cfg) {
+			return holdInPlace(err, hadTurns, inPlaceRetries, w)
+		}
+		// No other seat has capacity. Before sleeping until a reset, check
+		// whether the live seat itself still has real 5h/7d room: a
+		// rate-limit signal can fire on a healthy account — a transient 429
+		// on the usage endpoint, or a session/burst sub-cap that never moves
+		// the tracked windows. Waiting there strands a usable session for the
+		// whole outage (often days on a 7d cap) while the live seat sits
+		// mostly free — the exact failure in issue #37. Resume in place on a
+		// backoff instead; fall through to wait-for-reset only when the live
+		// seat is out too.
+		if acct, ok := liveAccountWithCapacity(cfg); ok {
+			delay := inPlaceDelay(hadTurns, inPlaceRetries)
+			fmt.Fprintf(w, "cux: %s hit a limit but no other account has capacity and it still has room — retrying in place in %s…\n",
+				acct.Email, shortDuration(delay))
+			registry.UpdateSelf(func(e *registry.Entry) {
+				e.State = registry.StateRetrying
+				e.Detail = fmt.Sprintf("retrying in place, next try in %s", shortDuration(delay))
+			})
+			sleepFor(delay)
+			return acct, acct, false
+		}
+		if _, werr := waitForReset(p.trigger, cfg, excluded, w); werr != nil {
+			// Waiting is provably futile (every login is dead). Hold the
+			// session anyway: the transcript is worth more than the process,
+			// and `cux add` fixes this from another terminal without the
+			// user losing the conversation.
+			return holdInPlace(werr, hadTurns, inPlaceRetries, w)
+		}
+		// waitForReset only returns once something is usable again. Loop
+		// back so the target is chosen from that fresh reading rather than
+		// from the verdict that sent us to sleep.
+	}
+}
+
+// waitEligible reports whether a decision may park on wait-for-reset.
+// A seat the caller still insists on is not something waiting can supply,
+// and a manual switch is a foreground request that must not silently sleep.
+func waitEligible(explicit string, trigger history.Trigger, cfg *config.Config) bool {
+	return cfg.WaitForReset && explicit == "" &&
+		(trigger == history.TriggerRateLimit || trigger == history.TriggerThreshold)
+}
+
+// excludeTarget marks the slot behind identifier as refused, reporting
+// false when it cannot be resolved or was already excluded — which is what
+// stops completeSwap looping on a target it can neither use nor drop.
+func excludeTarget(identifier string, excluded map[int]bool) bool {
+	state, err := store.Load()
+	if err != nil {
+		return false
+	}
+	acct, err := state.Resolve(identifier)
+	if err != nil || excluded[acct.Slot] {
+		return false
+	}
+	excluded[acct.Slot] = true
+	return true
+}
+
+// inPlaceDelay advances the in-place backoff and returns how long to sleep.
+// A completed turn is progress, so it restarts the sequence.
+func inPlaceDelay(hadTurns bool, inPlaceRetries *int) time.Duration {
+	if hadTurns {
+		*inPlaceRetries = 0
+	}
+	d := fibonacciDelay(*inPlaceRetries)
+	*inPlaceRetries++
+	return d
+}
+
+// holdInPlace keeps the session on whatever seat is live when a swap
+// cannot be completed. The backoff is the point: without it a decision
+// that nothing can satisfy relaunches claude straight back into the wall,
+// once per session, for as long as the wall stands.
+func holdInPlace(reason error, hadTurns bool, inPlaceRetries *int, w io.Writer) (store.Account, store.Account, bool) {
+	delay := inPlaceDelay(hadTurns, inPlaceRetries)
+	if reason != nil {
+		fmt.Fprintf(w, "cux: %v — keeping this session on the current account, retrying in %s…\n",
+			reason, shortDuration(delay))
+	} else {
+		fmt.Fprintf(w, "cux: nowhere to switch to — keeping this session on the current account, retrying in %s…\n",
+			shortDuration(delay))
+	}
+	registry.UpdateSelf(func(e *registry.Entry) {
+		e.State = registry.StateRetrying
+		e.Detail = fmt.Sprintf("holding in place, next try in %s", shortDuration(delay))
+	})
+	sleepFor(delay)
+	acct, ok := liveAccount()
+	if !ok {
+		// Unmanaged or unreadable live login: narrate whatever name we can
+		// still get rather than an empty one.
+		if email, err := switcher.CurrentLiveEmail(); err == nil {
+			acct.Email = email
+		}
+	}
+	return acct, acct, false
+}
+
+// waitForReset parks the session until some seat in the pool has room
+// again. excluded holds slots this decision has had refused, so waiting
+// never counts down to a seat that has already proved unusable — and
+// never hands one back, which would spin the caller's retry loop.
+func waitForReset(trigger history.Trigger, cfg *config.Config, excluded map[int]bool, w io.Writer) (string, error) {
 	for {
 		// Check first, then time. Refresh from the API so the verdict and
 		// the reset clock use current data — never a stale cache whose
 		// resets_at may already be in the past (which used to yield a
 		// bogus ~2-minute countdown and the wrong account).
 		_, _ = monitor.RefreshAll()
-		if target, err := resolveTarget("", trigger, cfg); err == nil {
+		if target, err := resolveTarget("", trigger, cfg, excluded); err == nil {
 			return target, nil // something is usable now — resume, no timer
 		}
 
@@ -1090,9 +1252,10 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 			return "", err
 		}
 		cache, _ := usage.LoadCache()
-		readyAt, email, ok := nextAvailability(state.PoolForCwd(), cache, cfg.Thresholds, time.Now())
+		pool := poolExcluding(state, excluded)
+		readyAt, email, ok := nextAvailability(pool, cache, cfg.Thresholds, time.Now())
 		if !ok {
-			if allTokensExpired(state.PoolForCwd(), cache) {
+			if allTokensExpired(pool, cache) {
 				return "", errors.New("every account needs a fresh login (`cux add`) — waiting cannot help")
 			}
 			// No usable reset clock yet — the cache is catching up after
@@ -1146,7 +1309,7 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, w io.Writer) (str
 			if time.Now().Sub(lastRefresh) >= waitPollInterval {
 				lastRefresh = time.Now().Round(0)
 				_, _ = monitor.RefreshAll()
-				if target, err := resolveTarget("", trigger, cfg); err == nil {
+				if target, err := resolveTarget("", trigger, cfg, excluded); err == nil {
 					fmt.Fprintf(w, "\ncux: %s has capacity — resuming\n", target)
 					return target, nil
 				}
@@ -1211,7 +1374,9 @@ func skipSwapOnCapacity(trigger history.Trigger, liveKey, rateLimitedKey string)
 	return true
 }
 
-func liveAccountWithCapacity(cfg *config.Config) (store.Account, bool) {
+// liveAccount returns the managed account currently holding the live
+// credentials, without judging whether it has room left.
+func liveAccount() (store.Account, bool) {
 	email, err := switcher.CurrentLiveEmail()
 	if err != nil || email == "" {
 		return store.Account{}, false
@@ -1224,22 +1389,24 @@ func liveAccountWithCapacity(cfg *config.Config) (store.Account, bool) {
 	// emails are not unique (the same address can hold a personal
 	// subscription and one seat per org); email is the legacy fallback.
 	liveKey, _ := switcher.CurrentLiveCacheKey()
-	var acct store.Account
-	found := false
 	if liveKey != "" && liveKey != email {
 		for _, a := range state.Accounts {
 			if a.CacheKey() == liveKey {
-				acct, found = a, true
-				break
+				return a, true
 			}
 		}
 	}
-	if !found {
-		slot := state.FindByEmail(email)
-		if slot == 0 {
-			return store.Account{}, false
-		}
-		acct = state.Accounts[slot]
+	slot := state.FindByEmail(email)
+	if slot == 0 {
+		return store.Account{}, false
+	}
+	return state.Accounts[slot], true
+}
+
+func liveAccountWithCapacity(cfg *config.Config) (store.Account, bool) {
+	acct, ok := liveAccount()
+	if !ok {
+		return store.Account{}, false
 	}
 	cache, _ := usage.LoadCache()
 	u, ok := cachedUsage(cache, acct.CacheKey(), acct.Email)
@@ -1467,6 +1634,12 @@ func gracefulExit(ch child, w io.Writer) {
 			fmt.Fprintln(w, "cux: claude did not exit cleanly, terminating…")
 			_ = ch.Kill()
 			reapStrays(strays, w)
+			// A killed child ran no teardown, so its mouse reporting is
+			// still on and every mouse move now types escape sequences at
+			// whatever comes next (#48). On Windows this is every swap:
+			// os.Interrupt is not deliverable there, so the wait above
+			// always ends here.
+			restoreMouse(w)
 			return
 		case <-tick.C:
 			if ch.Exited() {
@@ -1487,7 +1660,11 @@ func gracefulExit(ch child, w io.Writer) {
 //  3. Capacity-aware rotation as a last-resort fallback when strategy
 //     returns no candidate, e.g. Manual mode or sparse fresh-install
 //     usage data.
-func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config) (string, error) {
+//
+// resolveTarget picks the seat to move to. excluded holds slots this
+// decision has already tried and had refused (nil when there are none);
+// see completeSwap for why a refusal has to be survivable.
+func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config, excluded map[int]bool) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
@@ -1499,7 +1676,7 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 	// account list when no project claims it). Explicit targets bypass
 	// this function entirely — a human naming a seat outranks the
 	// project boundary.
-	pool := state.PoolForCwd()
+	pool := poolExcluding(state, excluded)
 	if len(pool) < 2 {
 		return "", errors.New("only one account is available here; nothing to rotate to")
 	}
@@ -1523,20 +1700,36 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config)
 	// through to bare rotation in that case.
 	kind := cfg.ResolvedStrategy()
 	if trigger == history.TriggerManual && kind == strategy.KindManual {
-		return rotateFallback(state, cache, cfg)
+		return rotateFallback(state, cache, cfg, excluded)
 	}
 	if pick, ok := strategy.PickNext(kind, cfg.Strategy.Order, candidates,
 		strategy.Candidate{Email: current, CacheKey: currentCacheKey}, cache, cfg.Thresholds, time.Now()); ok {
 		return pick.Identifier(), nil
 	}
-	return rotateFallback(state, cache, cfg)
+	return rotateFallback(state, cache, cfg, excluded)
+}
+
+// poolExcluding is the project pool for this directory minus the slots a
+// swap decision has already had refused.
+func poolExcluding(state *store.State, excluded map[int]bool) map[int]store.Account {
+	pool := state.PoolForCwd()
+	if len(excluded) == 0 {
+		return pool
+	}
+	out := make(map[int]store.Account, len(pool))
+	for slot, a := range pool {
+		if !excluded[slot] {
+			out[slot] = a
+		}
+	}
+	return out
 }
 
 // rotateFallback walks store's rotation order, but still refuses accounts
 // that are known to have no capacity. Missing usage is treated as usable so
 // fresh installs can rotate before the first refresh completes.
-func rotateFallback(state *store.State, cache usage.Cache, cfg *config.Config) (string, error) {
-	pool := state.PoolForCwd()
+func rotateFallback(state *store.State, cache usage.Cache, cfg *config.Config, excluded map[int]bool) (string, error) {
+	pool := poolExcluding(state, excluded)
 	for _, slot := range rotationSlots(state) {
 		acct, ok := pool[slot]
 		if !ok || slot == state.ActiveSlot {

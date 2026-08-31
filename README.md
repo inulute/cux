@@ -215,7 +215,7 @@ cux status                   # current login + cux state
 cux switch <slot|email>      # manual swap (no auto-resume)
 cux remove <slot|email>      # forget an account
 cux history                  # recent swaps with reasons
-cux sessions                 # list running cux sessions (pid, project, seat, state)
+cux sessions                 # running sessions, plus recently ended ones and how to resume them
 cux attach [pid]             # attach to a running session — watch and control it
 cux usage refresh            # poll all account usage
 cux config show              # current settings
@@ -260,7 +260,18 @@ $ cux sessions
     /Users/you/code/app
     seat you@example.com   session 1634fada   running
     up 6h 12m, last change 0m ago
+
+Recently ended:
+  fix the flaky integration test on CI…
+    /Users/you/code/api  ·  seat you@example.com  ·  ended 2h 4m ago
+    cux --resume 8f31c0a2-5d77-4c1e-9b0e-2a61d4e0c8bb
 ```
+
+Claude Code shows a session ID only inside its running UI, so a session
+that ends when you were not looking — a crash, a closed tab, a machine
+that rebooted — used to take the way back with it. cux keeps a record of
+each ended session for 30 days, so the resume line is always somewhere
+other than your scrollback.
 
 `cux attach [pid]` connects your terminal to one of them, tmux-style —
 you see its live output and can type into it (Ctrl+C, everything). With

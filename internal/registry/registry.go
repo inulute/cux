@@ -100,6 +100,7 @@ func List() []Entry {
 			continue
 		}
 		if !processAlive(e.PID) {
+			keepRecent(e)
 			_ = os.Remove(filepath.Join(dir(), de.Name()))
 			continue
 		}
@@ -134,8 +135,32 @@ func PruneDead() {
 		if processAlive(pid) {
 			continue
 		}
+		if b, err := os.ReadFile(filepath.Join(dir(), name)); err == nil {
+			var e Entry
+			if json.Unmarshal(b, &e) == nil {
+				keepRecent(e)
+			}
+		}
 		_ = os.Remove(filepath.Join(dir(), name))
 	}
+}
+
+// keepRecent saves the session a dead wrapper was running before its
+// heartbeat file is deleted. A wrapper that was killed outright never
+// reached its own exit path, so this sweep is the last chance to record
+// what it was working on — otherwise pruning the crash evidence also
+// prunes the only surviving copy of the session ID (issue #48).
+func keepRecent(e Entry) {
+	if e.SessionID == "" {
+		return
+	}
+	RecordRecent(Recent{
+		PID:       e.PID,
+		SessionID: e.SessionID,
+		CWD:       e.CWD,
+		Seat:      e.Seat,
+		EndedAt:   e.UpdatedAt,
+	})
 }
 
 // ReapStaleAttachSockets removes attach sockets left behind by wrappers

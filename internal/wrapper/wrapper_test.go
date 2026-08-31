@@ -39,7 +39,7 @@ func TestResolveTargetDoesNotRotateToWeeklyFullFallback(t *testing.T) {
 	}
 
 	cfg := config.Defaults()
-	_, err := resolveTarget("", history.TriggerManual, &cfg)
+	_, err := resolveTarget("", history.TriggerManual, &cfg, nil)
 	if err == nil {
 		t.Fatal("resolveTarget should refuse to rotate when every alternate account is exhausted")
 	}
@@ -58,7 +58,7 @@ func TestRotateFallbackAllowsMissingUsage(t *testing.T) {
 		},
 	}
 	cfg := config.Defaults()
-	got, err := rotateFallback(state, usage.Cache{}, &cfg)
+	got, err := rotateFallback(state, usage.Cache{}, &cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

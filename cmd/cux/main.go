@@ -506,11 +506,15 @@ func cmdAlias(args []string) {
 func cmdSessions(args []string) {
 	_ = args
 	entries := registry.List()
-	if len(entries) == 0 {
+	recent := registry.RecentSessions()
+	if len(entries) == 0 && len(recent) == 0 {
 		fmt.Println("No cux sessions are running.")
 		return
 	}
 	now := time.Now()
+	if len(entries) == 0 {
+		fmt.Println("No cux sessions are running.")
+	}
 	for _, e := range entries {
 		state := e.State
 		if e.Detail != "" {
@@ -532,6 +536,39 @@ func cmdSessions(args []string) {
 		fmt.Printf("    seat %-28s session %-9s %s\n", e.Seat, sid, state)
 		fmt.Printf("    up %s, last change %s ago\n",
 			formatDuration(now.Sub(e.StartedAt)), formatDuration(now.Sub(e.UpdatedAt)))
+	}
+	printRecentSessions(recent, now)
+}
+
+// printRecentSessions lists conversations whose wrapper has exited, with
+// the command that reopens each one. Claude Code shows a session ID only
+// in its running UI, so once a session ends the ID exists nowhere the user
+// can reach — and a session that ended badly took the scrollback with it
+// (issue #48). This is the way back.
+func printRecentSessions(recent []registry.Recent, now time.Time) {
+	if len(recent) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("Recently ended:")
+	for _, r := range recent {
+		name := transcripts.FirstPrompt(r.CWD, r.SessionID, 60)
+		if name == "" {
+			name = filepath.Base(r.CWD)
+		}
+		fmt.Printf("  %s\n", name)
+		fmt.Printf("    %s", r.CWD)
+		if r.Seat != "" {
+			fmt.Printf("  ·  seat %s", r.Seat)
+		}
+		// Clamp: a record written on a machine whose clock later moved
+		// back would otherwise read "ended -44m ago".
+		age := now.Sub(r.EndedAt)
+		if age < 0 {
+			age = 0
+		}
+		fmt.Printf("  ·  ended %s ago\n", formatDuration(age))
+		fmt.Printf("    cux --resume %s\n", r.SessionID)
 	}
 }
 
@@ -2068,7 +2105,7 @@ USAGE
                                           when Claude will not run /switch
   cux remove [--force] <slot|email|alias> remove an account from cux
   cux status                              show live login + cux state
-  cux sessions                            list running cux sessions (heartbeat registry)
+  cux sessions                            list running cux sessions, and recently ended ones with their resume line
   cux attach [pid]                        watch and control a running session
   cux support                             show support URL
   cux docs                                show documentation URL

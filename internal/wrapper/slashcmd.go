@@ -60,7 +60,7 @@ func SlashSwitch(target string, w io.Writer) error {
 	}
 
 	// Resolve explicit target (slot/email/alias) or rotate per strategy.
-	resolved, err := resolveTarget(target, history.TriggerManual, &cfg)
+	resolved, err := resolveTarget(target, history.TriggerManual, &cfg, nil)
 	if err != nil {
 		return err
 	}
