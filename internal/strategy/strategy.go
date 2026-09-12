@@ -400,6 +400,14 @@ func orderedCandidates(order []string, accounts []Candidate, current Candidate, 
 // its place as first pick. Against that, a closed set meant a seat capped on
 // anything newer read as perfectly healthy, which is the failure that was
 // actually observed.
+//
+// Note this reads `overage` (the "usage credit limit") as model-capped, while
+// the wrapper's modelLimit treats that same limit as account-wide and lets it
+// rotate the seat. The two are meant to disagree: this value only sorts
+// candidates, where counting a spent credit window as a reason to prefer
+// another seat is right; that one chooses an action, where answering a credit
+// cap by changing model would not help. Reconciling them in either direction
+// would break whichever side was already correct.
 func modelCapped(cache usage.Cache, key string) bool {
 	u, ok := cache[key]
 	if !ok {

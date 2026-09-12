@@ -35,6 +35,10 @@ const (
 	TriggerThreshold Trigger = "threshold"  // wrapper saw cached usage cross a cap
 	TriggerRateLimit Trigger = "rate-limit" // PostToolUseFailure hook fired
 	TriggerRebalance Trigger = "rebalance"  // drain mode hopped back to priority
+	// TriggerModelSwitch is the one entry that does not change account: a
+	// model-specific cap answered by changing model on the same seat. Kept
+	// in the same history so the choice is as auditable as every other swap.
+	TriggerModelSwitch Trigger = "model-switch"
 )
 
 // Entry is one swap event. Usage fields are best-effort: if cached

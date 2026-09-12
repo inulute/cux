@@ -69,6 +69,11 @@ type Config struct {
 	RetryOnAPIError       bool             `json:"retry_on_api_error"`
 	Notify                bool             `json:"notify"`
 	PollIntervalSeconds   int              `json:"poll_interval_seconds"`
+	// ModelFallback is the ordered list of models to fall back through when
+	// a rejection names a model window rather than the account. Empty — the
+	// default — keeps the pre-existing behaviour exactly: every rate limit,
+	// model-typed or not, rotates the account.
+	ModelFallback []string `json:"model_fallback"`
 	// AutoSwapIdleAfterSeconds migrates a session that is sitting at an
 	// empty prompt off an over-threshold account, instead of waiting for
 	// its owner to come back and type. 0 disables it. See #39.
@@ -102,6 +107,7 @@ func Defaults() Config {
 		RetryOnAPIError:       true,
 		Notify:                true,
 		PollIntervalSeconds:   60,
+		ModelFallback:         []string{},
 		// 15 minutes: long enough that a user reading output or thinking
 		// between prompts is never treated as gone, short enough that a
 		// terminal left overnight moves off a capped seat during the quiet
@@ -187,20 +193,9 @@ func Set(c Config, key, value string) (Config, error) {
 			return c, fmt.Errorf("config: strategy.kind must be drain|balanced|manual, got %q", value)
 		}
 	case "strategy.order":
-		v := strings.TrimSpace(value)
-		if v == "" || v == `""` {
-			c.Strategy.Order = []string{}
-		} else {
-			parts := strings.Split(v, ",")
-			out := make([]string, 0, len(parts))
-			for _, p := range parts {
-				p = strings.TrimSpace(p)
-				if p != "" {
-					out = append(out, p)
-				}
-			}
-			c.Strategy.Order = out
-		}
+		c.Strategy.Order = splitList(value)
+	case "model_fallback":
+		c.ModelFallback = splitList(value)
 	case "auto_switch_on_threshold":
 		b, err := parseBool(value)
 		if err != nil {
@@ -374,6 +369,11 @@ func Keys(c Config) []KeyInfo {
 			Current:     strconv.Itoa(c.PollIntervalSeconds),
 		},
 		{
+			Key: "model_fallback", Default: "(empty)",
+			Description: "on a model-specific cap, try these models on the same seat before swapping account",
+			Current:     strings.Join(c.ModelFallback, ","),
+		},
+		{
 			Key: "auto_swap_idle_after_seconds", Default: "900",
 			Description: "migrate a session idle this long off an over-threshold account (0 = off)",
 			Current:     strconv.Itoa(c.AutoSwapIdleAfterSeconds),
@@ -443,4 +443,23 @@ func parseBool(s string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("config: expected boolean, got %q", s)
+}
+
+// splitList parses a comma-separated setting into a trimmed, non-empty list.
+// An empty value (or a literal `""`, which is how a shell often delivers
+// "clear this") yields an empty list rather than a list holding one empty
+// string.
+func splitList(value string) []string {
+	v := strings.TrimSpace(value)
+	if v == "" || v == `""` {
+		return []string{}
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

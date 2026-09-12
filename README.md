@@ -290,6 +290,7 @@ cux config set thresholds.five_hour 85
 cux config set strategy.kind balanced
 cux config set strategy.order alice@x,bob@x         # drain priority
 cux config set auto_message ""                      # silent resume
+cux config set model_fallback opus,sonnet           # model cap? change model, keep the seat
 cux config set update_check.enabled true            # opt in to update checks
 ```
 
@@ -301,6 +302,7 @@ cux config set update_check.enabled true            # opt in to update checks
 | `strategy.order`              | `[]`           | Drain mode priority (emails); empty = auto by highest 7d |
 | `auto_switch_on_threshold`    | `true`         | Master toggle for pre-emptive threshold swap |
 | `auto_switch_on_rate_limit`   | `true`         | Master toggle for swap on rate-limit hook |
+| `model_fallback`              | `[]`           | On a *model-specific* cap ("You've reached your Opus limit"), try these models in order on the same account before rotating to another one. Empty = always rotate the account. |
 | `auto_swap_idle_after_seconds`| `900`          | Migrate a session idle this long off an over-threshold account, instead of waiting for you to come back and type. `0` = off. Needs `auto_resume`. |
 | `auto_resume`                 | `true`         | Pass `--resume <id>` to the relaunched claude |
 | `auto_message`                | `Go continue.` | First user turn after auto-swap; `""` = silent |

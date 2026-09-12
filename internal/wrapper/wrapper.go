@@ -86,6 +86,7 @@ type pending struct {
 	resumeMessage  string
 	retryOnly      bool               // relaunch the same account; no swap
 	idle           bool               // migrated from an empty prompt; there is no turn to continue (#51)
+	refusedModel   string             // the model a model-specific cap refused, if the rejection named one (#57)
 	fromUsage      usage.AccountUsage // best-effort snapshot
 	fromKey        string             // cache key of the seat live when the swap was decided; lets a rate-limit swap tell "another session already moved us" from "still on the exhausted seat"
 }
@@ -237,6 +238,11 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	// constant ~10s relaunch.
 	var inPlaceRetries int
 
+	// Models this session has already been relaunched on. Keyed per wrapper
+	// run, not per rejection: the chain has to advance across relaunches, or
+	// a model capped for the rest of the week would be retried every time.
+	triedModels := map[string]bool{}
+
 	for {
 		if seat, err := switcher.CurrentLiveEmail(); err == nil {
 			registry.UpdateSelf(func(e *registry.Entry) {
@@ -253,6 +259,31 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		if sessionID != "" {
 			lastSessionID = sessionID
 			registry.UpdateSelf(func(e *registry.Entry) { e.SessionID = sessionID })
+		}
+
+		// A model-specific cap is answered by changing model, not account.
+		// Ahead of every swap path because the account swap is the fallback
+		// here, not the default: a seat you did not rotate to is a seat
+		// still available tonight, and the other seat most likely carries
+		// the same model cap anyway (#57).
+		if m := modelSwitchTarget(p, &cfg, triedModels); m != "" {
+			triedModels[strings.ToLower(m)] = true
+			resumeSID, canResume := resumableSession(sessionID, currentArgv, cfg.AutoResume, sessionID != "")
+			if canResume {
+				fmt.Fprintf(w, "cux: %s limit on this account — switching to %s on the same seat, resuming…\n", p.refusedModel, m)
+				cwd, _ := os.Getwd()
+				waitForTranscript(cwd, resumeSID, transcriptWaitTimeout)
+				var replay bool
+				currentArgv, replay = resumeArgv(withModel(relaunchFlags(argv), m), resumeSID, p, cfg.AutoMessage)
+				if replay {
+					_ = os.WriteFile(paths.ReplayFlagFile(pid), []byte("1"), 0o600)
+				}
+				resumeRetryPending = true
+				appendModelSwitchHistory(p, m)
+				continue
+			}
+			// Nothing to resume — the swap paths below handle a fresh
+			// session no worse, so fall through rather than relaunch blind.
 		}
 
 		if p != nil && p.retryOnly {
@@ -610,7 +641,15 @@ func step(
 					msg = p.Message
 				}
 				lk, _ := switcher.CurrentLiveCacheKey()
-				*swap = &pending{trigger: history.TriggerRateLimit, reason: msg, fromUsage: snapshotActiveUsage(), fromKey: lk}
+				// Recorded here, acted on in the main loop, which is where
+				// the record of what this session has already tried lives.
+				*swap = &pending{
+					trigger:      history.TriggerRateLimit,
+					reason:       msg,
+					refusedModel: modelLimit(msg),
+					fromUsage:    snapshotActiveUsage(),
+					fromKey:      lk,
+				}
 			}
 			hasSwap = *swap != nil
 			mu.Unlock()
@@ -1804,10 +1843,12 @@ func accountHasSwitchCapacity(cache usage.Cache, cacheKey string, cfg *config.Co
 // terminal the user is not watching, hours after they left (#51). idleFor
 // already separates "parked at an empty prompt" from "twenty minutes into a
 // turn"; this keeps that knowledge alive one step further, to the relaunch.
-// flags is the already-filtered flag list, taken pre-built rather than as raw
-// argv so every caller composes its flags first and the injected turn stays
-// last — a flag appended after a positional prompt is the kind of argument
-// order CLI parsers disagree about.
+// flags is the already-filtered flag list (relaunchFlags, possibly with the
+// model substituted). Taken pre-built rather than as raw argv so every caller
+// composes flags first and the injected turn stays last: a `--model` appended
+// after the positional prompt is the kind of argument order CLI parsers
+// disagree about, and the failure would be silent — a relaunch onto the very
+// model that was just capped.
 func resumeArgv(flags []string, resumeSID string, p *pending, autoMessage string) (out []string, replay bool) {
 	out = append(append([]string{}, flags...), "--resume", resumeSID)
 	switch {
@@ -2045,4 +2086,26 @@ func bestEffortSessionID(cwd string) string {
 		return ""
 	}
 	return newest[:len(newest)-6]
+}
+
+// appendModelSwitchHistory records a model switch in the same history as
+// every account swap. From and To are the same seat on purpose: the entry
+// exists so a user reading swap-history.json can see why a rejection did not
+// rotate the account, which is otherwise indistinguishable from cux having
+// ignored it.
+func appendModelSwitchHistory(p *pending, model string) {
+	email, err := switcher.CurrentLiveEmail()
+	if err != nil {
+		return
+	}
+	cwd, _ := os.Getwd()
+	_ = history.Append(history.Entry{
+		From:        email,
+		To:          email,
+		Trigger:     history.TriggerModelSwitch,
+		Reason:      fmt.Sprintf("%s limit — switched model %s → %s on the same account: %s", p.refusedModel, p.refusedModel, model, p.reason),
+		CWD:         cwd,
+		FromUsage5h: utilizationOrZero(p.fromUsage.FiveHour),
+		FromUsage7d: utilizationOrZero(p.fromUsage.SevenDay),
+	})
 }
