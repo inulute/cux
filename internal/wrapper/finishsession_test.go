@@ -16,7 +16,7 @@ func TestFinishSessionPrintsTheResumeLineAfterRestoringTheScreen(t *testing.T) {
 	var out strings.Builder
 	restore := func(w io.Writer) { _, _ = io.WriteString(w, mainScreen) }
 
-	finishSession(&out, func() {}, restore, "sid-1", false, 4242)
+	finishSession(&out, func() {}, restore, func(io.Writer) {}, "sid-1", false, 4242)
 
 	got := out.String()
 	restoreAt := strings.Index(got, mainScreen)
@@ -54,7 +54,7 @@ func TestFinishSessionStaysQuietWhenThereIsNoWayBack(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var out strings.Builder
 			restored := false
-			finishSession(&out, func() {}, func(io.Writer) { restored = true }, tc.sessionID, tc.startupFailed, 1)
+			finishSession(&out, func() {}, func(io.Writer) { restored = true }, func(io.Writer) {}, tc.sessionID, tc.startupFailed, 1)
 
 			if !restored {
 				t.Error("the terminal must be restored on every exit path, whatever else is skipped")
@@ -78,13 +78,28 @@ func TestFinishSessionDrainsBeforeTouchingTheTerminal(t *testing.T) {
 	finishSession(&out,
 		func() { order = append(order, "drain") },
 		func(io.Writer) { order = append(order, "restore") },
+		func(io.Writer) { order = append(order, "support") },
 		"sid-1", false, 1)
-	order = append(order, "print")
 
-	want := []string{"drain", "restore", "print"}
+	// The support line comes last of all, after the way back is on screen.
+	want := []string{"drain", "restore", "support"}
 	for i := range want {
 		if i >= len(order) || order[i] != want[i] {
 			t.Fatalf("exit sequence = %v, want %v", order, want)
 		}
+	}
+}
+
+// A failed startup skips the resume line, and must skip the support line with
+// it: asking for money directly beneath "claude could not start" is the worst
+// moment there is to ask.
+func TestFinishSessionDoesNotAskForSupportAfterAFailedStartup(t *testing.T) {
+	asked := false
+	var out strings.Builder
+
+	finishSession(&out, func() {}, func(io.Writer) {}, func(io.Writer) { asked = true }, "sid-1", true, 1)
+
+	if asked {
+		t.Error("support was mentioned beneath a startup failure")
 	}
 }

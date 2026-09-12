@@ -38,6 +38,7 @@ import (
 	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/store"
+	"github.com/inulute/cux/internal/supportnotice"
 	"github.com/inulute/cux/internal/switcher"
 	"github.com/inulute/cux/internal/transcripts"
 	"github.com/inulute/cux/internal/updater"
@@ -1751,6 +1752,24 @@ func cmdUpgrade(args []string) {
 	// Clear the on-disk cache so the next run re-fetches instead of
 	// immediately showing "update available" for the version just installed.
 	clearUpdateCache()
+	printSupportNotice()
+}
+
+// printSupportNotice shares one throttle with the wrapper's exit line, so a
+// user who saw it on exit yesterday does not see it again for upgrading
+// today. An upgrade is the better of the two moments — the user chose to run
+// it, and nothing is waiting on them — so it is worth spending the window on.
+func printSupportNotice() {
+	cfg, err := config.Load()
+	if err != nil || !cfg.SupportNotice {
+		return
+	}
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return
+	}
+	if supportnotice.Due(time.Now()) {
+		fmt.Printf("\n%s\n", supportnotice.Line())
+	}
 }
 
 // clearUpdateCache removes the on-disk update cache so the next run

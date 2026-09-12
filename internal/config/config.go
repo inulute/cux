@@ -68,6 +68,12 @@ type Config struct {
 	RetryOnAPIError       bool             `json:"retry_on_api_error"`
 	Notify                bool             `json:"notify"`
 	PollIntervalSeconds   int              `json:"poll_interval_seconds"`
+	// SupportNotice gates the occasional support line. On by default, and a
+	// real setting rather than something a user has to silence with
+	// 2>/dev/null — that channel also carries the resume line and every
+	// rate-limit warning, and teaching people to discard it would cost more
+	// than the notice is worth.
+	SupportNotice bool `json:"support_notice"`
 	// ModelFallback is the ordered list of models to fall back through when
 	// a rejection names a model window rather than the account. Empty — the
 	// default — keeps the pre-existing behaviour exactly: every rate limit,
@@ -106,6 +112,7 @@ func Defaults() Config {
 		RetryOnAPIError:       true,
 		Notify:                true,
 		PollIntervalSeconds:   60,
+		SupportNotice:         true,
 		ModelFallback:         []string{},
 		// 15 minutes: long enough that a user reading output or thinking
 		// between prompts is never treated as gone, short enough that a
@@ -193,6 +200,12 @@ func Set(c Config, key, value string) (Config, error) {
 		}
 	case "strategy.order":
 		c.Strategy.Order = splitList(value)
+	case "support_notice":
+		b, err := parseBool(value)
+		if err != nil {
+			return c, err
+		}
+		c.SupportNotice = b
 	case "model_fallback":
 		c.ModelFallback = splitList(value)
 	case "auto_switch_on_threshold":
@@ -366,6 +379,11 @@ func Keys(c Config) []KeyInfo {
 			Key: "poll_interval_seconds", Default: "60",
 			Description: "how often a quiet session re-checks its seat against the usage cache",
 			Current:     strconv.Itoa(c.PollIntervalSeconds),
+		},
+		{
+			Key: "support_notice", Default: "true",
+			Description: "show the support link occasionally (first after 7 days, then monthly)",
+			Current:     strconv.FormatBool(c.SupportNotice),
 		},
 		{
 			Key: "model_fallback", Default: "(empty)",

@@ -43,6 +43,7 @@ import (
 	"github.com/inulute/cux/internal/signals"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/strategy"
+	"github.com/inulute/cux/internal/supportnotice"
 	"github.com/inulute/cux/internal/switcher"
 	"github.com/inulute/cux/internal/usage"
 	"golang.org/x/term"
@@ -163,7 +164,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	var lastSessionID string
 	var startupFailed bool
 	defer func() {
-		finishSession(w, drainFunc(host), restoreTerminal, lastSessionID, startupFailed, pid)
+		finishSession(w, drainFunc(host), restoreTerminal, supportFunc(&cfg), lastSessionID, startupFailed, pid)
 	}()
 
 	// lastManualTarget holds the email the user explicitly switched to
@@ -1877,9 +1878,10 @@ func accountHasSwitchCapacity(cache usage.Cache, cacheKey string, cfg *config.Co
 // it would discard exactly what we just wrote. Draining first makes the
 // ordering true rather than likely.
 //
-// drain and restore are taken as arguments so the ordering can be tested;
-// production passes drainFunc(host) and restoreTerminal.
-func finishSession(w io.Writer, drain func(), restore func(io.Writer), sessionID string, startupFailed bool, pid int) {
+// drain, restore and support are taken as arguments so the ordering can be
+// tested; production passes drainFunc(host), restoreTerminal and
+// supportFunc(cfg).
+func finishSession(w io.Writer, drain func(), restore func(io.Writer), support func(io.Writer), sessionID string, startupFailed bool, pid int) {
 	drain()
 	restore(w)
 	if sessionID == "" {
@@ -1900,6 +1902,11 @@ func finishSession(w io.Writer, drain func(), restore func(io.Writer), sessionID
 		CWD:       cwd,
 		Seat:      seat,
 	})
+	if startupFailed {
+		return
+	}
+	// Last, and only once the way back is on screen.
+	support(w)
 }
 
 // drainFunc returns the wait that must happen before the wrapper writes the
@@ -1910,6 +1917,20 @@ func drainFunc(host *ptyhost.Host) func() {
 		return func() {}
 	}
 	return func() { host.DrainQuiet(drainQuiet, drainMax) }
+}
+
+// supportFunc returns the occasional support line, or a no-op. Gated on the
+// setting and on stdout being a terminal — a script has nobody to ask — before
+// supportnotice's own throttle runs.
+func supportFunc(cfg *config.Config) func(io.Writer) {
+	if cfg == nil || !cfg.SupportNotice || !stdoutIsTerminal() {
+		return func(io.Writer) {}
+	}
+	return func(w io.Writer) {
+		if supportnotice.Due(time.Now()) {
+			fmt.Fprintf(w, "\n%s\n", supportnotice.Line())
+		}
+	}
 }
 
 // resumeArgv builds the relaunch argv for a session cux is resuming: the
