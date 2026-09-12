@@ -12,7 +12,7 @@ func mw(five, seven float64, opus *float64) usage.AccountUsage {
 		SevenDay: &usage.Window{Utilization: seven},
 	}
 	if opus != nil {
-		u.SevenDayOpus = &usage.Window{Utilization: *opus}
+		u.Models = map[string]*usage.Window{"seven_day_opus": {Utilization: *opus}}
 	}
 	return u
 }
@@ -120,14 +120,34 @@ func TestRebalanceRefusesModelCappedPriority(t *testing.T) {
 	}
 }
 
-func TestModelCappedReadsSonnetWindowToo(t *testing.T) {
-	u := mw(5, 10, nil)
-	u.SevenDaySonnet = &usage.Window{Utilization: 100}
-	cache := usage.Cache{"k": u}
-	if !modelCapped(cache, "k") {
-		t.Error("sonnet window at 100%% must count as model-capped")
+func TestModelCappedReadsEveryReportedModelWindow(t *testing.T) {
+	// Each of these is one seat capped on one window. The Opus/Sonnet pair
+	// was the whole vocabulary before #52; the rest are the seats that used
+	// to read as the healthiest in the pool, get picked, and refuse the very
+	// next call — including the Fable window, whose API name shares no
+	// prefix with the label Anthropic prints for it.
+	for _, window := range []string{
+		"seven_day_opus",
+		"seven_day_sonnet",
+		"seven_day_overage_included",
+		"overage",
+		"seven_day_some_model_that_does_not_exist_yet",
+	} {
+		u := mw(5, 10, nil)
+		u.Models = map[string]*usage.Window{window: {Utilization: 100}}
+		if !modelCapped(usage.Cache{"k": u}, "k") {
+			t.Errorf("%s at 100%% must count as model-capped", window)
+		}
 	}
-	if modelCapped(cache, "missing") {
+
+	// Room in a model window is not a cap, and an unpolled seat is not one
+	// either — both must stay eligible as a first pick.
+	u := mw(5, 10, nil)
+	u.Models = map[string]*usage.Window{"seven_day_opus": {Utilization: 99}}
+	if modelCapped(usage.Cache{"k": u}, "k") {
+		t.Error("a model window under 100%% must not count as capped")
+	}
+	if modelCapped(usage.Cache{"k": u}, "missing") {
 		t.Error("missing cache entry must not read as capped")
 	}
 }

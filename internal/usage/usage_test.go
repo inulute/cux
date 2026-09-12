@@ -212,17 +212,22 @@ func TestSettledClearsWindowsThatHaveRolledOver(t *testing.T) {
 	now := time.Now()
 	past, future := now.Add(-5*time.Minute), now.Add(2*time.Hour)
 	u := AccountUsage{
-		FiveHour:     &Window{Utilization: 100, ResetsAt: &past},
-		SevenDay:     &Window{Utilization: 42, ResetsAt: &future},
-		SevenDayOpus: &Window{Utilization: 100, ResetsAt: &past},
-		PolledAt:     now.Add(-time.Minute),
+		FiveHour: &Window{Utilization: 100, ResetsAt: &past},
+		SevenDay: &Window{Utilization: 42, ResetsAt: &future},
+		Models:   map[string]*Window{"seven_day_opus": {Utilization: 100, ResetsAt: &past}},
+		PolledAt: now.Add(-time.Minute),
 	}
 	got := u.Settled(now)
 	if got.FiveHour != nil {
 		t.Error("an elapsed 5h window should read as unknown")
 	}
-	if got.SevenDayOpus != nil {
+	if got.Models["seven_day_opus"] != nil {
 		t.Error("an elapsed model window should read as unknown")
+	}
+	// Settled answers a question about now; it must not rewrite the reading
+	// it was asked about.
+	if u.Models["seven_day_opus"] == nil {
+		t.Error("Settled must not clear the caller's own model windows")
 	}
 	if got.SevenDay == nil || got.SevenDay.Utilization != 42 {
 		t.Error("a window still running must be left alone")

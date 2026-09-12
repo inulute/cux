@@ -51,12 +51,127 @@ type Window struct {
 // returned 401 (so the user knows to `claude login` and `cux add`
 // again).
 type AccountUsage struct {
-	FiveHour       *Window   `json:"five_hour,omitempty"`
-	SevenDay       *Window   `json:"seven_day,omitempty"`
-	SevenDaySonnet *Window   `json:"seven_day_sonnet,omitempty"`
-	SevenDayOpus   *Window   `json:"seven_day_opus,omitempty"`
-	PolledAt       time.Time `json:"polled_at"`
-	TokenExpired   bool      `json:"token_expired,omitempty"`
+	FiveHour *Window
+	SevenDay *Window
+	// Models holds every other usage window the endpoint reports, keyed by
+	// the API's own name (`seven_day_opus`, `seven_day_overage_included`, …).
+	//
+	// Open rather than a fixed set of fields, because the set is not ours to
+	// fix. Anthropic exposes several model- and program-specific limits and
+	// has added to them over time; a closed pair meant a seat capped on any
+	// newer one parsed into nothing, so every window cux consulted showed
+	// room and the seat ranked as the healthiest in the pool. It was then
+	// picked, refused the next call, and swapped straight back — a four
+	// second round trip, and a second seat spent for nothing (#52).
+	//
+	// A new model family therefore needs no cux release; whatever the
+	// endpoint names, cux ranks on it.
+	Models       map[string]*Window
+	PolledAt     time.Time
+	TokenExpired bool
+}
+
+// Reserved top-level keys in the cache and API shapes: everything that is
+// not one of these, and looks like a window, is a model window.
+const (
+	keyFiveHour     = "five_hour"
+	keySevenDay     = "seven_day"
+	keyPolledAt     = "polled_at"
+	keyTokenExpired = "token_expired"
+)
+
+// AccountUsage is stored flat — `seven_day_opus` sits beside `five_hour` at
+// the top level rather than under a nested `models` object — so the on-disk
+// format is unchanged by the move to an open set. A cache written here still
+// reads correctly in a build that knew only the fixed pair, which matters
+// because a user can downgrade cux without being asked to discard state.
+func (u AccountUsage) MarshalJSON() ([]byte, error) {
+	out := map[string]any{keyPolledAt: u.PolledAt}
+	if u.FiveHour != nil {
+		out[keyFiveHour] = u.FiveHour
+	}
+	if u.SevenDay != nil {
+		out[keySevenDay] = u.SevenDay
+	}
+	if u.TokenExpired {
+		out[keyTokenExpired] = true
+	}
+	for name, w := range u.Models {
+		if w == nil || reservedKey(name) {
+			continue
+		}
+		out[name] = w
+	}
+	return json.Marshal(out)
+}
+
+func (u *AccountUsage) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*u = AccountUsage{}
+	for name, v := range raw {
+		switch name {
+		case keyPolledAt:
+			if err := json.Unmarshal(v, &u.PolledAt); err != nil {
+				return err
+			}
+		case keyTokenExpired:
+			if err := json.Unmarshal(v, &u.TokenExpired); err != nil {
+				return err
+			}
+		case keyFiveHour:
+			u.FiveHour = decodeWindow(v)
+		case keySevenDay:
+			u.SevenDay = decodeWindow(v)
+		default:
+			u.setModel(name, decodeWindow(v))
+		}
+	}
+	return nil
+}
+
+func reservedKey(name string) bool {
+	switch name {
+	case keyFiveHour, keySevenDay, keyPolledAt, keyTokenExpired:
+		return true
+	}
+	return false
+}
+
+func (u *AccountUsage) setModel(name string, w *Window) {
+	if w == nil {
+		return
+	}
+	if u.Models == nil {
+		u.Models = map[string]*Window{}
+	}
+	u.Models[name] = w
+}
+
+// decodeWindow accepts a value only if it is shaped like a window — an
+// object carrying a numeric `utilization`.
+//
+// Matched on shape rather than on a name prefix deliberately. The limit
+// types Anthropic names in its own rejection text do not share one prefix
+// (`overage` sits outside the `seven_day_*` family, and the Fable window is
+// spelled `seven_day_overage_included` — a name-based guess catches neither),
+// and the rejection vocabulary is a different surface from this endpoint's
+// response anyway. Shape survives both, and matches the package's standing
+// promise to tolerate unknown fields rather than fail on them.
+func decodeWindow(v json.RawMessage) *Window {
+	var probe struct {
+		Utilization *float64 `json:"utilization"`
+	}
+	if err := json.Unmarshal(v, &probe); err != nil || probe.Utilization == nil {
+		return nil
+	}
+	var w Window
+	if err := json.Unmarshal(v, &w); err != nil {
+		return nil
+	}
+	return &w
 }
 
 // Cache is the on-disk usage cache, keyed by account email.
@@ -215,17 +330,12 @@ func Fetch(token string) (AccountUsage, error) {
 		return AccountUsage{}, fmt.Errorf("usage: HTTP %d: %s", resp.StatusCode, snippet(body))
 	}
 
-	var raw apiResponse
-	if err := json.Unmarshal(body, &raw); err != nil {
+	u, err := parseResponse(body)
+	if err != nil {
 		return AccountUsage{}, fmt.Errorf("usage: parse: %w (body: %s)", err, snippet(body))
 	}
-	return AccountUsage{
-		FiveHour:       raw.FiveHour,
-		SevenDay:       raw.SevenDay,
-		SevenDaySonnet: raw.SevenDaySonnet,
-		SevenDayOpus:   raw.SevenDayOpus,
-		PolledAt:       time.Now().UTC(),
-	}, nil
+	u.PolledAt = time.Now().UTC()
+	return u, nil
 }
 
 // ErrTokenExpired is returned by Fetch when the API rejects the token
@@ -323,11 +433,17 @@ func (u AccountUsage) Settled(now time.Time) AccountUsage {
 	if elapsed(out.SevenDay) {
 		out.SevenDay = nil
 	}
-	if elapsed(out.SevenDaySonnet) {
-		out.SevenDaySonnet = nil
-	}
-	if elapsed(out.SevenDayOpus) {
-		out.SevenDayOpus = nil
+	// Rebuilt rather than edited in place: out shares u's map, and a caller
+	// asking what is settled *now* must not have the reading it passed in
+	// quietly rewritten underneath it.
+	if len(out.Models) > 0 {
+		models := make(map[string]*Window, len(out.Models))
+		for name, w := range out.Models {
+			if !elapsed(w) {
+				models[name] = w
+			}
+		}
+		out.Models = models
 	}
 	return out
 }
@@ -351,11 +467,16 @@ func IsOverThresholdAt(u AccountUsage, t Thresholds, now time.Time) (over bool, 
 // usage endpoint. Extra fields not modelled here are silently dropped
 // by the JSON decoder, which is the right behavior — the API has
 // added several non-standard windows over time and may add more.
-type apiResponse struct {
-	FiveHour       *Window `json:"five_hour"`
-	SevenDay       *Window `json:"seven_day"`
-	SevenDaySonnet *Window `json:"seven_day_sonnet"`
-	SevenDayOpus   *Window `json:"seven_day_opus"`
+// parseResponse reads the usage endpoint's body into an AccountUsage. The
+// wire shape and the cache shape are the same flat object, so this is the
+// same decode — which is what keeps a newly-named window from needing a code
+// change in two places instead of none.
+func parseResponse(body []byte) (AccountUsage, error) {
+	var u AccountUsage
+	if err := json.Unmarshal(body, &u); err != nil {
+		return AccountUsage{}, err
+	}
+	return u, nil
 }
 
 func cachePath() string {

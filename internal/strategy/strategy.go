@@ -387,17 +387,25 @@ func orderedCandidates(order []string, accounts []Candidate, current Candidate, 
 	return out
 }
 
-// modelCapped reports whether any model-specific weekly window
-// (Opus/Sonnet) sits at its hard cap. Only >=100 counts: user
-// thresholds express intent about the account-wide windows, not the
-// per-model ones, and a model window the plan does not report stays
-// nil — which reads as room, like every other missing window.
+// modelCapped reports whether any window outside the account-wide pair
+// sits at its hard cap. Only >=100 counts: user thresholds express intent
+// about the account-wide windows, not the per-model ones, and a window the
+// plan does not report is simply absent — which reads as room, like every
+// other missing window.
+//
+// Every reported window counts, not a fixed Opus/Sonnet pair (#52). The
+// widening is deliberate and its downside is bounded: this value only ever
+// *sorts* candidates, as the caller's rationale explains, so the worst a
+// window at 100% that says nothing about model health can do is cost a seat
+// its place as first pick. Against that, a closed set meant a seat capped on
+// anything newer read as perfectly healthy, which is the failure that was
+// actually observed.
 func modelCapped(cache usage.Cache, key string) bool {
 	u, ok := cache[key]
 	if !ok {
 		return false
 	}
-	for _, w := range []*usage.Window{u.SevenDayOpus, u.SevenDaySonnet} {
+	for _, w := range u.Models {
 		if w != nil && w.Utilization >= 100 {
 			return true
 		}
