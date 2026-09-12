@@ -53,6 +53,10 @@ type Host struct {
 	closed  bool
 	done    chan struct{} // closed by Close; stops the local-resize poller
 	hist    history       // recent output, replayed to new clients for scrollback
+
+	// lastOutput is when Pump last moved bytes from the console to the
+	// terminal, as unix nanos. Read by DrainQuiet.
+	lastOutput atomic.Int64
 }
 
 // New creates the ConPTY (sized to the current console), keeps the host
@@ -185,6 +189,7 @@ func (h *Host) Pump() {
 	for {
 		n, err := h.outR.Read(buf)
 		if n > 0 {
+			h.lastOutput.Store(time.Now().UnixNano())
 			h.hist.record(buf[:n])
 			_, _ = os.Stdout.Write(buf[:n])
 			h.broadcast(buf[:n])
