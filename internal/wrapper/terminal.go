@@ -36,9 +36,13 @@ func restoreMouse(w io.Writer) {
 	_, _ = io.WriteString(w, mouseOff+cursorOn)
 }
 
-// restoreTerminal is the last write of the process. Nothing else will be
-// drawn, so this one also returns to the main screen buffer in case the
-// child died inside the alternate one.
+// restoreTerminal returns to the main screen buffer, in case the child died
+// inside the alternate one, on top of the mouse and cursor cleanup.
+//
+// Because that switch discards whatever was drawn on the alternate buffer,
+// anything the wrapper still wants the user to read — the `cux --resume`
+// line above all — has to be written *after* this, not before. finishSession
+// is what guarantees that ordering.
 func restoreTerminal(w io.Writer) {
 	if !stdoutIsTerminal() {
 		return

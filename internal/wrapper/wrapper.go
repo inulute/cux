@@ -157,35 +157,12 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	}
 
 	// Whatever ends this wrapper — a clean quit, a failed swap, a panic
-	// unwinding — the terminal goes back to the user in a usable state.
-	defer restoreTerminal(w)
-
-	// The session ID is the only way back into a conversation, and Claude
-	// Code prints it nowhere but its own running UI. Announce it on the way
-	// out and write it somewhere that outlives both the process and the
-	// scrollback, so no exit path can strand the transcript (#48).
+	// unwinding — the terminal goes back to the user in a usable state and
+	// then gets told how to come back. One defer, because the two halves
+	// have to happen in that order; see finishSession.
 	var lastSessionID string
 	var startupFailed bool
-	defer func() {
-		if lastSessionID == "" {
-			return
-		}
-		// A wrapper that could not start claude has nothing to hand back;
-		// the line would read as reassurance next to the error above it.
-		// The record still gets written — a launch that fails mid-session
-		// is exactly when the way back matters.
-		if !startupFailed {
-			fmt.Fprintf(w, "cux --resume %s\n", lastSessionID)
-		}
-		seat, _ := switcher.CurrentLiveEmail()
-		cwd, _ := os.Getwd()
-		registry.RecordRecent(registry.Recent{
-			PID:       pid,
-			SessionID: lastSessionID,
-			CWD:       cwd,
-			Seat:      seat,
-		})
-	}()
+	defer func() { finishSession(w, restoreTerminal, lastSessionID, startupFailed, pid) }()
 
 	// lastManualTarget holds the email the user explicitly switched to
 	// within this wrapper session. Threshold auto-switch is suppressed
@@ -1862,6 +1839,49 @@ func accountHasSwitchCapacity(cache usage.Cache, cacheKey string, cfg *config.Co
 		cap5 = 90
 	}
 	return u.FiveHour == nil || u.FiveHour.Utilization < float64(cap5)
+}
+
+// finishSession is the wrapper's last act: put the terminal back the way it
+// was found, then hand the user the way back into their conversation.
+//
+// The order is the whole point, and it is the opposite of what it looks like
+// it should be. restoreTerminal ends with `\e[?1049l`, which leaves the
+// alternate screen buffer — and a switch away from that buffer discards
+// everything drawn on it. claude exits with the terminal still on the
+// alternate screen, so a `cux --resume <id>` line printed before the restore
+// is written to a buffer that is about to be thrown away: it renders for no
+// time at all and the user sees a bare shell prompt.
+//
+// That is how it behaved from v0.3.12 until now, as two defers whose LIFO
+// order put the restore last. restoreTerminal's own comment claimed nothing
+// else would be drawn after it, which was the assumption that made the
+// ordering look safe. Keeping both halves in one function is what stops them
+// drifting apart again — the resume line has to land on the main screen,
+// because the main screen is the one with scrollback, and scrollback is the
+// entire reason the line exists (#48).
+//
+// restore is taken as an argument so the ordering can be tested; production
+// always passes restoreTerminal.
+func finishSession(w io.Writer, restore func(io.Writer), sessionID string, startupFailed bool, pid int) {
+	restore(w)
+	if sessionID == "" {
+		return
+	}
+	// A wrapper that could not start claude has nothing to hand back; the
+	// line would read as reassurance next to the error above it. The record
+	// still gets written — a launch that fails mid-session is exactly when
+	// the way back matters.
+	if !startupFailed {
+		fmt.Fprintf(w, "cux --resume %s\n", sessionID)
+	}
+	seat, _ := switcher.CurrentLiveEmail()
+	cwd, _ := os.Getwd()
+	registry.RecordRecent(registry.Recent{
+		PID:       pid,
+		SessionID: sessionID,
+		CWD:       cwd,
+		Seat:      seat,
+	})
 }
 
 // resumeArgv builds the relaunch argv for a session cux is resuming: the
