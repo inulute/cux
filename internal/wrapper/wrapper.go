@@ -717,7 +717,13 @@ func step(
 		mu.Unlock()
 		registry.UpdateSelf(func(e *registry.Entry) {})
 		if email, err := switcher.CurrentLiveEmail(); err == nil {
-			_ = monitor.RefreshActive(email)
+			// Coalesced: every wrapped session on this host ends turns
+			// against the same seat, so uncoalesced this is one poll per
+			// session per turn aimed at a single account — the endpoint
+			// 429s the active seat continuously while idle seats in the
+			// same pool refresh fine (#53). The window is small enough
+			// that the threshold check below still sees today's freshness.
+			_ = monitor.RefreshActiveCoalesced(email, activeRefreshCoalesce)
 		}
 		mu.Lock()
 		if *swap == nil && cfg.AutoSwitchOnThreshold {
@@ -1015,6 +1021,14 @@ const (
 	// well under waitPollInterval so no freshness-sensitive caller could
 	// ever be starved of a current reading by coalescing.
 	refreshCoalesceWindow = 20 * time.Second
+
+	// activeRefreshCoalesce is how recent a sibling's poll of the *active*
+	// seat must be for a turn-end refresh to reuse it. Deliberately the same
+	// order as refreshCoalesceWindow rather than idleRefreshCoalesce: this
+	// reading is consumed immediately by the threshold check, so the window
+	// trades away almost no freshness, while still collapsing the burst from
+	// many sessions finishing turns at once.
+	activeRefreshCoalesce = 20 * time.Second
 
 	// idleCheckInterval is how often an otherwise-quiet wrapper evaluates
 	// itself for idle migration. The signal poll runs every 100 ms; this
