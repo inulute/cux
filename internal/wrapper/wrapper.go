@@ -148,6 +148,13 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		}
 	}
 
+	// A silenced reactive path looks exactly like a working one, so say so
+	// at launch — this is the only moment cux can, and the alternative is a
+	// session waiting out a five-hour window next to a free seat (#56).
+	for _, warning := range claudeEnvWarnings(&cfg, os.Getenv) {
+		fmt.Fprintf(w, "cux: warning: %s\n", warning)
+	}
+
 	// Whatever ends this wrapper — a clean quit, a failed swap, a panic
 	// unwinding — the terminal goes back to the user in a usable state.
 	defer restoreTerminal(w)
