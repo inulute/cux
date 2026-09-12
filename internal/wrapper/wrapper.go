@@ -158,11 +158,13 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 
 	// Whatever ends this wrapper — a clean quit, a failed swap, a panic
 	// unwinding — the terminal goes back to the user in a usable state and
-	// then gets told how to come back. One defer, because the two halves
+	// then gets told how to come back. One defer, because the three steps
 	// have to happen in that order; see finishSession.
 	var lastSessionID string
 	var startupFailed bool
-	defer func() { finishSession(w, restoreTerminal, lastSessionID, startupFailed, pid) }()
+	defer func() {
+		finishSession(w, drainFunc(host), restoreTerminal, lastSessionID, startupFailed, pid)
+	}()
 
 	// lastManualTarget holds the email the user explicitly switched to
 	// within this wrapper session. Threshold auto-switch is suppressed
@@ -1069,6 +1071,14 @@ const (
 	// ever be starved of a current reading by coalescing.
 	refreshCoalesceWindow = 20 * time.Second
 
+	// drainQuiet is how long the attach PTY must be silent before the
+	// wrapper accepts that claude's output has finished arriving, and
+	// drainMax is how long it will wait for that to happen. Both are short:
+	// this is the exit path of an interactive session, so any wait is paid
+	// by a human watching a terminal that has already stopped.
+	drainQuiet = 60 * time.Millisecond
+	drainMax   = 400 * time.Millisecond
+
 	// activeRefreshCoalesce is how recent a sibling's poll of the *active*
 	// seat must be for a turn-end refresh to reuse it. Deliberately the same
 	// order as refreshCoalesceWindow rather than idleRefreshCoalesce: this
@@ -1860,9 +1870,17 @@ func accountHasSwitchCapacity(cache usage.Cache, cacheKey string, cfg *config.Co
 // because the main screen is the one with scrollback, and scrollback is the
 // entire reason the line exists (#48).
 //
-// restore is taken as an argument so the ordering can be tested; production
-// always passes restoreTerminal.
-func finishSession(w io.Writer, restore func(io.Writer), sessionID string, startupFailed bool, pid int) {
+// drain is the third participant, and only matters with attach on: there
+// claude's output reaches the terminal through a pump goroutine rather than
+// directly, so the child exiting does not mean its bytes have landed. Its own
+// alternate-screen exit can still be in flight, and arriving after our line
+// it would discard exactly what we just wrote. Draining first makes the
+// ordering true rather than likely.
+//
+// drain and restore are taken as arguments so the ordering can be tested;
+// production passes drainFunc(host) and restoreTerminal.
+func finishSession(w io.Writer, drain func(), restore func(io.Writer), sessionID string, startupFailed bool, pid int) {
+	drain()
 	restore(w)
 	if sessionID == "" {
 		return
@@ -1882,6 +1900,16 @@ func finishSession(w io.Writer, restore func(io.Writer), sessionID string, start
 		CWD:       cwd,
 		Seat:      seat,
 	})
+}
+
+// drainFunc returns the wait that must happen before the wrapper writes the
+// last thing a user reads. Without attach there is no pump between claude and
+// the terminal, so there is nothing to wait for and this is a no-op.
+func drainFunc(host *ptyhost.Host) func() {
+	if host == nil {
+		return func() {}
+	}
+	return func() { host.DrainQuiet(drainQuiet, drainMax) }
 }
 
 // resumeArgv builds the relaunch argv for a session cux is resuming: the

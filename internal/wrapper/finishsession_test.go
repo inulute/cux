@@ -16,7 +16,7 @@ func TestFinishSessionPrintsTheResumeLineAfterRestoringTheScreen(t *testing.T) {
 	var out strings.Builder
 	restore := func(w io.Writer) { _, _ = io.WriteString(w, mainScreen) }
 
-	finishSession(&out, restore, "sid-1", false, 4242)
+	finishSession(&out, func() {}, restore, "sid-1", false, 4242)
 
 	got := out.String()
 	restoreAt := strings.Index(got, mainScreen)
@@ -54,7 +54,7 @@ func TestFinishSessionStaysQuietWhenThereIsNoWayBack(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var out strings.Builder
 			restored := false
-			finishSession(&out, func(io.Writer) { restored = true }, tc.sessionID, tc.startupFailed, 1)
+			finishSession(&out, func() {}, func(io.Writer) { restored = true }, tc.sessionID, tc.startupFailed, 1)
 
 			if !restored {
 				t.Error("the terminal must be restored on every exit path, whatever else is skipped")
@@ -63,5 +63,28 @@ func TestFinishSessionStaysQuietWhenThereIsNoWayBack(t *testing.T) {
 				t.Errorf("resume line printed = %v, want %v (output %q)", got, tc.wantLine, out.String())
 			}
 		})
+	}
+}
+
+// With attach on, claude's output reaches the terminal through a pump
+// goroutine, so the child exiting does not mean its bytes have landed — its
+// own alternate-screen exit can still be in flight. Arriving after the resume
+// line, that switch discards it. Draining has to come first, and before the
+// restore, or the ordering is merely likely rather than true.
+func TestFinishSessionDrainsBeforeTouchingTheTerminal(t *testing.T) {
+	var order []string
+	var out strings.Builder
+
+	finishSession(&out,
+		func() { order = append(order, "drain") },
+		func(io.Writer) { order = append(order, "restore") },
+		"sid-1", false, 1)
+	order = append(order, "print")
+
+	want := []string{"drain", "restore", "print"}
+	for i := range want {
+		if i >= len(order) || order[i] != want[i] {
+			t.Fatalf("exit sequence = %v, want %v", order, want)
+		}
 	}
 }
