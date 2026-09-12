@@ -273,3 +273,44 @@ func TestResumeArgvKeepsTheFirstTurnWhenATurnWasInterrupted(t *testing.T) {
 		})
 	}
 }
+
+// poll_interval_seconds shipped documented and unread — read into the config
+// struct and consulted nowhere, which is why #49 went looking for a poller
+// behind it and found none. It governs evaluation cadence, not fetch rate.
+func TestEvaluationIntervalComesFromPollIntervalSeconds(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.PollIntervalSeconds = 15
+	if got := evaluationInterval(&cfg); got != 15*time.Second {
+		t.Errorf("evaluationInterval = %v, want 15s", got)
+	}
+
+	// Zero means "unset", not "spin": the default has to survive a config
+	// written before the setting did anything.
+	cfg.PollIntervalSeconds = 0
+	if got := evaluationInterval(&cfg); got != idleCheckInterval {
+		t.Errorf("evaluationInterval with 0 = %v, want the %v default", got, idleCheckInterval)
+	}
+	if got := evaluationInterval(nil); got != idleCheckInterval {
+		t.Errorf("evaluationInterval(nil) = %v, want the %v default", got, idleCheckInterval)
+	}
+}
+
+// The throttle it feeds has to actually advance by it, or the setting is
+// documented-but-unread all over again.
+func TestIdleSwapDueAdvancesTheThrottleByTheConfiguredInterval(t *testing.T) {
+	cfg := idleTestConfig()
+	cfg.PollIntervalSeconds = 300
+
+	act := newActivity(time.Now().Add(-time.Duration(cfg.AutoSwapIdleAfterSeconds) * time.Second * 2))
+	act.nextCheck = time.Now().Add(-time.Second)
+	var mu sync.Mutex
+	var swap *pending
+
+	before := time.Now()
+	if !idleSwapDue(cfg, act, &mu, &swap) {
+		t.Fatal("a long-idle session past its throttle should be due")
+	}
+	if gap := act.nextCheck.Sub(before); gap < 299*time.Second {
+		t.Errorf("next check in %v, want ~300s from poll_interval_seconds", gap)
+	}
+}

@@ -847,8 +847,39 @@ func idleSwapDue(cfg *config.Config, act *activity, mu *sync.Mutex, swap **pendi
 	if now.Before(act.nextCheck) {
 		return false
 	}
-	act.nextCheck = now.Add(idleCheckInterval)
+	act.nextCheck = now.Add(evaluationInterval(cfg))
 	return true
+}
+
+// evaluationInterval is how long a wrapper waits between threshold
+// evaluations, from poll_interval_seconds.
+//
+// This is the setting's first actual use: it has shipped documented since
+// v0.2 and been read into the config struct and nowhere else, which is why
+// #49 could not find a poller behind it. It governs *evaluation* against the
+// shared usage cache, deliberately not the rate of API polling — those were
+// one number as long as neither existed, and conflating them now would walk
+// straight into #53, where fetch volume is the thing that must not scale with
+// how often a wrapper thinks.
+//
+// Lowering it makes a wrapper notice a seat crossing its threshold sooner
+// (the reading it reasons about is a sibling's, already fetched); raising it
+// makes an idle terminal quieter. It costs no extra requests either way.
+//
+// What it deliberately does not do is widen *when* a session is eligible to
+// migrate. #49 asks for that too — evaluate a parked session before
+// auto_swap_idle_after_seconds has elapsed — and the gap is real: siblings can
+// burn the shared seat while a session sits at an empty prompt, which then
+// eats the swap at the moment the user types. But the window is what stands in
+// for a distinction cux cannot make, between a user who stepped away and one
+// reading the output about to type, and migrating early puts a relaunch under
+// their cursor. That is a behaviour change users would feel, so it stays a
+// decision rather than a side effect of wiring up a poll interval.
+func evaluationInterval(cfg *config.Config) time.Duration {
+	if cfg == nil || cfg.PollIntervalSeconds <= 0 {
+		return idleCheckInterval
+	}
+	return time.Duration(cfg.PollIntervalSeconds) * time.Second
 }
 
 // snapshotActiveUsage returns whatever the cache currently has for the
@@ -1070,9 +1101,10 @@ const (
 	activeRefreshCoalesce = 20 * time.Second
 
 	// idleCheckInterval is how often an otherwise-quiet wrapper evaluates
-	// itself for idle migration. The signal poll runs every 100 ms; this
-	// throttle is what keeps a feature that only matters on the scale of
-	// minutes from doing anything at that cadence.
+	// itself for idle migration, when poll_interval_seconds does not say
+	// otherwise. The signal poll runs every 100 ms; this throttle is what
+	// keeps a feature that only matters on the scale of minutes from doing
+	// anything at that cadence.
 	idleCheckInterval = time.Minute
 	// idleRefreshCoalesce must be >= idleCheckInterval. This is the only
 	// path that adds a network call to a wrapper with nothing happening,

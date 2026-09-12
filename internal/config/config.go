@@ -14,9 +14,8 @@
 //     and just resume silently)
 //   - notify: true                    (no-op in v0.2; reserved for v0.3
 //     when desktop notifications land)
-//   - poll_interval_seconds: 60       (no-op until the monitor lands;
-//     kept here so users can tune it
-//     ahead of v0.3)
+//   - poll_interval_seconds: 60       (how often a wrapper re-evaluates its
+//     seat against the shared usage cache; not the API poll rate)
 package config
 
 import (
@@ -365,7 +364,7 @@ func Keys(c Config) []KeyInfo {
 		},
 		{
 			Key: "poll_interval_seconds", Default: "60",
-			Description: "background usage poll interval (reserved for v0.3)",
+			Description: "how often a quiet session re-checks its seat against the usage cache",
 			Current:     strconv.Itoa(c.PollIntervalSeconds),
 		},
 		{
