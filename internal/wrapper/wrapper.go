@@ -85,6 +85,7 @@ type pending struct {
 	explicitTarget string
 	resumeMessage  string
 	retryOnly      bool               // relaunch the same account; no swap
+	idle           bool               // migrated from an empty prompt; there is no turn to continue (#51)
 	fromUsage      usage.AccountUsage // best-effort snapshot
 	fromKey        string             // cache key of the seat live when the swap was decided; lets a rate-limit swap tell "another session already moved us" from "still on the exhausted seat"
 }
@@ -407,16 +408,14 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 				fmt.Fprintf(w, "cux: %s → %s (%s), resuming…\n", from.Email, to.Email, p.reason)
 			}
 			waitForTranscript(cwd, resumeSID, transcriptWaitTimeout)
-			currentArgv = append(relaunchFlags(argv), "--resume", resumeSID)
-			if p.resumeMessage != "" {
+			var replay bool
+			currentArgv, replay = resumeArgv(relaunchFlags(argv), resumeSID, p, cfg.AutoMessage)
+			if replay {
 				// Write a one-shot flag so the UserPromptSubmit hook skips the
 				// threshold check for this replayed prompt. Without this, if the
 				// new account is also at/above the threshold the hook would block
 				// the replayed prompt and trigger another switch — an infinite loop.
 				_ = os.WriteFile(paths.ReplayFlagFile(pid), []byte("1"), 0o600)
-				currentArgv = append(currentArgv, p.resumeMessage)
-			} else if cfg.AutoMessage != "" {
-				currentArgv = append(currentArgv, cfg.AutoMessage)
 			}
 			resumeRetryPending = true
 		} else {
@@ -749,6 +748,7 @@ func step(
 		if *swap == nil {
 			if p := evaluateThresholdSwap(cfg, manualTarget); p != nil {
 				p.reason += " while idle"
+				p.idle = true
 				*swap = p
 			}
 		}
@@ -1770,6 +1770,34 @@ func accountHasSwitchCapacity(cache usage.Cache, cacheKey string, cfg *config.Co
 		cap5 = 90
 	}
 	return u.FiveHour == nil || u.FiveHour.Utilization < float64(cap5)
+}
+
+// resumeArgv builds the relaunch argv for a session cux is resuming: the
+// user's original flags, `--resume <id>`, and the first user turn to inject,
+// if there is one. replay reports whether that turn is a replayed prompt the
+// UserPromptSubmit hook must be told to skip.
+//
+// An idle migration injects nothing. auto_message exists to continue a turn a
+// swap interrupted; a session parked at an empty prompt has no turn to
+// continue, so the same nudge starts one nobody asked for — unattended, on a
+// terminal the user is not watching, hours after they left (#51). idleFor
+// already separates "parked at an empty prompt" from "twenty minutes into a
+// turn"; this keeps that knowledge alive one step further, to the relaunch.
+// flags is the already-filtered flag list, taken pre-built rather than as raw
+// argv so every caller composes its flags first and the injected turn stays
+// last — a flag appended after a positional prompt is the kind of argument
+// order CLI parsers disagree about.
+func resumeArgv(flags []string, resumeSID string, p *pending, autoMessage string) (out []string, replay bool) {
+	out = append(append([]string{}, flags...), "--resume", resumeSID)
+	switch {
+	case p != nil && p.idle:
+		// Back to the same empty prompt, on the new seat.
+	case p != nil && p.resumeMessage != "":
+		out, replay = append(out, p.resumeMessage), true
+	case autoMessage != "":
+		out = append(out, autoMessage)
+	}
+	return out, replay
 }
 
 // sessionFlags are claude's session-selection arguments. The wrapper

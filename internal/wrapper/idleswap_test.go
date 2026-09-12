@@ -1,6 +1,7 @@
 package wrapper
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -192,5 +193,83 @@ func TestIdleRefreshCoalesceCoversTheCheckInterval(t *testing.T) {
 func TestDefaultIdleWindowIsFifteenMinutes(t *testing.T) {
 	if got := config.Defaults().AutoSwapIdleAfterSeconds; got != 900 {
 		t.Errorf("default auto_swap_idle_after_seconds = %d, want 900", got)
+	}
+}
+
+// An idle migration must land the session back at the same empty prompt it
+// was parked at. Injecting auto_message there does not continue work, it
+// starts a turn nobody asked for — #51 had a session idle for 131 hours woken
+// twice in one night, running 59 unattended turns and sending an e-mail.
+func TestResumeArgvInjectsNoFirstTurnOnAnIdleMigration(t *testing.T) {
+	argv := []string{"--dangerously-skip-permissions", "--model", "opus"}
+
+	got, replay := resumeArgv(relaunchFlags(argv), "sid-1", &pending{idle: true}, "Go continue.")
+	want := []string{"--dangerously-skip-permissions", "--model", "opus", "--resume", "sid-1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("idle relaunch argv = %q, want %q", got, want)
+	}
+	if replay {
+		t.Error("an idle migration replays no prompt, so the hook must not be told to skip one")
+	}
+	if n := len(got); got[n-1] != "sid-1" {
+		t.Errorf("idle relaunch must end at the session id, ends with %q", got[n-1])
+	}
+
+	// A resumeMessage cannot reach an idle migration (no prompt was in
+	// flight), but if one ever did it must not resurrect the injected turn.
+	if got, _ := resumeArgv(relaunchFlags(argv), "sid-1", &pending{idle: true, resumeMessage: "replayed"}, ""); !reflect.DeepEqual(got, want) {
+		t.Errorf("idle relaunch with a stray resumeMessage = %q, want %q", got, want)
+	}
+}
+
+// The cases an idle migration must not disturb: a mid-turn swap still gets
+// its continuation, because there a turn really was interrupted.
+func TestResumeArgvKeepsTheFirstTurnWhenATurnWasInterrupted(t *testing.T) {
+	argv := []string{"--verbose"}
+
+	cases := []struct {
+		name        string
+		p           *pending
+		autoMessage string
+		wantTail    []string
+		wantReplay  bool
+	}{
+		{
+			name:        "interrupted prompt is replayed",
+			p:           &pending{resumeMessage: "fix the bug"},
+			autoMessage: "Go continue.",
+			wantTail:    []string{"--resume", "sid-1", "fix the bug"},
+			wantReplay:  true,
+		},
+		{
+			name:        "mid-turn swap falls back to auto_message",
+			p:           &pending{},
+			autoMessage: "Go continue.",
+			wantTail:    []string{"--resume", "sid-1", "Go continue."},
+		},
+		{
+			name:     "empty auto_message injects nothing",
+			p:        &pending{},
+			wantTail: []string{"--resume", "sid-1"},
+		},
+		{
+			name:        "no pending at all falls back to auto_message",
+			p:           nil,
+			autoMessage: "Go continue.",
+			wantTail:    []string{"--resume", "sid-1", "Go continue."},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, replay := resumeArgv(relaunchFlags(argv), "sid-1", tc.p, tc.autoMessage)
+			want := append([]string{"--verbose"}, tc.wantTail...)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("resumeArgv = %q, want %q", got, want)
+			}
+			if replay != tc.wantReplay {
+				t.Errorf("replay = %v, want %v", replay, tc.wantReplay)
+			}
+		})
 	}
 }
