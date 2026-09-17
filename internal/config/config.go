@@ -362,7 +362,7 @@ func Keys(c Config) []KeyInfo {
 		},
 		{
 			Key: "wait_for_reset", Default: "true",
-			Description: "when every account is exhausted, sleep until the earliest reset and resume",
+			Description: "when every account is exhausted and nobody is at the session, sleep until the earliest reset and resume",
 			Current:     strconv.FormatBool(c.WaitForReset),
 		},
 		{
