@@ -35,6 +35,7 @@ import (
 	"github.com/inulute/cux/internal/strategy"
 	"github.com/inulute/cux/internal/switcher"
 	"github.com/inulute/cux/internal/usage"
+	"github.com/inulute/cux/internal/wrapper"
 )
 
 const (
@@ -466,6 +467,17 @@ func promptSwitchHasTarget() (bool, string) {
 	if err != nil || len(state.Accounts) < 2 {
 		return true, ""
 	}
+	// Ask the wrapper's own target resolution. The rule below is looser (a
+	// stale reading counts as room), so on its own it let a /switch through
+	// that the wrapper then could not perform - claude was stopped and
+	// restarted on the very same seat.
+	if cfg.KeepSessionWhenExhausted && otherSeatsFresh(state) && !wrapper.HasRotationTarget(&cfg) {
+		text, rerr := renderPromptUsage(false)
+		if rerr != nil {
+			return false, "cux: no usable accounts available; all managed accounts are exhausted or need login"
+		}
+		return false, "cux: nowhere to switch to - every other account is exhausted or needs login. This session stays open.\n\n" + text
+	}
 	cache, _ := usage.LoadCache()
 	if cache == nil {
 		cache = usage.Cache{}
@@ -494,6 +506,25 @@ func promptSwitchHasTarget() (bool, string) {
 		return false, "cux: no usable accounts available; all managed accounts are exhausted or need login"
 	}
 	return false, text
+}
+
+// otherSeatsFresh reports whether every seat other than the live one has a
+// current usage reading. Only then may the precheck refuse a /switch on the
+// wrapper's verdict: a stale reading must never be what blocks the user (#37),
+// and in that case the wrapper keeps claude running if it finds no target.
+func otherSeatsFresh(state *store.State) bool {
+	cache, _ := usage.LoadCache()
+	now := time.Now()
+	for _, acct := range state.PoolForCwd() {
+		if acct.Slot == state.ActiveSlot {
+			continue
+		}
+		u, ok := cachedUsage(cache, acct.CacheKey(), acct.Email)
+		if !ok || u.StaleReading(now) {
+			return false
+		}
+	}
+	return true
 }
 
 func renderPromptUsage(refresh bool) (string, error) {

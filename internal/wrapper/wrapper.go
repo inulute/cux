@@ -522,6 +522,7 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 	var stopRequested atomic.Bool
 	var hadTurns atomic.Bool // true once the first Stop signal fires
 	act := newActivity(time.Now())
+	park := &parkState{} // see park.go: keep claude running when no seat has room
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -536,7 +537,7 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				step(wrapperPID, cfg, manualTarget, &mu, &sessionID, &swap, &stopRequested, &hadTurns, act, ch, w)
+				step(wrapperPID, cfg, manualTarget, &mu, &sessionID, &swap, &stopRequested, &hadTurns, act, park, ch, w)
 			}
 		}
 	}()
@@ -586,6 +587,7 @@ func step(
 	stopRequested *atomic.Bool,
 	hadTurns *atomic.Bool,
 	act *activity,
+	park *parkState,
 	ch child,
 	w io.Writer,
 ) {
@@ -613,9 +615,12 @@ func step(
 	if b, ok, _ := signals.Read(wrapperPID, signals.RateLimited); ok {
 		_ = signals.Consume(wrapperPID, signals.RateLimited)
 		if cfg.AutoSwitchOnRateLimit {
-			hasSwap := false
+			// A limit ends the turn that hit it.
+			park.userBusy = false
 			mu.Lock()
-			if *swap == nil {
+			already := *swap != nil
+			mu.Unlock()
+			if !already && !park.active() {
 				msg := "rate-limit error from API"
 				if p, err := signals.DecodeRateLimited(b); err == nil && p.Message != "" {
 					msg = p.Message
@@ -623,15 +628,30 @@ func step(
 				lk, _ := switcher.CurrentLiveCacheKey()
 				// Recorded here, acted on in the main loop, which is where
 				// the record of what this session has already tried lives.
-				*swap = &pending{
+				p := &pending{
 					trigger:      history.TriggerRateLimit,
 					reason:       msg,
 					refusedModel: modelLimit(msg),
 					fromUsage:    snapshotActiveUsage(),
 					fromKey:      lk,
 				}
+				// Decide BEFORE stopping claude whether there is anywhere to
+				// go. With no seat left, stopping it only destroys the prompt
+				// line and every running subagent (park.go).
+				if shouldPark(cfg, p) {
+					park.start(p, parkNow())
+					markParked(cfg)
+					logPark("park", p, parkDetail(cfg))
+				} else {
+					mu.Lock()
+					if *swap == nil {
+						*swap = p
+					}
+					mu.Unlock()
+				}
 			}
-			hasSwap = *swap != nil
+			mu.Lock()
+			hasSwap := *swap != nil
 			mu.Unlock()
 			if hasSwap && stopRequested.CompareAndSwap(false, true) {
 				go gracefulExit(ch, w)
@@ -649,16 +669,43 @@ func step(
 	if b, ok, _ := signals.Read(wrapperPID, signals.TurnFailed); ok {
 		_ = signals.Consume(wrapperPID, signals.TurnFailed)
 		if cfg.RetryOnAPIError {
-			hasSwap := false
+			park.userBusy = false
 			mu.Lock()
-			if *swap == nil {
+			already := *swap != nil
+			mu.Unlock()
+			if !already && !park.active() {
 				msg := "API error after retries"
 				if p, err := signals.DecodeTurnFailed(b); err == nil && p.Message != "" {
 					msg = p.Message
 				}
-				*swap = &pending{retryOnly: true, reason: msg}
+				next := &pending{retryOnly: true, reason: msg}
+				// A usage limit can arrive dressed as a generic API failure;
+				// the main loop promotes it to the rate-limit path, but only
+				// after claude has been stopped. Check first, and keep the
+				// session open when no seat has room.
+				if cfg.KeepSessionWhenExhausted {
+					parkRefresh()
+					if isActiveHardLimited() {
+						lk, _ := switcher.CurrentLiveCacheKey()
+						rl := &pending{trigger: history.TriggerRateLimit, reason: msg, refusedModel: modelLimit(msg), fromUsage: snapshotActiveUsage(), fromKey: lk}
+						if shouldPark(cfg, rl) {
+							park.start(rl, parkNow())
+							markParked(cfg)
+							logPark("park", rl, parkDetail(cfg))
+							next = nil
+						}
+					}
+				}
+				if next != nil {
+					mu.Lock()
+					if *swap == nil {
+						*swap = next
+					}
+					mu.Unlock()
+				}
 			}
-			hasSwap = *swap != nil
+			mu.Lock()
+			hasSwap := *swap != nil
 			mu.Unlock()
 			if hasSwap && stopRequested.CompareAndSwap(false, true) {
 				go gracefulExit(ch, w)
@@ -673,22 +720,37 @@ func step(
 	if b, ok, _ := signals.Read(wrapperPID, signals.SwitchRequested); ok {
 		_ = signals.Consume(wrapperPID, signals.SwitchRequested)
 		p, _ := signals.DecodeSwitchRequested(b)
-		hasSwap := false
 		mu.Lock()
-		if *swap == nil {
+		already := *swap != nil
+		mu.Unlock()
+		if !already {
 			reason := "user requested via /switch"
 			if p.ResumeMessage != "" {
 				reason = "prompt intercepted before threshold swap"
 			}
-			*swap = &pending{
+			next := &pending{
 				trigger:        history.TriggerManual,
 				reason:         reason,
 				explicitTarget: p.Target,
 				resumeMessage:  p.ResumeMessage,
 				fromUsage:      snapshotActiveUsage(),
 			}
+			if shouldIgnoreManualSwitch(cfg, next) {
+				// Nowhere to rotate to: stopping claude would only restart
+				// it on the same seat.
+				logPark("manual-switch-ignored", next, "no seat has room")
+				next = nil
+			}
+			if next != nil {
+				mu.Lock()
+				if *swap == nil {
+					*swap = next
+				}
+				mu.Unlock()
+			}
 		}
-		hasSwap = *swap != nil
+		mu.Lock()
+		hasSwap := *swap != nil
 		mu.Unlock()
 		if hasSwap && stopRequested.CompareAndSwap(false, true) {
 			go gracefulExit(ch, w)
@@ -706,6 +768,9 @@ func step(
 		act.lastAt = time.Now()
 		act.turnInFlight = p.StartsTurn
 		mu.Unlock()
+		if park.active() && p.StartsTurn {
+			park.userBusy = true
+		}
 		// Registry heartbeat. Before this, updatedAt only moved on a swap,
 		// so `cux sessions` reported "running" identically for a session
 		// working and one untouched for six days (#39).
@@ -734,6 +799,7 @@ func step(
 		act.lastAt = time.Now()
 		act.turnInFlight = false
 		mu.Unlock()
+		park.userBusy = false
 		registry.UpdateSelf(func(e *registry.Entry) {})
 		if email, err := switcher.CurrentLiveEmail(); err == nil {
 			// Coalesced: every wrapped session on this host ends turns
@@ -790,6 +856,48 @@ func step(
 			fmt.Fprintf(w, "\ncux: idle on an account over threshold — migrating now rather than when you come back\n")
 			go gracefulExit(ch, w)
 			return
+		}
+	}
+
+	// 6. Parked (park.go): claude is still running on an exhausted seat
+	//    because there was nowhere to go. Re-check once a minute.
+	if park.active() && !stopRequested.Load() {
+		mu.Lock()
+		taken := *swap != nil
+		mu.Unlock()
+		if taken {
+			// Another path found a target and is already moving the session.
+			logPark("unpark-swap", park.p, "")
+			park.clear()
+			return
+		}
+		now := parkNow()
+		if now.Before(park.nextCheck) {
+			return
+		}
+		park.nextCheck = now.Add(parkCheckInterval)
+		switch evaluatePark(cfg, park) {
+		case parkLiveBack:
+			// The live seat came back first: no restart needed at all.
+			logPark("unpark-live", park.p, "")
+			park.clear()
+			markRunning()
+		case parkMigrate:
+			p := park.p
+			p.reason += " (session kept open until a seat freed up)"
+			logPark("migrate", p, "")
+			park.clear()
+			mu.Lock()
+			if *swap == nil {
+				*swap = p
+			}
+			mu.Unlock()
+			if stopRequested.CompareAndSwap(false, true) {
+				go gracefulExit(ch, w)
+				return
+			}
+		default:
+			markParked(cfg)
 		}
 	}
 }

@@ -65,9 +65,16 @@ type Config struct {
 	AutoResume            bool             `json:"auto_resume"`
 	AutoMessage           string           `json:"auto_message"`
 	WaitForReset          bool             `json:"wait_for_reset"`
-	RetryOnAPIError       bool             `json:"retry_on_api_error"`
-	Notify                bool             `json:"notify"`
-	PollIntervalSeconds   int              `json:"poll_interval_seconds"`
+	// KeepSessionWhenExhausted decides before claude is stopped whether a
+	// rate-limit swap has anywhere to go. With no seat left, claude keeps
+	// running (the user can keep typing, subagents survive) and the wrapper
+	// switches once a seat frees up and no turn is in flight; if the live seat
+	// comes back first there is no restart at all. false restores stopping
+	// first and waiting afterwards. See internal/wrapper/park.go.
+	KeepSessionWhenExhausted bool `json:"keep_session_when_exhausted"`
+	RetryOnAPIError          bool `json:"retry_on_api_error"`
+	Notify                   bool `json:"notify"`
+	PollIntervalSeconds      int  `json:"poll_interval_seconds"`
 	// SupportNotice gates the occasional support line. On by default, and a
 	// real setting rather than something a user has to silence with
 	// 2>/dev/null — that channel also carries the resume line and every
@@ -102,18 +109,19 @@ func (c Config) ResolvedStrategy() strategy.Kind {
 // when individual fields are missing in a partially-written file.
 func Defaults() Config {
 	return Config{
-		Thresholds:            usage.DefaultThresholds(),
-		Strategy:              StrategyConfig{Kind: "drain", Order: []string{}},
-		AutoSwitchOnThreshold: true,
-		AutoSwitchOnRateLimit: true,
-		AutoResume:            true,
-		AutoMessage:           "Go continue.",
-		WaitForReset:          true,
-		RetryOnAPIError:       true,
-		Notify:                true,
-		PollIntervalSeconds:   60,
-		SupportNotice:         true,
-		ModelFallback:         []string{},
+		Thresholds:               usage.DefaultThresholds(),
+		Strategy:                 StrategyConfig{Kind: "drain", Order: []string{}},
+		AutoSwitchOnThreshold:    true,
+		AutoSwitchOnRateLimit:    true,
+		AutoResume:               true,
+		AutoMessage:              "Go continue.",
+		WaitForReset:             true,
+		KeepSessionWhenExhausted: true,
+		RetryOnAPIError:          true,
+		Notify:                   true,
+		PollIntervalSeconds:      60,
+		SupportNotice:            true,
+		ModelFallback:            []string{},
 		// 15 minutes: long enough that a user reading output or thinking
 		// between prompts is never treated as gone, short enough that a
 		// terminal left overnight moves off a capped seat during the quiet
@@ -242,6 +250,12 @@ func Set(c Config, key, value string) (Config, error) {
 			return c, err
 		}
 		c.WaitForReset = b
+	case "keep_session_when_exhausted":
+		b, err := parseBool(value)
+		if err != nil {
+			return c, err
+		}
+		c.KeepSessionWhenExhausted = b
 	case "retry_on_api_error":
 		b, err := parseBool(value)
 		if err != nil {
@@ -364,6 +378,11 @@ func Keys(c Config) []KeyInfo {
 			Key: "wait_for_reset", Default: "true",
 			Description: "when every account is exhausted, sleep until the earliest reset and resume",
 			Current:     strconv.FormatBool(c.WaitForReset),
+		},
+		{
+			Key: "keep_session_when_exhausted", Default: "true",
+			Description: "when no account has room, keep claude running instead of stopping it; switch once a seat frees up",
+			Current:     strconv.FormatBool(c.KeepSessionWhenExhausted),
 		},
 		{
 			Key: "retry_on_api_error", Default: "true",
