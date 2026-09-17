@@ -90,11 +90,12 @@ func newParkHarness(t *testing.T) *parkHarness {
 		child: &recordingChild{},
 		now:   time.Now(),
 	}
-	realRefresh, realResolve, realRoom, realNow := parkRefresh, parkResolve, parkLiveHasRoom, parkNow
+	realRefresh, realRefreshNow, realResolve, realRoom, realNow := parkRefresh, parkRefreshNow, parkResolve, parkLiveHasRoom, parkNow
 	t.Cleanup(func() {
-		parkRefresh, parkResolve, parkLiveHasRoom, parkNow = realRefresh, realResolve, realRoom, realNow
+		parkRefresh, parkRefreshNow, parkResolve, parkLiveHasRoom, parkNow = realRefresh, realRefreshNow, realResolve, realRoom, realNow
 	})
 	parkRefresh = func() {}
+	parkRefreshNow = func() {}
 	parkResolve = func(explicit string, _ history.Trigger, _ *config.Config, _ map[int]bool) (string, error) {
 		if explicit != "" {
 			return explicit, nil

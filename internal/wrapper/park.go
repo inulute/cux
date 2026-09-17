@@ -88,7 +88,11 @@ const (
 // Seams for tests: the decisions below are pure functions of these.
 var (
 	parkRefresh = func() { _, _ = monitor.RefreshAllCoalesced(refreshCoalesceWindow) }
-	parkResolve = resolveTarget
+	// parkRefreshNow is uncoalesced. The decision to keep claude running is
+	// taken right after a limit was reported, and a sibling's reading from a
+	// few seconds earlier - taken before the limit - would read as room.
+	parkRefreshNow = func() { _, _ = monitor.RefreshAll() }
+	parkResolve    = resolveTarget
 	// parkLiveHasRoom reports whether the live seat has capacity on a reading
 	// taken after `after` (zero time: any fresh reading).
 	parkLiveHasRoom = liveSeatHasRoomSince
@@ -121,14 +125,17 @@ func shouldPark(cfg *config.Config, p *pending) bool {
 	if p.refusedModel != "" && len(cfg.ModelFallback) > 0 {
 		return false
 	}
-	parkRefresh()
+	decided := parkNow()
+	parkRefreshNow()
 	if _, err := parkResolve(p.explicitTarget, p.trigger, cfg, nil); err == nil {
 		return false
 	}
-	// The seat that hit the limit still has room by its numbers: a transient
-	// 429 or a sub-cap. completeSwap retries in place on a backoff, which is
-	// what keeps unattended sessions moving; that path is left alone.
-	if parkLiveHasRoom(cfg, time.Time{}) {
+	// The seat that hit the limit still has room by its numbers, on a reading
+	// taken after the limit was reported: a transient 429 or a sub-cap.
+	// completeSwap retries in place on a backoff, which is what keeps
+	// unattended sessions moving; that path is left alone. A reading from
+	// before the limit proves nothing, so it cannot keep claude from parking.
+	if parkLiveHasRoom(cfg, decided.Add(-time.Second)) {
 		return false
 	}
 	return true

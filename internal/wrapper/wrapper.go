@@ -692,7 +692,7 @@ func step(
 				// after claude has been stopped. Check first, and keep the
 				// session open when no seat has room.
 				if cfg.KeepSessionWhenExhausted {
-					parkRefresh()
+					parkRefreshNow()
 					if isActiveHardLimited() {
 						lk, _ := switcher.CurrentLiveCacheKey()
 						rl := &pending{trigger: history.TriggerRateLimit, reason: msg, refusedModel: modelLimit(msg), fromUsage: snapshotActiveUsage(), fromKey: lk}
