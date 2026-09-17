@@ -39,7 +39,7 @@ func (s consoleState) restore() {
 // (MCP servers, hooks).
 var nudgeDelays = []time.Duration{3 * time.Second, 8 * time.Second}
 
-const nudgeHold = 150 * time.Millisecond
+var nudgeHold = 150 * time.Millisecond
 
 // nudgeRepaint makes a relaunched claude re-measure and repaint, the same
 // thing a user does by resizing the window. A bare SIGWINCH is not enough:
@@ -51,27 +51,31 @@ func nudgeRepaint(ch child) {
 	if !term.IsTerminal(fd) {
 		return
 	}
-	go func() {
-		for _, d := range nudgeDelays {
-			time.Sleep(d)
-			if ch.Exited() {
-				return
-			}
-			ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
-			if err != nil || ws.Col < 2 {
-				return
-			}
-			orig := *ws
-			narrow := orig
-			narrow.Col--
-			if unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &narrow) != nil {
-				return
-			}
-			time.Sleep(nudgeHold)
-			if now, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ); err == nil &&
-				now.Col == narrow.Col && now.Row == narrow.Row {
-				_ = unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &orig)
-			}
+	go nudgeFd(fd, ch)
+}
+
+// nudgeFd does the work on a given terminal fd; split out so it can be tested
+// on a real pseudo terminal.
+func nudgeFd(fd int, ch child) {
+	for _, d := range nudgeDelays {
+		time.Sleep(d)
+		if ch.Exited() {
+			return
 		}
-	}()
+		ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
+		if err != nil || ws.Col < 2 {
+			return
+		}
+		orig := *ws
+		narrow := orig
+		narrow.Col--
+		if unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &narrow) != nil {
+			return
+		}
+		time.Sleep(nudgeHold)
+		if now, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ); err == nil &&
+			now.Col == narrow.Col && now.Row == narrow.Row {
+			_ = unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &orig)
+		}
+	}
 }
