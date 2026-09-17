@@ -527,6 +527,7 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 	var stopRequested atomic.Bool
 	var hadTurns atomic.Bool // true once the first Stop signal fires
 	act := newActivity(time.Now())
+	park := &parkState{} // see park.go
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -541,7 +542,7 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				step(wrapperPID, cfg, manualTarget, &mu, &sessionID, &swap, &stopRequested, &hadTurns, act, ch, w)
+				step(wrapperPID, cfg, manualTarget, &mu, &sessionID, &swap, &stopRequested, &hadTurns, act, park, ch, w)
 			}
 		}
 	}()
@@ -591,6 +592,7 @@ func step(
 	stopRequested *atomic.Bool,
 	hadTurns *atomic.Bool,
 	act *activity,
+	park *parkState,
 	ch child,
 	w io.Writer,
 ) {
@@ -641,6 +643,7 @@ func step(
 				// subagent to land back on the same seat (park.go).
 				parkRefresh()
 				if shouldPark(cfg, p) {
+					park.start(p, time.Now())
 					markParked(cfg)
 					return
 				}
@@ -686,6 +689,7 @@ func step(
 					refusedModel: modelLimit(msg), fromUsage: snapshotActiveUsage(), fromKey: lk}
 				parkRefresh()
 				if isActiveHardLimited() && shouldPark(cfg, asLimit) {
+					park.start(asLimit, time.Now())
 					markParked(cfg)
 					return
 				}
@@ -749,7 +753,7 @@ func step(
 		// working and one untouched for six days (#39). A prompt also ends
 		// a park: by now the hook has swapped the seat or let it through.
 		registry.UpdateSelf(func(e *registry.Entry) {
-			if e.State == registry.StateWaitingReset {
+			if e.State == registry.StateParked {
 				e.State, e.Detail = registry.StateRunning, ""
 			}
 		})
@@ -834,6 +838,46 @@ func step(
 			go gracefulExit(ch, w)
 			return
 		}
+	}
+
+	// 6. A parked session (park.go) that nobody has come back to. Someone
+	//    who did is already served: their prompt fired the hook, which
+	//    swapped the seat in place, so there is nothing left to do here.
+	if park.p == nil || stopRequested.Load() {
+		return
+	}
+	mu.Lock()
+	returned := act.lastAt.After(park.since)
+	taken := *swap != nil
+	mu.Unlock()
+	if returned || taken {
+		park.p = nil
+		return
+	}
+	now := time.Now()
+	if now.Before(park.next) {
+		return
+	}
+	park.next = now.Add(parkCheckInterval)
+	// Coalesced: a parked session polls for minutes to days, and every other
+	// session on this host is watching the same seats (#53).
+	_, _ = monitor.RefreshAllCoalesced(refreshCoalesceWindow)
+	resume := parkResumeTarget(cfg, park.p)
+	if resume == nil {
+		markParked(cfg)
+		return
+	}
+	// auto_message only reaches a fresh process as an argv, so continuing
+	// unattended work is the one thing that still needs the restart.
+	park.p = nil
+	mu.Lock()
+	if *swap == nil {
+		*swap = resume
+	}
+	mu.Unlock()
+	if stopRequested.CompareAndSwap(false, true) {
+		fmt.Fprintln(w, "cux: a seat freed up — resuming this session")
+		go gracefulExit(ch, w)
 	}
 }
 

@@ -8,16 +8,18 @@ import (
 	"github.com/inulute/cux/internal/history"
 )
 
+func noTarget(string, history.Trigger, *config.Config, map[int]bool) (string, error) {
+	return "", errors.New("all managed accounts are exhausted")
+}
+
+func haveTarget(string, history.Trigger, *config.Config, map[int]bool) (string, error) {
+	return "2", nil
+}
+
 // The decision that matters: claude is only ever stopped for a rate limit
 // that has somewhere to go. Everything else about parking follows from
 // leaving the child alone (#48, #50).
 func TestShouldPark(t *testing.T) {
-	noTarget := func(string, history.Trigger, *config.Config, map[int]bool) (string, error) {
-		return "", errors.New("all managed accounts are exhausted")
-	}
-	haveTarget := func(string, history.Trigger, *config.Config, map[int]bool) (string, error) {
-		return "2", nil
-	}
 	limit := func() *pending { return &pending{trigger: history.TriggerRateLimit} }
 
 	cases := []struct {
@@ -52,17 +54,38 @@ func TestShouldPark(t *testing.T) {
 	}
 }
 
-// A reading taken before the limit cannot say the limit is over, so the
-// caller refreshes and shouldPark must not do it a second time.
-func TestShouldParkDoesNotRefresh(t *testing.T) {
-	refreshed := false
-	defer swapSeams(&refreshed, func(string, history.Trigger, *config.Config, map[int]bool) (string, error) {
-		return "", errors.New("exhausted")
-	}, false)()
-	shouldPark(&config.Config{}, &pending{trigger: history.TriggerRateLimit})
-	if refreshed {
-		t.Error("shouldPark refreshed; its callers already did")
-	}
+// A parked session nobody came back to has to end up somewhere that can
+// carry auto_message: another seat if one freed up, otherwise a plain
+// relaunch on the live seat once it recovers.
+func TestParkResumeTarget(t *testing.T) {
+	parked := &pending{trigger: history.TriggerRateLimit, reason: "5h limit"}
+	var unused bool
+
+	t.Run("another seat freed up: swap", func(t *testing.T) {
+		defer swapSeams(&unused, haveTarget, false)()
+		got := parkResumeTarget(&config.Config{}, parked)
+		if got != parked {
+			t.Fatalf("want the parked swap handed on, got %+v", got)
+		}
+	})
+
+	t.Run("only the live seat came back: relaunch in place", func(t *testing.T) {
+		defer swapSeams(&unused, noTarget, true)()
+		got := parkResumeTarget(&config.Config{}, parked)
+		if got == nil || !got.retryOnly {
+			t.Fatalf("want a retry on the live seat, got %+v", got)
+		}
+		if got.reason != parked.reason {
+			t.Errorf("reason = %q, want it carried over", got.reason)
+		}
+	})
+
+	t.Run("still nothing: keep waiting", func(t *testing.T) {
+		defer swapSeams(&unused, noTarget, false)()
+		if got := parkResumeTarget(&config.Config{}, parked); got != nil {
+			t.Fatalf("want nil while every seat is out, got %+v", got)
+		}
+	})
 }
 
 func swapSeams(refreshed *bool, resolve func(string, history.Trigger, *config.Config, map[int]bool) (string, error), liveRoom bool) func() {

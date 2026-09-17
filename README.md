@@ -307,7 +307,7 @@ cux config set update_check.enabled true            # opt in to update checks
 | `auto_swap_idle_after_seconds`| `900`          | Migrate a session idle this long off an over-threshold account, instead of waiting for you to come back and type. `0` = off. Needs `auto_resume`. |
 | `auto_resume`                 | `true`         | Pass `--resume <id>` to the relaunched claude |
 | `auto_message`                | `Go continue.` | First user turn after auto-swap; `""` = silent |
-| `wait_for_reset`              | `true`         | When every account is exhausted, sleep until the earliest reset and resume |
+| `wait_for_reset`              | `true`         | When every account is exhausted and nobody is at the session, sleep until the earliest reset and resume. A session you are sitting at is kept open instead — claude keeps running and picks up the next free seat when you type. |
 | `retry_on_api_error`          | `true`         | Relaunch and auto-continue after a non-rate-limit API failure (fibonacci backoff, capped at 2 min) |
 | `update_check.enabled`        | `false`        | Check GitHub for newer cux releases on startup |
 | `update_check.cadence_hours`  | `6`            | Minimum hours between update checks (cached locally) |

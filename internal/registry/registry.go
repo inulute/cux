@@ -31,6 +31,10 @@ const (
 	StateSwapping     = "swapping"
 	StateRetrying     = "retrying"
 	StateWaitingReset = "waiting-reset"
+	// StateParked is a session still running on an exhausted seat because
+	// there was nowhere to switch it to. Distinct from waiting-reset, which
+	// is a session that was stopped and is sleeping until a reset.
+	StateParked = "parked"
 )
 
 // Entry is one running wrapper's self-reported status.

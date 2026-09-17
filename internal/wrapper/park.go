@@ -9,11 +9,16 @@ package wrapper
 // background subagent died with it. In the worst case the seat that "reaches
 // its reset first" was the live seat itself (#48, #50).
 //
-// The decision now happens before the child is touched. Nothing else is
-// needed: credentials are global and claude re-reads them per request, so a
-// session left running picks up whichever seat is live when the user next
-// types — and if it is still exhausted, the UserPromptSubmit hook swaps in
-// place at that moment (hooks.go, inPlaceSwap).
+// The decision now happens before the child is touched. For a session
+// someone comes back to, that is the whole change: credentials are global and
+// claude re-reads them per request, so it picks up whichever seat is live
+// when the user next types — and if that seat is still out, the
+// UserPromptSubmit hook swaps in place right then (hooks.go, inPlaceSwap).
+//
+// A session nobody comes back to still needs the old path. auto_message can
+// only be delivered as an argv on a fresh process, so once a seat frees up
+// and no prompt has arrived since the park, the session is handed to the
+// normal stop-swap-resume so the work actually continues.
 
 import (
 	"fmt"
@@ -26,6 +31,21 @@ import (
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/usage"
 )
+
+// parkCheckInterval is how often a parked session that nobody has come back
+// to re-checks. Reset clocks are minutes to days away.
+const parkCheckInterval = time.Minute
+
+// parkState is owned by the single poll goroutine that runs step().
+type parkState struct {
+	p     *pending
+	since time.Time
+	next  time.Time
+}
+
+func (s *parkState) start(p *pending, now time.Time) {
+	s.p, s.since, s.next = p, now, now.Add(parkCheckInterval)
+}
 
 // Seams for tests.
 var (
@@ -67,7 +87,20 @@ func markParked(cfg *config.Config) {
 		}
 	}
 	registry.UpdateSelf(func(e *registry.Entry) {
-		e.State = registry.StateWaitingReset
+		e.State = registry.StateParked
 		e.Detail = detail
 	})
+}
+
+// parkResumeTarget reports how a parked session that nobody returned to
+// should be resumed now that a seat is usable, or nil to keep waiting.
+func parkResumeTarget(cfg *config.Config, p *pending) *pending {
+	if _, err := parkResolve(p.explicitTarget, p.trigger, cfg, nil); err == nil {
+		return p
+	}
+	if parkLiveRoom(cfg) {
+		// Only the live seat came back: relaunch on it rather than swapping.
+		return &pending{retryOnly: true, reason: p.reason}
+	}
+	return nil
 }
