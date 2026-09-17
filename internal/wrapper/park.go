@@ -39,13 +39,17 @@ const parkCheckInterval = time.Minute
 
 // parkState is owned by the single poll goroutine that runs step().
 type parkState struct {
-	p     *pending
-	since time.Time
-	next  time.Time
+	p    *pending
+	next time.Time
+	// typed is set by the prompt that arrives while parked. It is the whole
+	// "is anyone there" test: act.lastAt cannot answer it, because a turn
+	// killed by a limit reports StopFailure rather than Stop and so never
+	// advances it.
+	typed bool
 }
 
 func (s *parkState) start(p *pending, now time.Time) {
-	s.p, s.since, s.next = p, now, now.Add(parkCheckInterval)
+	s.p, s.next, s.typed = p, now.Add(parkCheckInterval), false
 }
 
 // Seams for tests.

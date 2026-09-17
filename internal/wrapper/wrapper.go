@@ -749,10 +749,12 @@ func step(
 		act.lastAt = time.Now()
 		act.turnInFlight = p.StartsTurn
 		mu.Unlock()
+		park.typed = true
 		// Registry heartbeat. Before this, updatedAt only moved on a swap,
 		// so `cux sessions` reported "running" identically for a session
 		// working and one untouched for six days (#39). A prompt also ends
-		// a park: by now the hook has swapped the seat or let it through.
+		// a park: by now the hook has swapped the seat or let it through,
+		// and either way someone is here and driving.
 		registry.UpdateSelf(func(e *registry.Entry) {
 			if e.State == registry.StateParked {
 				e.State, e.Detail = registry.StateRunning, ""
@@ -848,10 +850,9 @@ func step(
 		return
 	}
 	mu.Lock()
-	returned := act.lastAt.After(park.since)
 	taken := *swap != nil
 	mu.Unlock()
-	if returned || taken {
+	if park.typed || taken {
 		park.p = nil
 		return
 	}
