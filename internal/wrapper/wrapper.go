@@ -150,8 +150,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		}
 	}
 
-	// The state the first claude launch inherits; restored after a kill so a
-	// relaunch starts from the same place (relaunchstate.go).
+	// Restored after a kill so the relaunch starts where a fresh launch does.
 	if host == nil {
 		consoleAtStart = captureConsoleState()
 	}
@@ -518,8 +517,6 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 	if host != nil {
 		host.SetChildPID(ch.Pid())
 		defer host.SetChildPID(0)
-	} else if lastChildKilled.Swap(false) {
-		nudgeRepaint(ch)
 	}
 
 	var (
@@ -1719,18 +1716,14 @@ func gracefulExit(ch child, w io.Writer) {
 	for {
 		select {
 		case <-deadline.C:
+			fmt.Fprintln(w, "cux: claude did not exit cleanly, terminating…")
 			_ = ch.Kill()
 			reapStrays(strays, w)
-			// A killed child ran no teardown, so its mouse reporting is
-			// still on and every mouse move now types escape sequences at
-			// whatever comes next (#48). On Windows this is every swap:
-			// os.Interrupt is not deliverable there, so the wait above
-			// always ends here. Everything else it left on - alternate
-			// screen, keyboard stacks, console modes - would make the
-			// relaunch start differently from a fresh one (relaunchstate.go).
+			// A killed child ran no teardown, so everything it turned on is
+			// still on — mouse reporting types escape sequences at whatever
+			// comes next (#48), and the rest makes the relaunch start
+			// differently from a fresh one (#58, relaunchstate.go).
 			resetAfterKill(w)
-			lastChildKilled.Store(true)
-			fmt.Fprintln(w, "cux: claude did not exit cleanly, terminated")
 			return
 		case <-tick.C:
 			if ch.Exited() {
