@@ -24,17 +24,10 @@ const (
 	mainScreen = "\x1b[?1049l"
 )
 
-// restoreMouse undoes what a terminated child left on, between launches.
-// It deliberately leaves the screen buffer alone: the wrapper's own
-// narration — the wait-for-reset countdown especially — is drawn wherever
-// claude left the terminal, and switching buffers underneath it would take
-// the countdown with it.
-func restoreMouse(w io.Writer) {
-	if !stdoutIsTerminal() {
-		return
-	}
-	_, _ = io.WriteString(w, mouseOff+cursorOn)
-}
+// restoreMouse was the between-launches cleanup; resetAfterKill in
+// relaunchstate.go replaces it. It leaves the alternate screen as well, which
+// is safe because it runs before the wrapper prints anything, so the
+// narration and the wait-for-reset countdown are drawn on the main screen.
 
 // restoreTerminal returns to the main screen buffer, in case the child died
 // inside the alternate one, on top of the mouse and cursor cleanup.

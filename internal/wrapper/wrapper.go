@@ -150,6 +150,12 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		}
 	}
 
+	// The state the first claude launch inherits; restored after a kill so a
+	// relaunch starts from the same place (relaunchstate.go).
+	if host == nil {
+		consoleAtStart = captureConsoleState()
+	}
+
 	// A silenced reactive path looks exactly like a working one, so say so
 	// at launch — this is the only moment cux can, and the alternative is a
 	// session waiting out a five-hour window next to a free seat (#56).
@@ -512,6 +518,8 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 	if host != nil {
 		host.SetChildPID(ch.Pid())
 		defer host.SetChildPID(0)
+	} else if lastChildKilled.Swap(false) {
+		nudgeRepaint(ch)
 	}
 
 	var (
@@ -1711,15 +1719,18 @@ func gracefulExit(ch child, w io.Writer) {
 	for {
 		select {
 		case <-deadline.C:
-			fmt.Fprintln(w, "cux: claude did not exit cleanly, terminating…")
 			_ = ch.Kill()
 			reapStrays(strays, w)
 			// A killed child ran no teardown, so its mouse reporting is
 			// still on and every mouse move now types escape sequences at
 			// whatever comes next (#48). On Windows this is every swap:
 			// os.Interrupt is not deliverable there, so the wait above
-			// always ends here.
-			restoreMouse(w)
+			// always ends here. Everything else it left on - alternate
+			// screen, keyboard stacks, console modes - would make the
+			// relaunch start differently from a fresh one (relaunchstate.go).
+			resetAfterKill(w)
+			lastChildKilled.Store(true)
+			fmt.Fprintln(w, "cux: claude did not exit cleanly, terminated")
 			return
 		case <-tick.C:
 			if ch.Exited() {
