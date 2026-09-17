@@ -618,9 +618,10 @@ func step(
 	if b, ok, _ := signals.Read(wrapperPID, signals.RateLimited); ok {
 		_ = signals.Consume(wrapperPID, signals.RateLimited)
 		if cfg.AutoSwitchOnRateLimit {
-			hasSwap := false
 			mu.Lock()
-			if *swap == nil {
+			pendingAlready := *swap != nil
+			mu.Unlock()
+			if !pendingAlready {
 				msg := "rate-limit error from API"
 				if p, err := signals.DecodeRateLimited(b); err == nil && p.Message != "" {
 					msg = p.Message
@@ -628,15 +629,29 @@ func step(
 				lk, _ := switcher.CurrentLiveCacheKey()
 				// Recorded here, acted on in the main loop, which is where
 				// the record of what this session has already tried lives.
-				*swap = &pending{
+				p := &pending{
 					trigger:      history.TriggerRateLimit,
 					reason:       msg,
 					refusedModel: modelLimit(msg),
 					fromUsage:    snapshotActiveUsage(),
 					fromKey:      lk,
 				}
+				// Decided before the child is touched: with no seat left,
+				// stopping claude destroys the prompt line and every running
+				// subagent to land back on the same seat (park.go).
+				parkRefresh()
+				if shouldPark(cfg, p) {
+					markParked(cfg)
+					return
+				}
+				mu.Lock()
+				if *swap == nil {
+					*swap = p
+				}
+				mu.Unlock()
 			}
-			hasSwap = *swap != nil
+			mu.Lock()
+			hasSwap := *swap != nil
 			mu.Unlock()
 			if hasSwap && stopRequested.CompareAndSwap(false, true) {
 				go gracefulExit(ch, w)
@@ -654,16 +669,34 @@ func step(
 	if b, ok, _ := signals.Read(wrapperPID, signals.TurnFailed); ok {
 		_ = signals.Consume(wrapperPID, signals.TurnFailed)
 		if cfg.RetryOnAPIError {
-			hasSwap := false
 			mu.Lock()
-			if *swap == nil {
+			pendingAlready := *swap != nil
+			mu.Unlock()
+			if !pendingAlready {
 				msg := "API error after retries"
 				if p, err := signals.DecodeTurnFailed(b); err == nil && p.Message != "" {
 					msg = p.Message
 				}
-				*swap = &pending{retryOnly: true, reason: msg}
+				// A usage limit can arrive dressed as a generic API failure.
+				// The main loop promotes it to the rate-limit path, but only
+				// after claude has been stopped — check here too, or the
+				// exhausted-pool case still loses the session (park.go).
+				lk, _ := switcher.CurrentLiveCacheKey()
+				asLimit := &pending{trigger: history.TriggerRateLimit, reason: msg,
+					refusedModel: modelLimit(msg), fromUsage: snapshotActiveUsage(), fromKey: lk}
+				parkRefresh()
+				if isActiveHardLimited() && shouldPark(cfg, asLimit) {
+					markParked(cfg)
+					return
+				}
+				mu.Lock()
+				if *swap == nil {
+					*swap = &pending{retryOnly: true, reason: msg}
+				}
+				mu.Unlock()
 			}
-			hasSwap = *swap != nil
+			mu.Lock()
+			hasSwap := *swap != nil
 			mu.Unlock()
 			if hasSwap && stopRequested.CompareAndSwap(false, true) {
 				go gracefulExit(ch, w)
@@ -713,8 +746,13 @@ func step(
 		mu.Unlock()
 		// Registry heartbeat. Before this, updatedAt only moved on a swap,
 		// so `cux sessions` reported "running" identically for a session
-		// working and one untouched for six days (#39).
-		registry.UpdateSelf(func(e *registry.Entry) {})
+		// working and one untouched for six days (#39). A prompt also ends
+		// a park: by now the hook has swapped the seat or let it through.
+		registry.UpdateSelf(func(e *registry.Entry) {
+			if e.State == registry.StateWaitingReset {
+				e.State, e.Detail = registry.StateRunning, ""
+			}
+		})
 	}
 
 	// 4. Stop signal: a turn just ended cleanly.
