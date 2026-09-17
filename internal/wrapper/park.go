@@ -29,6 +29,7 @@ import (
 	"github.com/inulute/cux/internal/monitor"
 	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/store"
+	"github.com/inulute/cux/internal/switcher"
 	"github.com/inulute/cux/internal/usage"
 )
 
@@ -96,6 +97,11 @@ func markParked(cfg *config.Config) {
 // should be resumed now that a seat is usable, or nil to keep waiting.
 func parkResumeTarget(cfg *config.Config, p *pending) *pending {
 	if _, err := parkResolve(p.explicitTarget, p.trigger, cfg, nil); err == nil {
+		// Re-read the seat we are leaving: the park may be hours old, and
+		// this snapshot is what `cux history` records as the "from" usage
+		// and what skipSwapOnCapacity compares against.
+		p.fromUsage = snapshotActiveUsage()
+		p.fromKey, _ = switcher.CurrentLiveCacheKey()
 		return p
 	}
 	if parkLiveRoom(cfg) {

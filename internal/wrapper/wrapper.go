@@ -504,9 +504,10 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 		envWrapped+"=1",
 		envWrapperPID+"="+strconv.Itoa(wrapperPID),
 	)
-	// startChild is platform-specific: Unix runs claude on a PTY slave
-	// (see start_other.go), Windows on a ConPTY (start_windows.go). The
-	// swap/poll/wait logic below drives it through the `child` interface.
+	// startChild is platform-specific: with an attach host claude runs on a
+	// PTY slave (start_other.go) or a ConPTY (start_windows.go), otherwise it
+	// inherits the wrapper's own stdio. The swap/poll/wait logic below drives
+	// it through the `child` interface either way.
 	ch, err := startChild(claudeBin, argv, env, host)
 	if err != nil {
 		return 1, "", false, nil, fmt.Errorf("wrapper: start claude: %w", err)
