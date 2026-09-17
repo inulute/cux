@@ -471,13 +471,17 @@ func promptSwitchHasTarget() (bool, string) {
 		cache = usage.Cache{}
 	}
 	current, _ := switcher.CurrentLiveEmail()
+	currentKey, _ := switcher.CurrentLiveCacheKey()
+	if currentKey == "" {
+		currentKey = current
+	}
 	pool := state.PoolForCwd()
 	candidates := make([]strategy.Candidate, 0, len(pool))
 	for _, a := range pool {
-		candidates = append(candidates, strategy.Candidate{Email: a.Email})
+		candidates = append(candidates, strategy.Candidate{Email: a.Email, Slot: a.Slot, CacheKey: a.CacheKey()})
 	}
 	if _, ok := strategy.PickNext(cfg.ResolvedStrategy(), cfg.Strategy.Order, candidates,
-		strategy.Candidate{Email: current}, cache, cfg.Thresholds, time.Now()); ok {
+		strategy.Candidate{Email: current, CacheKey: currentKey}, cache, cfg.Thresholds, time.Now()); ok {
 		return true, ""
 	}
 	for _, slot := range state.SortedSlots() {
@@ -823,26 +827,7 @@ func accountHasPromptCapacity(cache usage.Cache, acct store.Account, thresholds 
 }
 
 func usageHasPromptCapacity(u usage.AccountUsage, thresholds usage.Thresholds) bool {
-	// A "no capacity" answer here can block the user's prompt with "all
-	// managed accounts are exhausted" (promptSwitchHasTarget), which is
-	// exactly what issue #37 was. A reading too old to trust is not evidence
-	// of exhaustion, so it reads as room — the same way a missing entry
-	// already does in accountHasPromptCapacity.
-	if u.StaleReading(time.Now()) {
-		return true
-	}
-	u = u.Settled(time.Now())
-	if u.TokenExpired {
-		return false
-	}
-	if u.SevenDay != nil && u.SevenDay.Utilization >= 100 {
-		return false
-	}
-	cap5 := thresholds.FiveHour
-	if cap5 == 0 || cap5 == 100 {
-		cap5 = 90
-	}
-	return u.FiveHour == nil || u.FiveHour.Utilization < float64(cap5)
+	return usage.HasSwitchCapacity(u, thresholds, time.Now())
 }
 
 func nextResetSlot(state *store.State, cache usage.Cache) (slot int, email, reset string, ok bool) {

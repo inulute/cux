@@ -489,3 +489,30 @@ func snippet(b []byte) string {
 	}
 	return string(b)
 }
+
+// HasSwitchCapacity reports whether an account can take a session right now.
+// It is the one rule behind both the /switch precheck in the hook and the
+// wrapper's own target resolution: when the two disagreed, the hook let a
+// switch through that the wrapper could not perform, and claude was stopped
+// and relaunched on the very same seat.
+//
+// A reading nobody can vouch for reads as room. Refusing on one is the #37
+// failure mode, and a target that turns out to be unusable is struck off and
+// re-chosen by completeSwap rather than ending the session.
+func HasSwitchCapacity(u AccountUsage, t Thresholds, now time.Time) bool {
+	if u.StaleReading(now) {
+		return true
+	}
+	u = u.Settled(now)
+	if u.TokenExpired {
+		return false
+	}
+	if u.SevenDay != nil && u.SevenDay.Utilization >= 100 {
+		return false
+	}
+	cap5 := t.FiveHour
+	if cap5 == 0 || cap5 == 100 {
+		cap5 = 90
+	}
+	return u.FiveHour == nil || u.FiveHour.Utilization < float64(cap5)
+}

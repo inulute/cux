@@ -1927,17 +1927,7 @@ func accountHasSwitchCapacity(cache usage.Cache, cacheKey string, cfg *config.Co
 	if !ok {
 		return true
 	}
-	if u.TokenExpired {
-		return false
-	}
-	if u.SevenDay != nil && u.SevenDay.Utilization >= 100 {
-		return false
-	}
-	cap5 := cfg.Thresholds.FiveHour
-	if cap5 == 0 || cap5 == 100 {
-		cap5 = 90
-	}
-	return u.FiveHour == nil || u.FiveHour.Utilization < float64(cap5)
+	return usage.HasSwitchCapacity(u, cfg.Thresholds, time.Now())
 }
 
 // finishSession is the wrapper's last act: put the terminal back the way it
