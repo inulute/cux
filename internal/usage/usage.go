@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/inulute/cux/internal/atomicfile"
@@ -78,7 +79,45 @@ const (
 	keySevenDay     = "seven_day"
 	keyPolledAt     = "polled_at"
 	keyTokenExpired = "token_expired"
+	keyLimits       = "limits"
 )
+
+// limitEntry is one element of the endpoint's limits[] array. Model-scoped
+// weekly caps are reported only here; the top-level seven_day_opus and
+// seven_day_sonnet keys are null on current accounts.
+type limitEntry struct {
+	Kind     string     `json:"kind"`
+	Percent  *float64   `json:"percent"`
+	ResetsAt *time.Time `json:"resets_at"`
+	Scope    *struct {
+		Model *struct {
+			DisplayName string `json:"display_name"`
+		} `json:"model"`
+	} `json:"scope"`
+}
+
+// decodeLimits turns each weekly_scoped entry naming a model into a window
+// keyed seven_day_<model>, so it sits beside seven_day in the cache. Entries
+// without a model scope describe the seat as a whole, which five_hour and
+// seven_day already cover.
+func decodeLimits(v json.RawMessage) map[string]*Window {
+	var entries []limitEntry
+	if err := json.Unmarshal(v, &entries); err != nil {
+		return nil
+	}
+	out := map[string]*Window{}
+	for _, e := range entries {
+		if e.Kind != "weekly_scoped" || e.Percent == nil || e.Scope == nil || e.Scope.Model == nil {
+			continue
+		}
+		name := "seven_day_" + strings.ToLower(strings.TrimSpace(e.Scope.Model.DisplayName))
+		if name == "seven_day_" || reservedKey(name) {
+			continue
+		}
+		out[name] = &Window{Utilization: *e.Percent, ResetsAt: e.ResetsAt}
+	}
+	return out
+}
 
 // AccountUsage is stored flat — `seven_day_opus` sits beside `five_hour` at
 // the top level rather than under a nested `models` object — so the on-disk
@@ -125,8 +164,16 @@ func (u *AccountUsage) UnmarshalJSON(b []byte) error {
 			u.FiveHour = decodeWindow(v)
 		case keySevenDay:
 			u.SevenDay = decodeWindow(v)
+		case keyLimits:
+			for name, w := range decodeLimits(v) {
+				u.setModel(name, w)
+			}
 		default:
-			u.setModel(name, decodeWindow(v))
+			// A window at 0% with no reset carries no signal: that is how the
+			// endpoint reports program windows that do not apply to the seat.
+			if w := decodeWindow(v); w != nil && (w.Utilization != 0 || w.ResetsAt != nil) {
+				u.setModel(name, w)
+			}
 		}
 	}
 	return nil
@@ -134,7 +181,7 @@ func (u *AccountUsage) UnmarshalJSON(b []byte) error {
 
 func reservedKey(name string) bool {
 	switch name {
-	case keyFiveHour, keySevenDay, keyPolledAt, keyTokenExpired:
+	case keyFiveHour, keySevenDay, keyPolledAt, keyTokenExpired, keyLimits:
 		return true
 	}
 	return false
