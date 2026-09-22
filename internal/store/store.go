@@ -49,6 +49,38 @@ func (a Account) CacheKey() string {
 	return a.Email
 }
 
+// LiveSeat returns the managed account that the currently-live login belongs
+// to, given whatever identity the live token yields.
+//
+// It exists because the two sides can spell one seat differently. A seat
+// added before cux captured account UUIDs stores none, so its CacheKey()
+// falls back to its email — while the same seat read from the live token
+// keys on uuid|org. Code that compared those two spellings directly decided
+// the live seat was not in the pool, and rotation then offered the seat the
+// session was already on.
+//
+// Resolved against the store rather than the token, so callers get a key
+// built by the same function as every candidate's.
+func (s *State) LiveSeat(liveEmail, liveCacheKey string) (Account, bool) {
+	if s == nil {
+		return Account{}, false
+	}
+	if liveCacheKey != "" {
+		for _, a := range s.Accounts {
+			if a.CacheKey() == liveCacheKey {
+				return a, true
+			}
+		}
+	}
+	// No key match: the store has no UUID for it. ActiveSlot is the store's
+	// own record of which seat is live, so trust it — but only when it agrees
+	// with the live email, or a stale ActiveSlot would mask a real mismatch.
+	if a, ok := s.Accounts[s.ActiveSlot]; ok && liveEmail != "" && strings.EqualFold(a.Email, liveEmail) {
+		return a, true
+	}
+	return Account{}, false
+}
+
 // State is the on-disk shape of state.json.
 type State struct {
 	Version           int                `json:"version"`

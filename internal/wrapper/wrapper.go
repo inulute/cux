@@ -1850,7 +1850,14 @@ func resolveTarget(explicit string, trigger history.Trigger, cfg *config.Config,
 	}
 	current, _ := switcher.CurrentLiveEmail()
 	currentCacheKey, _ := switcher.CurrentLiveCacheKey()
-	if currentCacheKey == "" {
+	// Resolve the live login back to its managed seat, so the key compared
+	// against each candidate is built by the same function they were
+	// (store.LiveSeat). Without this a seat stored before cux captured UUIDs
+	// never matched the live token's uuid|org key, rotation failed to exclude
+	// the seat the session was already on, and /switch swapped to itself.
+	if seat, ok := state.LiveSeat(current, currentCacheKey); ok {
+		current, currentCacheKey = seat.Email, seat.CacheKey()
+	} else if currentCacheKey == "" {
 		currentCacheKey = current
 	}
 

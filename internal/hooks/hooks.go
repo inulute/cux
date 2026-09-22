@@ -472,7 +472,9 @@ func promptSwitchHasTarget() (bool, string) {
 	}
 	current, _ := switcher.CurrentLiveEmail()
 	currentKey, _ := switcher.CurrentLiveCacheKey()
-	if currentKey == "" {
+	if seat, ok := state.LiveSeat(current, currentKey); ok {
+		current, currentKey = seat.Email, seat.CacheKey()
+	} else if currentKey == "" {
 		currentKey = current
 	}
 	pool := state.PoolForCwd()
