@@ -75,3 +75,39 @@ func TestLiveSeatWorksWithNoUsageCache(t *testing.T) {
 		t.Fatalf("got (%q, %v), want the store's own key", seat.CacheKey(), ok)
 	}
 }
+
+// Twin seats: a personal plan and an org plan on one address (#24). When
+// neither has a stored UUID both key on that address, so the live key alone
+// cannot tell them apart and ranging the account map would pick at random.
+// ActiveSlot is the tie-break, and it has to be a stable one.
+func TestLiveSeatDisambiguatesTwinSeats(t *testing.T) {
+	st := &State{
+		ActiveSlot: 2,
+		Accounts: map[int]Account{
+			1: {Slot: 1, Email: "me@x.test"},
+			2: {Slot: 2, Email: "me@x.test"},
+		},
+	}
+	for i := 0; i < 200; i++ {
+		seat, ok := st.LiveSeat("me@x.test", "me@x.test")
+		if !ok || seat.Slot != 2 {
+			t.Fatalf("run %d: got (slot %d, %v), want the active twin (slot 2)", i, seat.Slot, ok)
+		}
+	}
+}
+
+// A twin that does carry its own key identifies itself, and a stale
+// ActiveSlot pointing at its sibling must not steal it.
+func TestLiveSeatKeyMatchBeatsStaleActiveSlot(t *testing.T) {
+	st := &State{
+		ActiveSlot: 1, // stale: says the personal seat is live
+		Accounts: map[int]Account{
+			1: {Slot: 1, Email: "me@x.test"},
+			2: {Slot: 2, Email: "me@x.test", UUID: "u-me", OrgUUID: "o-corp"},
+		},
+	}
+	seat, ok := st.LiveSeat("me@x.test", "u-me|o-corp")
+	if !ok || seat.Slot != 2 {
+		t.Fatalf("got (slot %d, %v), want the org twin (slot 2) from its own key", seat.Slot, ok)
+	}
+}

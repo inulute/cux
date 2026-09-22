@@ -66,15 +66,24 @@ func (s *State) LiveSeat(liveEmail, liveCacheKey string) (Account, bool) {
 		return Account{}, false
 	}
 	if liveCacheKey != "" {
-		for _, a := range s.Accounts {
-			if a.CacheKey() == liveCacheKey {
+		// ActiveSlot breaks a tie first. Twin seats — a personal plan and an
+		// org plan on one address (#24) — key on that address whenever
+		// neither has a stored UUID, so two accounts can answer to the same
+		// key and ranging the map would choose between them at random.
+		if a, ok := s.Accounts[s.ActiveSlot]; ok && a.CacheKey() == liveCacheKey {
+			return a, true
+		}
+		for _, slot := range s.SortedSlots() {
+			if a, ok := s.Accounts[slot]; ok && a.CacheKey() == liveCacheKey {
 				return a, true
 			}
 		}
 	}
-	// No key match: the store has no UUID for it. ActiveSlot is the store's
-	// own record of which seat is live, so trust it — but only when it agrees
+	// No key matched: the store has no UUID for this seat. ActiveSlot is its
+	// own record of which one is live, so trust it — but only when it agrees
 	// with the live email, or a stale ActiveSlot would mask a real mismatch.
+	// An exact key match above always wins over this, so a stale ActiveSlot
+	// never steals a seat that identified itself properly.
 	if a, ok := s.Accounts[s.ActiveSlot]; ok && liveEmail != "" && strings.EqualFold(a.Email, liveEmail) {
 		return a, true
 	}
