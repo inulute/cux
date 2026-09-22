@@ -5,6 +5,7 @@ import (
 
 	"github.com/inulute/cux/internal/config"
 	"github.com/inulute/cux/internal/history"
+	"github.com/inulute/cux/internal/usage"
 )
 
 // Anthropic's rate limits are not one thing. Claude Code distinguishes six,
@@ -31,8 +32,10 @@ import (
 // model by itself, and cux already relaunches the process on every swap.
 //
 // knownModels are the names that appear in those labels. An unknown one is
-// simply not matched, which falls back to today's account swap.
-var knownModels = []string{"opus", "sonnet", "haiku", "fable"}
+// simply not matched, which falls back to today's account swap. Shared with
+// the usage endpoint's own model names, so a family named in a rejection and
+// one named in limits[] cannot drift apart.
+var knownModels = usage.KnownModels
 
 // modelLimit reports which model a rejection refused, or "" when the limit is
 // account-wide (or the message is not a limit at all).

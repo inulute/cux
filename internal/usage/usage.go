@@ -96,6 +96,53 @@ type limitEntry struct {
 	} `json:"scope"`
 }
 
+// KnownModels are the model families Anthropic names in its own limit
+// labels ("You've reached your Fable limit"). They live here because two
+// surfaces read them: the rejection text the wrapper parses, and the display
+// names this endpoint reports in limits[]. A name matching neither still
+// works — it just keys a window of its own.
+var KnownModels = []string{"opus", "sonnet", "haiku", "fable"}
+
+// modelWindowKey names the window for a model scope from limits[].
+//
+// Display names carry a version and the version moves — "Fable" today,
+// "Claude Fable 5.1" the moment Anthropic spells it out — so the raw name is
+// not a key. Anything outside [a-z0-9] becomes an underscore, then a
+// recognised family wins: "Claude Fable 5.1" and "Fable" both key
+// seven_day_fable, which is also what the top-level key was called when the
+// endpoint still sent one. An unrecognised name keeps its slug, so a family
+// cux has never heard of still gets ranked (#52).
+func modelWindowKey(displayName string) string {
+	slug := slugify(displayName)
+	if slug == "" {
+		return ""
+	}
+	for _, part := range strings.Split(slug, "_") {
+		for _, m := range KnownModels {
+			if part == m {
+				return keySevenDay + "_" + m
+			}
+		}
+	}
+	return keySevenDay + "_" + slug
+}
+
+func slugify(s string) string {
+	var b strings.Builder
+	lastUnderscore := true // also trims a leading underscore
+	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			lastUnderscore = false
+		case !lastUnderscore:
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	return strings.TrimSuffix(b.String(), "_")
+}
+
 // decodeLimits turns each weekly_scoped entry naming a model into a window
 // keyed seven_day_<model>, so it sits beside seven_day in the cache. Entries
 // without a model scope describe the seat as a whole, which five_hour and
@@ -110,8 +157,8 @@ func decodeLimits(v json.RawMessage) map[string]*Window {
 		if e.Kind != "weekly_scoped" || e.Percent == nil || e.Scope == nil || e.Scope.Model == nil {
 			continue
 		}
-		name := "seven_day_" + strings.ToLower(strings.TrimSpace(e.Scope.Model.DisplayName))
-		if name == "seven_day_" || reservedKey(name) {
+		name := modelWindowKey(e.Scope.Model.DisplayName)
+		if name == "" || reservedKey(name) {
 			continue
 		}
 		out[name] = &Window{Utilization: *e.Percent, ResetsAt: e.ResetsAt}
@@ -150,6 +197,7 @@ func (u *AccountUsage) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	*u = AccountUsage{}
+	var limits json.RawMessage
 	for name, v := range raw {
 		switch name {
 		case keyPolledAt:
@@ -165,9 +213,10 @@ func (u *AccountUsage) UnmarshalJSON(b []byte) error {
 		case keySevenDay:
 			u.SevenDay = decodeWindow(v)
 		case keyLimits:
-			for name, w := range decodeLimits(v) {
-				u.setModel(name, w)
-			}
+			// Applied after the loop: a limits[] entry and a top-level key can
+			// name the same window, and `range raw` is map order, so deciding
+			// it here would pick a different winner from run to run.
+			limits = v
 		default:
 			// A window at 0% with no reset carries no signal: that is how the
 			// endpoint reports program windows that do not apply to the seat.
@@ -175,6 +224,10 @@ func (u *AccountUsage) UnmarshalJSON(b []byte) error {
 				u.setModel(name, w)
 			}
 		}
+	}
+	// limits[] is where the endpoint reports model scopes now, so it wins.
+	for name, w := range decodeLimits(limits) {
+		u.setModel(name, w)
 	}
 	return nil
 }
