@@ -114,9 +114,20 @@ func refreshAll(maxAge time.Duration) (usage.Cache, []error) {
 	ch := make(chan result, len(state.Accounts))
 	var wg sync.WaitGroup
 	fetched := 0
+	var cooling []string
 	for slot, a := range state.Accounts {
-		if u, ok := cache[a.CacheKey()]; ok && freshEnough(u.PolledAt, maxAge, now) {
-			continue
+		if u, ok := cache[a.CacheKey()]; ok {
+			if freshEnough(u.PolledAt, maxAge, now) {
+				continue
+			}
+			// Held back after a refusal, and deliberately regardless of
+			// maxAge: an uncoalesced caller wanting a current reading is
+			// exactly who kept re-asking the seat that could not answer.
+			if u.InCooldown(now) {
+				cooling = append(cooling, fmt.Sprintf("%s: rate limited, next poll %s",
+					a.Email, u.RetryAfter.Local().Format("15:04:05")))
+				continue
+			}
 		}
 		fetched++
 		wg.Add(1)
@@ -136,6 +147,7 @@ func refreshAll(maxAge time.Duration) (usage.Cache, []error) {
 	close(ch)
 
 	var errs []error
+	dirty := repaired
 	for r := range ch {
 		if r.err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.email, r.err))
@@ -143,15 +155,40 @@ func refreshAll(maxAge time.Duration) (usage.Cache, []error) {
 			// surfaces the state to the user.
 			if r.entry.TokenExpired {
 				cache[r.cacheKey] = r.entry
+				dirty = true
+				continue
 			}
+			// Every other failure is recorded against the reading we already
+			// hold, so the next caller can see that this account was asked
+			// and refused. Without it PolledAt stays at the last success, the
+			// entry reads stale forever, and staleness is what makes the next
+			// caller fetch — the seat that fails is then the one polled
+			// hardest (#53).
+			kept := cache[r.cacheKey]
+			kept.Failures++
+			var limited *usage.RateLimitedError
+			named := time.Duration(0)
+			if errors.As(r.err, &limited) {
+				named = limited.RetryAfter
+			}
+			kept.RetryAfter = kept.NextRetry(time.Now(), named)
+			cache[r.cacheKey] = kept
+			dirty = true
 			continue
 		}
+		// A success clears the hold-off; the account is answering again.
+		r.entry.RetryAfter, r.entry.Failures = time.Time{}, 0
 		cache[r.cacheKey] = r.entry
+		dirty = true
 	}
-	// When every account was fresh enough the cache is untouched, so skip
+	for _, c := range cooling {
+		errs = append(errs, errors.New(c))
+	}
+	// When nothing was fetched or repaired the cache is untouched, so skip
 	// the write entirely — that no-op is the whole point of coalescing. A
-	// repair rewrote keys, so that one always has to be persisted.
-	if fetched > 0 || repaired {
+	// recorded refusal counts as a change: it is what stops the next caller
+	// asking the same account again.
+	if dirty {
 		if err := usage.SaveCache(cache); err != nil {
 			errs = append(errs, err)
 		}

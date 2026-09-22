@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +72,46 @@ type AccountUsage struct {
 	Models       map[string]*Window
 	PolledAt     time.Time
 	TokenExpired bool
+	// RetryAfter holds off the next poll of this account. A failed read
+	// leaves PolledAt where the last success put it, so the reading goes on
+	// looking stale — and staleness is what makes the next caller fetch. The
+	// endpoint then 429s the one account every session shares while the idle
+	// ones coalesce normally, which is #53: one seat frozen for hours, polled
+	// every time precisely because its last poll failed.
+	//
+	// Stored in the shared cache rather than per process, so N wrappers on a
+	// host back off together instead of each discovering the limit alone.
+	RetryAfter time.Time
+	// Failures counts consecutive failed polls; it sets how far RetryAfter
+	// moves and is cleared by the first success.
+	Failures int
+}
+
+// InCooldown reports whether this account is being held back from polling.
+func (u AccountUsage) InCooldown(now time.Time) bool {
+	return !u.RetryAfter.IsZero() && now.Before(u.RetryAfter)
+}
+
+// cooldownFor is the hold-off after n consecutive failures: a minute,
+// doubling, capped. Long enough that a host full of sessions stops adding
+// load, short enough that a transient refusal costs one reading.
+func cooldownFor(n int) time.Duration {
+	const base, cap = time.Minute, 15 * time.Minute
+	d := base
+	for i := 1; i < n && d < cap; i++ {
+		d *= 2
+	}
+	return min(d, cap)
+}
+
+// NextRetry returns when a failed poll may be tried again. A Retry-After the
+// endpoint named is honoured as a floor — it knows better than the backoff.
+func (u AccountUsage) NextRetry(now time.Time, named time.Duration) time.Time {
+	d := cooldownFor(u.Failures)
+	if named > d {
+		d = named
+	}
+	return now.Add(d)
 }
 
 // Reserved top-level keys in the cache and API shapes: everything that is
@@ -81,6 +122,8 @@ const (
 	keyPolledAt     = "polled_at"
 	keyTokenExpired = "token_expired"
 	keyLimits       = "limits"
+	keyRetryAfter   = "retry_after"
+	keyFailures     = "failures"
 )
 
 // limitEntry is one element of the endpoint's limits[] array. Model-scoped
@@ -183,6 +226,12 @@ func (u AccountUsage) MarshalJSON() ([]byte, error) {
 	if u.TokenExpired {
 		out[keyTokenExpired] = true
 	}
+	if !u.RetryAfter.IsZero() {
+		out[keyRetryAfter] = u.RetryAfter
+	}
+	if u.Failures > 0 {
+		out[keyFailures] = u.Failures
+	}
 	for name, w := range u.Models {
 		if w == nil || reservedKey(name) {
 			continue
@@ -209,6 +258,10 @@ func (u *AccountUsage) UnmarshalJSON(b []byte) error {
 			if err := json.Unmarshal(v, &u.TokenExpired); err != nil {
 				return err
 			}
+		case keyRetryAfter:
+			_ = json.Unmarshal(v, &u.RetryAfter)
+		case keyFailures:
+			_ = json.Unmarshal(v, &u.Failures)
 		case keyFiveHour:
 			u.FiveHour = decodeWindow(v)
 		case keySevenDay:
@@ -235,7 +288,7 @@ func (u *AccountUsage) UnmarshalJSON(b []byte) error {
 
 func reservedKey(name string) bool {
 	switch name {
-	case keyFiveHour, keySevenDay, keyPolledAt, keyTokenExpired, keyLimits:
+	case keyFiveHour, keySevenDay, keyPolledAt, keyTokenExpired, keyLimits, keyRetryAfter, keyFailures:
 		return true
 	}
 	return false
@@ -426,6 +479,12 @@ func Fetch(token string) (AccountUsage, error) {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return AccountUsage{TokenExpired: true, PolledAt: time.Now().UTC()}, ErrTokenExpired
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return AccountUsage{}, &RateLimitedError{
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			Body:       snippet(body),
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return AccountUsage{}, fmt.Errorf("usage: HTTP %d: %s", resp.StatusCode, snippet(body))
 	}
@@ -442,6 +501,43 @@ func Fetch(token string) (AccountUsage, error) {
 // with 401. The returned AccountUsage has TokenExpired = true so the
 // caller can write it through to the cache without losing the signal.
 var ErrTokenExpired = fmt.Errorf("usage: token expired (re-login and `cux add`)")
+
+// RateLimitedError is the endpoint refusing a poll. It is carried as its own
+// type because the caller has to treat it differently from a failure: a
+// failed read that leaves the cached reading untouched looks stale, and a
+// stale reading is exactly what makes the next caller poll again (#53).
+type RateLimitedError struct {
+	RetryAfter time.Duration // 0 when the response named none
+	Body       string
+}
+
+func (e *RateLimitedError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("usage: rate limited by the endpoint, retry after %s", e.RetryAfter)
+	}
+	return "usage: rate limited by the endpoint"
+}
+
+// parseRetryAfter reads the header in either form the RFC allows: seconds, or
+// an HTTP date. Anything else is no answer, and the caller picks its own.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
 
 // LoadCache reads the on-disk usage cache. A missing file yields an
 // empty cache, not an error — fresh installs are normal.
