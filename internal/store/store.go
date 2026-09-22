@@ -90,6 +90,62 @@ func (s *State) LiveSeat(liveEmail, liveCacheKey string) (Account, bool) {
 	return Account{}, false
 }
 
+// BackfillIdentities fills in the account UUIDs that state.json is missing,
+// reading each from the seat's own stored oauthAccount backup.
+//
+// A seat with no identity keys on its email address (Account.CacheKey), and
+// two seats can share one address — a personal plan beside an org plan
+// (#24). Those two then answer to one usage-cache key and overwrite each
+// other's readings, and nothing downstream can tell them apart. The identity
+// was on disk the whole time; only state.json went without it, because these
+// seats were added before cux recorded it.
+//
+// Returns the cache keys that changed, old -> new, so the caller can carry
+// each seat's reading across instead of dropping it. A key that two seats
+// shared maps to "": its reading is a blend of both and belongs to neither,
+// so the caller should discard it and let the next poll write real ones.
+func (s *State) BackfillIdentities() map[string]string {
+	if s == nil {
+		return nil
+	}
+	var renamed map[string]string
+	for slot, a := range s.Accounts {
+		if a.UUID != "" || a.OrgUUID != "" {
+			continue
+		}
+		raw, err := ReadOAuthBlockBackup(slot, a.Email)
+		if err != nil {
+			continue
+		}
+		var parsed struct {
+			AccountUUID      string `json:"accountUuid"`
+			OrganizationUUID string `json:"organizationUuid"`
+		}
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			continue
+		}
+		if parsed.AccountUUID == "" && parsed.OrganizationUUID == "" {
+			continue
+		}
+		before := a.CacheKey()
+		a.UUID, a.OrgUUID = parsed.AccountUUID, parsed.OrganizationUUID
+		s.Accounts[slot] = a
+		after := a.CacheKey()
+		if after == before {
+			continue
+		}
+		if renamed == nil {
+			renamed = map[string]string{}
+		}
+		if _, clash := renamed[before]; clash {
+			renamed[before] = "" // twins shared it; it describes neither
+			continue
+		}
+		renamed[before] = after
+	}
+	return renamed
+}
+
 // State is the on-disk shape of state.json.
 type State struct {
 	Version           int                `json:"version"`

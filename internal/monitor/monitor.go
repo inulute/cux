@@ -84,6 +84,20 @@ func refreshAll(maxAge time.Duration) (usage.Cache, []error) {
 	if cache == nil {
 		cache = usage.Cache{}
 	}
+	// Repair seat identities first: a backfill changes cache keys, so it has
+	// to happen before anything is looked up or written under the old ones.
+	// This holds the state lock already, which is what the repair needs.
+	repaired := false
+	if renames := state.BackfillIdentities(); len(renames) > 0 {
+		for old, current := range renames {
+			u, had := cache[old]
+			delete(cache, old)
+			if had && current != "" {
+				cache[current] = u
+			}
+		}
+		repaired = true
+	}
 	// Fetch all accounts in parallel — latency is dominated by the API
 	// round-trip, so N sequential calls cost N× more than needed. Under
 	// coalescing (maxAge > 0), skip any account another session already
@@ -135,10 +149,16 @@ func refreshAll(maxAge time.Duration) (usage.Cache, []error) {
 		cache[r.cacheKey] = r.entry
 	}
 	// When every account was fresh enough the cache is untouched, so skip
-	// the write entirely — that no-op is the whole point of coalescing.
-	if fetched > 0 {
+	// the write entirely — that no-op is the whole point of coalescing. A
+	// repair rewrote keys, so that one always has to be persisted.
+	if fetched > 0 || repaired {
 		if err := usage.SaveCache(cache); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	if repaired {
+		if err := state.Save(); err != nil {
+			errs = append(errs, fmt.Errorf("monitor: save repaired identities: %w", err))
 		}
 	}
 	return cache, errs
