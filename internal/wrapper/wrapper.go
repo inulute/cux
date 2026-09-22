@@ -2042,6 +2042,11 @@ func resumeArgv(flags []string, resumeSID string, p *pending, autoMessage string
 		// Back to the same empty prompt, on the new seat.
 	case p != nil && p.resumeMessage != "":
 		out, replay = append(out, p.resumeMessage), true
+	case p != nil && p.trigger == history.TriggerManual:
+		// The user asked for this swap and is sitting right there. Resuming
+		// into auto_message would start a turn they did not ask for, on an
+		// account they chose by hand. A prompt intercepted by the threshold
+		// hook carries resumeMessage and is replayed by the case above.
 	case autoMessage != "":
 		out = append(out, autoMessage)
 	}
