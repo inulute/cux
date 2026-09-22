@@ -111,9 +111,63 @@ func SlashSwitch(target string, w io.Writer) error {
 		_ = monitor.RefreshActive(toEmail)
 	}(from.Email, to.Email)
 
-	fmt.Fprintf(w, "cux: %s → %s — switched in place; this conversation continues on %s.\n",
-		from.Email, to.Email, to.Email)
+	fmt.Fprint(w, renderSwitched(from, to, toU))
 	return nil
+}
+
+// renderSwitched is what the user reads instead of their prompt. Claude Code
+// prefixes a blocked prompt with "operation blocked by hook", so this has to
+// state plainly that the switch happened and that nothing was lost — the
+// prefix otherwise makes a success look like a failure.
+func renderSwitched(from, to store.Account, u usage.AccountUsage) string {
+	const width = 74
+	var b strings.Builder
+	line := func(label, value string) {
+		b.WriteString(fmt.Sprintf("│ %-9s %-*s │\n", label, width-10, clipTo(value, width-10)))
+	}
+	rule := strings.Repeat("─", width+2)
+
+	b.WriteString(":: A C C O U N T   S W I T C H E D ::\n\n")
+	b.WriteString("┌" + rule + "┐\n")
+	line("NOW LIVE", to.Email+slotSuffix(to))
+	line("PREVIOUS", from.Email+slotSuffix(from))
+	if head := headroom(u); head != "" {
+		line("HEADROOM", head)
+	}
+	line("SESSION", "kept — credentials swapped in place, nothing restarted")
+	b.WriteString("└" + rule + "┘\n")
+	return b.String()
+}
+
+func slotSuffix(a store.Account) string {
+	if a.Slot == 0 {
+		return ""
+	}
+	return fmt.Sprintf("  [slot %02d]", a.Slot)
+}
+
+// headroom reports what is left on the seat just switched to, so the user can
+// see straight away whether the swap actually bought them anything.
+func headroom(u usage.AccountUsage) string {
+	parts := make([]string, 0, 2)
+	if u.FiveHour != nil {
+		parts = append(parts, fmt.Sprintf("5h %.0f%% used", u.FiveHour.Utilization))
+	}
+	if u.SevenDay != nil {
+		parts = append(parts, fmt.Sprintf("7d %.0f%% used", u.SevenDay.Utilization))
+	}
+	return strings.Join(parts, "   ")
+}
+
+func clipTo(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 1 {
+		return string(r[:n])
+	}
+	return string(r[:n-1]) + "…"
 }
 
 // ForceSwitch is the out-of-band version of SlashSwitch. It is meant

@@ -246,8 +246,15 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 	for _, a := range pool {
 		candidates = append(candidates, strategy.Candidate{Email: a.Email, Slot: a.Slot, CacheKey: a.CacheKey()})
 	}
+	// Key the live seat the way every candidate is keyed (store.LiveSeat).
+	// Guessing from the cache instead worked only while the cache happened
+	// to hold an entry under one of the two spellings: on a cold cache the
+	// live seat matched no candidate, so rotation failed to exclude it and
+	// the threshold swap could pick the seat it was already on.
 	current := strategy.Candidate{Email: email, CacheKey: cacheKey}
-	if _, ok := cache[cacheKey]; !ok {
+	if seat, ok := state.LiveSeat(email, cacheKey); ok {
+		current = strategy.Candidate{Email: seat.Email, Slot: seat.Slot, CacheKey: seat.CacheKey()}
+	} else if _, ok := cache[cacheKey]; !ok {
 		if _, emailOK := cache[email]; emailOK {
 			current.CacheKey = email
 		}

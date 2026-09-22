@@ -57,3 +57,21 @@ func TestLiveSeatRejectsAnUnmanagedLogin(t *testing.T) {
 		t.Errorf("got (slot %d, true), want no match", seat.Slot)
 	}
 }
+
+// The cold-cache case: before LiveSeat, callers guessed the live seat's key
+// by looking for it in the usage cache. A fresh install has no cache, so the
+// guess kept the token's uuid|org key, matched no candidate, and rotation
+// offered the seat the session was already on.
+func TestLiveSeatWorksWithNoUsageCache(t *testing.T) {
+	st := &State{
+		ActiveSlot: 2,
+		Accounts: map[int]Account{
+			1: {Slot: 1, Email: "a@x.test"},
+			2: {Slot: 2, Email: "b@x.test"},
+		},
+	}
+	seat, ok := st.LiveSeat("b@x.test", "uuid|org")
+	if !ok || seat.CacheKey() != "b@x.test" {
+		t.Fatalf("got (%q, %v), want the store's own key", seat.CacheKey(), ok)
+	}
+}
