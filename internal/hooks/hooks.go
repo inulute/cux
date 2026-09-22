@@ -116,9 +116,7 @@ func UserPromptSubmit(stdin io.Reader, stdout io.Writer) error {
 	// the prompt themselves block it, so no Stop ever follows them.
 	if prompt == "/switch" || strings.HasPrefix(prompt, "/switch ") {
 		notePromptSubmitted(false)
-		target := strings.TrimSpace(strings.TrimPrefix(prompt, "/switch"))
-		writePromptSwitch(target, stdout)
-		return nil
+		return runSlashSwitch(strings.TrimSpace(strings.TrimPrefix(prompt, "/switch")), stdout)
 	}
 	if handled, err := handleCuxPromptCommand(prompt, stdout); handled || err != nil {
 		notePromptSubmitted(false)
@@ -360,9 +358,7 @@ func handleCuxPromptCommand(prompt string, stdout io.Writer) (bool, error) {
 	case "add":
 		args = append([]string{"add"}, fields[1:]...)
 	case "switch":
-		target := strings.TrimSpace(strings.TrimPrefix(prompt, "/cux:switch"))
-		writePromptSwitch(target, stdout)
-		return true, nil
+		return true, runSlashSwitch(strings.TrimSpace(strings.TrimPrefix(prompt, "/cux:switch")), stdout)
 	case "list":
 		refresh := hasArg(fields[1:], "--refresh")
 		text, err := renderPromptUsage(refresh)
@@ -409,6 +405,14 @@ func handleCuxPromptCommand(prompt string, stdout io.Writer) (bool, error) {
 		return true, nil
 	}
 
+	writePromptBlock(stdout, runCux(args...))
+	return true, nil
+}
+
+// runCux invokes a cux subcommand and returns what the user should see. The
+// hook already holds CUX_WRAPPED and CUX_WRAPPER_PID, so the child resolves
+// the same session this hook was fired for.
+func runCux(args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "cux", args...)
@@ -418,43 +422,51 @@ func handleCuxPromptCommand(prompt string, stdout io.Writer) (bool, error) {
 	cmd.Stderr = &out
 	err := cmd.Run()
 	text := strings.TrimSpace(out.String())
-	if ctx.Err() == context.DeadlineExceeded {
-		text = "cux: command timed out"
-	} else if err != nil && text == "" {
-		text = "cux: " + err.Error()
-	} else if err != nil {
-		text = text + "\n" + "cux: command failed: " + err.Error()
-	} else if text == "" {
-		text = "cux: done"
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		return "cux: command timed out"
+	case err != nil && text == "":
+		return "cux: " + err.Error()
+	case err != nil:
+		return text + "\ncux: command failed: " + err.Error()
+	case text == "":
+		return "cux: done"
 	}
-	writePromptBlock(stdout, text)
-	return true, nil
+	return text
 }
 
-func writePromptSwitch(target string, stdout io.Writer) {
-	if strings.TrimSpace(target) == "" {
+// runSlashSwitch handles a /switch by running the command the slash file
+// would have run, `cux __slash-switch`, and showing its result instead of the
+// prompt.
+//
+// It has to be run from here rather than left to expand. This hook fires
+// before prompt processing and a slash command does not reliably expand —
+// least of all on the hard-limited seat where /switch matters most — so the
+// prompt would reach the model as the literal text "/switch" and be answered
+// as a question about switching rather than performed.
+//
+// What changed is only what gets run. This used to signal the wrapper, which
+// stopped claude and relaunched it with --resume; SlashSwitch rewrites the
+// live credential blob and returns, and because credentials are read per
+// request the conversation simply carries on (0a914db). The user asked to
+// change account, not to restart their session.
+func runSlashSwitch(target string, stdout io.Writer) error {
+	target = strings.TrimSpace(target)
+	// Nowhere to rotate to is worth saying here: the command would only fail
+	// or land on another exhausted seat. An explicit target is the user's own
+	// call and is never second-guessed.
+	if target == "" {
 		if ok, text := promptSwitchHasTarget(); !ok {
 			writePromptBlock(stdout, text)
-			return
+			return nil
 		}
 	}
-	pid, err := wrapperPID()
-	if err != nil {
-		writePromptBlock(stdout, "cux: "+err.Error())
-		return
+	args := []string{"__slash-switch"}
+	if target != "" {
+		args = append(args, target)
 	}
-	if err := signals.Write(pid, signals.SwitchRequested, signals.SwitchRequestedPayload{
-		Target:    strings.TrimSpace(target),
-		Timestamp: time.Now().UTC(),
-	}); err != nil {
-		writePromptBlock(stdout, "cux: "+err.Error())
-		return
-	}
-	reason := "cux: switching accounts..."
-	if strings.TrimSpace(target) != "" {
-		reason = "cux: switching accounts to " + strings.TrimSpace(target) + "..."
-	}
-	writePromptBlock(stdout, reason)
+	writePromptBlock(stdout, runCux(args...))
+	return nil
 }
 
 func promptSwitchHasTarget() (bool, string) {

@@ -437,3 +437,51 @@ func TestPromptSwitchHasTargetStillBlocksOnAFreshExhaustedPool(t *testing.T) {
 		t.Fatal("a genuinely exhausted pool should still block the prompt")
 	}
 }
+
+// /switch must never signal the wrapper. That path stopped claude and
+// relaunched it with --resume, on a session the user was sitting in front of
+// having asked only to change account. It is handled here now by running
+// `cux __slash-switch`, which rewrites the live credentials in place.
+func TestUserPromptSubmitSwitchNeverSignalsTheWrapper(t *testing.T) {
+	for _, prompt := range []string{`{"prompt":"/switch"}`, `{"prompt":"/switch 2"}`, `{"prompt":"/cux:switch"}`} {
+		t.Run(prompt, func(t *testing.T) {
+			t.Setenv("CUX_WRAPPED", "1")
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			t.Setenv("CUX_CREDS_BACKEND", "file")
+			t.Setenv("CUX_CONFIG_FILE", t.TempDir()+"/config.json")
+
+			state := &store.State{
+				ActiveSlot: 1,
+				Sequence:   []int{1, 2},
+				Accounts: map[int]store.Account{
+					1: {Slot: 1, Email: "a@x.test"},
+					2: {Slot: 2, Email: "b@x.test"},
+				},
+			}
+			if err := state.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := usage.SaveCache(usage.Cache{
+				"a@x.test": hookAccountUsage(80, 40),
+				"b@x.test": hookAccountUsage(5, 10),
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := UserPromptSubmit(strings.NewReader(prompt), &out); err != nil {
+				t.Fatal(err)
+			}
+			if got := out.String(); strings.Contains(got, "switching accounts") {
+				t.Fatalf("hook asked the wrapper for a stop-swap-relaunch: %s", got)
+			}
+			// The prompt is always handled here: letting it through sends the
+			// literal text "/switch" to the model, which answers it as a
+			// question instead of performing it.
+			if got := out.String(); !strings.Contains(got, `"decision":"block"`) {
+				t.Fatalf("/switch reached the model as a prompt: %s", got)
+			}
+		})
+	}
+}
