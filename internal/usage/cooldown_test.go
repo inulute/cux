@@ -97,3 +97,17 @@ func TestCooldownRoundTripsThroughTheCache(t *testing.T) {
 		t.Error("retry_after must not be read back as a model window")
 	}
 }
+
+// The cap has to stay clear of StaleAfter. A held-back seat keeps serving its
+// last reading, and once that reads stale the fail-open rule (#37) treats it
+// as having room — so a hold-off long enough to age a reading out would turn
+// a rate limit into "this seat is fine", which is how #37 happened.
+func TestCooldownCapStaysUnderStaleAfter(t *testing.T) {
+	longest := cooldownFor(1 << 20)
+	if longest >= StaleAfter {
+		t.Fatalf("cooldown caps at %s, StaleAfter is %s: a held seat ages out of trust", longest, StaleAfter)
+	}
+	if longest > StaleAfter/2 {
+		t.Errorf("cooldown cap %s leaves little room under StaleAfter %s", longest, StaleAfter)
+	}
+}
