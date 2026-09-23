@@ -111,3 +111,59 @@ func TestCooldownCapStaysUnderStaleAfter(t *testing.T) {
 		t.Errorf("cooldown cap %s leaves little room under StaleAfter %s", longest, StaleAfter)
 	}
 }
+
+// The open window set (#52) treats any unknown top-level key that looks like
+// a window as a model window. The cooldown fields sit at that same level, so
+// they have to stay out of it — and a refusal has to leave a limits[]-derived
+// window alone, since the last good reading is the whole point of holding off.
+func TestCooldownAndModelWindowsDoNotLeakIntoEachOther(t *testing.T) {
+	at := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+
+	// A reading that came from limits[], now carrying a hold-off.
+	u := AccountUsage{
+		PolledAt:   at.Add(-time.Hour),
+		SevenDay:   &Window{Utilization: 59},
+		Models:     map[string]*Window{"seven_day_fable": {Utilization: 100}},
+		RetryAfter: at.Add(time.Minute),
+		Failures:   2,
+	}
+	b, err := u.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back AccountUsage
+	if err := back.UnmarshalJSON(b); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, k := range []string{keyRetryAfter, keyFailures, keyLimits} {
+		if _, leaked := back.Models[k]; leaked {
+			t.Errorf("%q came back as a model window", k)
+		}
+	}
+	if len(back.Models) != 1 || back.Models["seven_day_fable"].Utilization != 100 {
+		t.Errorf("model windows = %v, want just seven_day_fable at 100", back.Models)
+	}
+	if !back.RetryAfter.Equal(u.RetryAfter) || back.Failures != 2 {
+		t.Errorf("hold-off lost: %v / %d", back.RetryAfter, back.Failures)
+	}
+}
+
+// And the other direction: a live response carrying limits[] must not invent
+// cooldown state, or a healthy seat would hold itself back.
+func TestAFreshResponseCarriesNoHoldOff(t *testing.T) {
+	u, err := parseResponse([]byte(`{
+	  "seven_day": {"utilization": 59, "resets_at": null},
+	  "limits": [{"kind": "weekly_scoped", "percent": 100, "resets_at": null,
+	              "scope": {"model": {"display_name": "Fable"}}}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !u.RetryAfter.IsZero() || u.Failures != 0 {
+		t.Errorf("a successful poll must carry no hold-off: %v / %d", u.RetryAfter, u.Failures)
+	}
+	if u.Models["seven_day_fable"] == nil {
+		t.Error("lost the limits[] window")
+	}
+}
