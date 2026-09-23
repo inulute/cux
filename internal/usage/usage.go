@@ -54,8 +54,9 @@ type Window struct {
 type AccountUsage struct {
 	FiveHour *Window
 	SevenDay *Window
-	// Models holds every other usage window the endpoint reports, keyed by
-	// the API's own name (`seven_day_opus`, `seven_day_overage_included`, …).
+	// Models holds every other usage window the endpoint reports: top-level
+	// windows under the API's own name, limits[] model scopes under
+	// seven_day_<family> (`seven_day_fable`).
 	//
 	// Open rather than a fixed set of fields, because the set is not ours to
 	// fix. Anthropic exposes several model- and program-specific limits and
@@ -255,11 +256,10 @@ func (u *AccountUsage) setModel(name string, w *Window) {
 //
 // Matched on shape rather than on a name prefix deliberately. The limit
 // types Anthropic names in its own rejection text do not share one prefix
-// (`overage` sits outside the `seven_day_*` family, and the Fable window is
-// spelled `seven_day_overage_included` — a name-based guess catches neither),
-// and the rejection vocabulary is a different surface from this endpoint's
-// response anyway. Shape survives both, and matches the package's standing
-// promise to tolerate unknown fields rather than fail on them.
+// (`overage` sits outside the `seven_day_*` family, and the rejection's Fable
+// type is `seven_day_overage_included`, a key this endpoint never sends —
+// Fable arrives in limits[]), so a name-based guess catches neither. Shape
+// matches the package's promise to tolerate unknown fields.
 func decodeWindow(v json.RawMessage) *Window {
 	var probe struct {
 		Utilization *float64 `json:"utilization"`
