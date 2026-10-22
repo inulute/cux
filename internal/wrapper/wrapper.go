@@ -818,7 +818,11 @@ func step(
 	//    afterwards (#39). Moving it while nobody is waiting is also
 	//    strictly cheaper than moving it on the prompt that starts real
 	//    work, which is when it used to happen.
-	if idleSwapDue(cfg, act, mu, swap) {
+	//
+	//    A session nobody has typed into is left alone (idleghost.go): it
+	//    has nothing to resume, so moving it only opens an empty ghost
+	//    session beside it.
+	if idleSwapDue(cfg, act, mu, swap) && idleSessionHasUserMessage(mu, sessionID) {
 		// Coalesced across processes: with many idle terminals this must
 		// not become one usage poll per terminal per check. Errors are
 		// dropped on purpose — including a lock timeout under contention.
