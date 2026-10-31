@@ -201,9 +201,9 @@ func TestPickNextDrain_FallsBackTo5hCapacity(t *testing.T) {
 	// Every account is over 7d cap, but b@x has 5h capacity.
 	accts := threeAccounts()
 	cache := usage.Cache{
-		"a@x": u(20, 96), // current
-		"b@x": u(50, 96), // 7d maxed but 5h has room
-		"c@x": u(95, 96), // 7d and 5h both maxed
+		"a@x": u(20, 96),  // current
+		"b@x": u(50, 96),  // 7d maxed but 5h has room
+		"c@x": u(100, 96), // 7d and 5h both maxed
 	}
 	pick, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds(), now())
 	if !ok || pick.Email != "b@x" {
@@ -219,7 +219,7 @@ func TestPickNextDrain_NeverPicks7DayHardFull(t *testing.T) {
 	cache := usage.Cache{
 		"a@x": u(20, 96),  // current
 		"b@x": u(50, 100), // 5h has room but 7d hard-full
-		"c@x": u(95, 96),  // 5h maxed
+		"c@x": u(100, 96), // 5h maxed
 	}
 	if _, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds(), now()); ok {
 		t.Fatal("drain should not pick 7d-hard-full b@x even with 5h room")
@@ -245,9 +245,9 @@ func TestPickNextDrain_NoCandidates(t *testing.T) {
 	// Everything is fully maxed.
 	accts := threeAccounts()
 	cache := usage.Cache{
-		"a@x": u(95, 96),
-		"b@x": u(95, 96),
-		"c@x": u(95, 96),
+		"a@x": u(100, 96),
+		"b@x": u(100, 96),
+		"c@x": u(100, 96),
 	}
 	if _, ok := PickNext(KindDrain, nil, accts, accts[0], cache, defaultThresholds(), now()); ok {
 		t.Fatal("drain should report ok=false when nothing has capacity")

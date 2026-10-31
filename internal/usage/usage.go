@@ -708,7 +708,7 @@ func HasSwitchCapacity(u AccountUsage, t Thresholds, now time.Time) bool {
 	}
 	cap5 := t.FiveHour
 	if cap5 == 0 || cap5 == 100 {
-		cap5 = 90
+		cap5 = 100
 	}
 	return u.FiveHour == nil || u.FiveHour.Utilization < float64(cap5)
 }

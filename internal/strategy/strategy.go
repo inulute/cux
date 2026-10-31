@@ -275,7 +275,7 @@ func pickDrain(
 	}
 	cap5 := thresholds.FiveHour
 	if cap5 == 0 || cap5 == 100 {
-		cap5 = 90
+		cap5 = 100
 	}
 	// Each pass runs twice: first over candidates whose model-specific
 	// weekly windows (Opus/Sonnet) still have room, then over the rest.
@@ -471,7 +471,7 @@ func hasFiveHourCapacity(cache usage.Cache, email string, thresholds usage.Thres
 	}
 	cap5 := thresholds.FiveHour
 	if cap5 == 0 || cap5 == 100 {
-		cap5 = 90
+		cap5 = 100
 	}
 	return u.FiveHour.Utilization < float64(cap5)
 }

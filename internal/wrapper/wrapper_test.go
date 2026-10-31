@@ -32,7 +32,7 @@ func TestResolveTargetDoesNotRotateToWeeklyFullFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": accountUsage(94, 67),
+		"a@x.test": accountUsage(100, 67),
 		"b@x.test": accountUsage(0, 100),
 	}); err != nil {
 		t.Fatal(err)

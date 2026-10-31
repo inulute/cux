@@ -45,7 +45,7 @@ func TestRenderPromptUsageReportsAllExhaustedAtEffectiveCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": hookAccountUsage(94, 67),
+		"a@x.test": hookAccountUsage(100, 67),
 		"b@x.test": hookAccountUsage(0, 100),
 	}); err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestUserPromptSubmitBareSwitchBlocksWhenAllAccountsExhausted(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": hookAccountUsage(94, 67),
+		"a@x.test": hookAccountUsage(100, 67),
 		"b@x.test": hookAccountUsage(0, 100),
 	}); err != nil {
 		t.Fatal(err)
