@@ -22,75 +22,44 @@ func TestIsOverThreshold(t *testing.T) {
 			name: "7d crosses",
 			u: AccountUsage{
 				SevenDay: ptr(Window{Utilization: 96, ResetsAt: &now}),
-				FiveHour: ptr(Window{Utilization: 20}),
 				PolledAt: now,
 			},
-			t:        Thresholds{FiveHour: 90, SevenDay: 95},
+			t:        Thresholds{SevenDay: 95},
 			wantOver: true,
 			wantSub:  "7d",
 		},
-		{
-			name: "5h crosses, 7d safe",
-			u: AccountUsage{
-				FiveHour: ptr(Window{Utilization: 92}),
-				SevenDay: ptr(Window{Utilization: 50}),
-			},
-			t:        Thresholds{FiveHour: 90, SevenDay: 95},
-			wantOver: true,
-			wantSub:  "5h",
-		},
+
 		{
 			name: "both under",
 			u: AccountUsage{
-				FiveHour: ptr(Window{Utilization: 20}),
 				SevenDay: ptr(Window{Utilization: 50}),
 			},
-			t:        Thresholds{FiveHour: 90, SevenDay: 95},
+			t:        Thresholds{SevenDay: 95},
 			wantOver: false,
 		},
 		{
 			name: "100 means reactive-only — even at 99% we don't fire",
 			u: AccountUsage{
-				FiveHour: ptr(Window{Utilization: 99}),
 				SevenDay: ptr(Window{Utilization: 99}),
 			},
-			t:        Thresholds{FiveHour: 100, SevenDay: 100},
+			t:        Thresholds{SevenDay: 100},
 			wantOver: false,
 		},
-		{
-			name: "threshold=100 but 5h at hard limit — must trigger",
-			u: AccountUsage{
-				FiveHour: ptr(Window{Utilization: 100}),
-				SevenDay: ptr(Window{Utilization: 31}),
-			},
-			t:        Thresholds{FiveHour: 100, SevenDay: 100},
-			wantOver: true,
-			wantSub:  "hard limit",
-		},
+
 		{
 			name: "threshold=100 but 7d at hard limit — must trigger",
 			u: AccountUsage{
-				FiveHour: ptr(Window{Utilization: 0}),
 				SevenDay: ptr(Window{Utilization: 100}),
 			},
-			t:        Thresholds{FiveHour: 100, SevenDay: 100},
+			t:        Thresholds{SevenDay: 100},
 			wantOver: true,
 			wantSub:  "hard limit",
 		},
-		{
-			name: "missing window is not 'safe'; we just don't decide on it",
-			u: AccountUsage{
-				FiveHour: ptr(Window{Utilization: 92}),
-				// SevenDay nil
-			},
-			t:        Thresholds{FiveHour: 90, SevenDay: 95},
-			wantOver: true, // 5h still crosses
-			wantSub:  "5h",
-		},
+
 		{
 			name:     "all windows missing → no decision",
 			u:        AccountUsage{},
-			t:        Thresholds{FiveHour: 90, SevenDay: 95},
+			t:        Thresholds{SevenDay: 95},
 			wantOver: false,
 		},
 	}
@@ -113,7 +82,7 @@ func TestIsOverThreshold(t *testing.T) {
 func TestDefaultThresholds(t *testing.T) {
 	t.Parallel()
 	d := DefaultThresholds()
-	if d.FiveHour != 100 || d.SevenDay != 100 {
+	if d.SevenDay != 100 {
 		t.Fatalf("unexpected defaults %+v", d)
 	}
 }
@@ -212,16 +181,15 @@ func TestSettledClearsWindowsThatHaveRolledOver(t *testing.T) {
 	now := time.Now()
 	past, future := now.Add(-5*time.Minute), now.Add(2*time.Hour)
 	u := AccountUsage{
-		FiveHour: &Window{Utilization: 100, ResetsAt: &past},
 		SevenDay: &Window{Utilization: 42, ResetsAt: &future},
-		Models:   map[string]*Window{"seven_day_opus": {Utilization: 100, ResetsAt: &past}},
+		Models: map[string]*Window{
+			"seven_day_opus":   {Utilization: 100, ResetsAt: &past},
+			"seven_day_sonnet": {Utilization: 100, ResetsAt: &past},
+		},
 		PolledAt: now.Add(-time.Minute),
 	}
 	got := u.Settled(now)
-	if got.FiveHour != nil {
-		t.Error("an elapsed 5h window should read as unknown")
-	}
-	if got.Models["seven_day_opus"] != nil {
+	if got.Models["seven_day_opus"] != nil || got.Models["seven_day_sonnet"] != nil {
 		t.Error("an elapsed model window should read as unknown")
 	}
 	// Settled answers a question about now; it must not rewrite the reading
@@ -236,8 +204,8 @@ func TestSettledClearsWindowsThatHaveRolledOver(t *testing.T) {
 		t.Error("Settled must preserve PolledAt so staleness stays knowable")
 	}
 	// A window with no reset stamp has no elapsed-ness to judge.
-	noStamp := AccountUsage{FiveHour: &Window{Utilization: 100}}
-	if noStamp.Settled(now).FiveHour == nil {
+	noStamp := AccountUsage{SevenDay: &Window{Utilization: 100}}
+	if noStamp.Settled(now).SevenDay == nil {
 		t.Error("a window with no resets_at must not be cleared")
 	}
 }
@@ -247,9 +215,9 @@ func TestSettledClearsWindowsThatHaveRolledOver(t *testing.T) {
 func TestIsOverThresholdAtIgnoresAnElapsedWindow(t *testing.T) {
 	now := time.Now()
 	past, future := now.Add(-time.Minute), now.Add(time.Hour)
-	th := Thresholds{FiveHour: 98, SevenDay: 98}
+	th := Thresholds{SevenDay: 98}
 
-	reset := AccountUsage{FiveHour: &Window{Utilization: 100, ResetsAt: &past}}
+	reset := AccountUsage{SevenDay: &Window{Utilization: 100, ResetsAt: &past}}
 	if over, why := IsOverThresholdAt(reset, th, now); over {
 		t.Fatalf("a window that already reset reported over threshold: %s", why)
 	}
@@ -258,7 +226,7 @@ func TestIsOverThresholdAtIgnoresAnElapsedWindow(t *testing.T) {
 		t.Fatal("IsOverThreshold should still report the recorded utilization")
 	}
 
-	live := AccountUsage{FiveHour: &Window{Utilization: 100, ResetsAt: &future}}
+	live := AccountUsage{SevenDay: &Window{Utilization: 100, ResetsAt: &future}}
 	if over, _ := IsOverThresholdAt(live, th, now); !over {
 		t.Fatal("a window still running at 100% must remain over threshold")
 	}

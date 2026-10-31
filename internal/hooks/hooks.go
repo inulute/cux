@@ -215,7 +215,7 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 	}
 
 	// Refresh all accounts before picking a target. The cache may be stale
-	// (e.g. a candidate's 5h window has reset since the last poll) and we
+	// (e.g. a candidate's window has reset since the last poll) and we
 	// must not switch to an account that looks exhausted only because the
 	// cache hasn't caught up yet. The hook timeout is 20 s so a refresh
 	// here is safe.
@@ -224,7 +224,7 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 		// Re-read the current account from the fresh cache.
 		if freshU, ok := cachedUsage(fresh, cacheKey, email); ok {
 			u = freshU
-			// If the current account itself has recovered (e.g. its 5h window
+			// If the current account itself has recovered (e.g. its window
 			// just reset), don't switch — let the prompt through. A refresh
 			// that failed leaves the old reading here, so re-check staleness
 			// too rather than acting on what the refresh could not replace.
@@ -314,10 +314,9 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 
 	// Only suggest raising the threshold when accounts are throttled by it
 	// (not at 100%). At 100% the threshold is irrelevant — only a reset helps.
-	trulyExhausted := (u.FiveHour != nil && u.FiveHour.Utilization >= 100) ||
-		(u.SevenDay != nil && u.SevenDay.Utilization >= 100)
+	trulyExhausted := u.SevenDay != nil && u.SevenDay.Utilization >= 100
 	if !trulyExhausted {
-		threshold := cfg.Thresholds.FiveHour
+		threshold := cfg.Thresholds.SevenDay
 		if threshold == 0 {
 			threshold = 90
 		}
@@ -325,7 +324,7 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 		if suggested > 95 {
 			suggested = 95
 		}
-		b.WriteString(fmt.Sprintf("cux: threshold is %d%% — raise it with:  /cux:config set thresholds.five_hour %d\n",
+		b.WriteString(fmt.Sprintf("cux: threshold is %d%% — raise it with:  /cux:config set thresholds.seven_day %d\n",
 			threshold, suggested))
 	}
 
@@ -569,9 +568,9 @@ func renderPromptUsage(refresh bool) (string, error) {
 		b.WriteString(fmt.Sprintf("│  %-96s│\n", "USAGE SNAPSHOT : REFRESHED NOW"))
 	}
 	b.WriteString("└──────────────────────────────────────────────────────────────────────────────────────────────────┘\n\n")
-	b.WriteString("┌──────┬───────────────────────────┬────────┬──────────────────────┬──────────────────────┬────────┐\n")
-	b.WriteString("│ SLOT │ ACCOUNT                   │ STATE  │ 5H USAGE             │ 7D USAGE             │ RESET  │\n")
-	b.WriteString("├──────┼───────────────────────────┼────────┼──────────────────────┼──────────────────────┼────────┤\n")
+	b.WriteString("┌──────┬──────────────────────────────────────────────────┬────────┬──────────────────────┬────────┐\n")
+	b.WriteString("│ SLOT │ ACCOUNT                                          │ STATE  │ 7D USAGE             │ RESET  │\n")
+	b.WriteString("├──────┼──────────────────────────────────────────────────┼────────┼──────────────────────┼────────┤\n")
 
 	anyUsable := false
 	slots := state.SortedSlots()
@@ -604,10 +603,10 @@ func renderPromptUsage(refresh bool) (string, error) {
 		}
 		b.WriteString(renderAccountRow(slot, acct.Email, u, stateLabel, stale))
 		if i != len(slots)-1 {
-			b.WriteString("│      │                           │        │                      │                      │        │\n")
+			b.WriteString("│      │                                                  │        │                      │        │\n")
 		}
 	}
-	b.WriteString("└──────┴───────────────────────────┴────────┴──────────────────────┴──────────────────────┴────────┘")
+	b.WriteString("└──────┴──────────────────────────────────────────────────┴────────┴──────────────────────┴────────┘")
 	if !anyUsable {
 		b.WriteString("\n\nSTATUS : ALL MANAGED ACCOUNTS EXHAUSTED")
 		if slot, email, reset, ok := nextResetSlot(state, cache); ok {
@@ -706,18 +705,17 @@ func displayConfigValue(v string) string {
 }
 
 func renderAccountRow(slot int, email string, u usage.AccountUsage, stateLabel string, stale bool) string {
-	five, seven, reset := usageBlock(u.FiveHour), usageBlock(u.SevenDay), resetForAccount(u)
+	seven, reset := usageBlock(u.SevenDay), resetForAccount(u)
 	if stale {
 		// This is the surface the reporter of issue #46 was reading while the
 		// cache sat twelve days old, so it is the one that most needs to stop
 		// printing percentages it cannot stand behind.
-		five, seven, reset = "?", "?", "?"
+		seven, reset = "?", "?"
 	}
-	line := fmt.Sprintf("│ %-4s │ %-25s │ %-6s │ %-20s │ %-20s │ %-6s │\n",
+	line := fmt.Sprintf("│ %-4s │ %-48s │ %-6s │ %-20s │ %-6s │\n",
 		fmt.Sprintf("%02d", slot),
-		clipDisplay(email, 25),
+		clipDisplay(email, 48),
 		clipDisplay(strings.ToUpper(stateLabel), 6),
-		five,
 		seven,
 		clipDisplay(reset, 6),
 	)
@@ -797,14 +795,9 @@ func resetForWindow(w *usage.Window) string {
 	return shortDuration(time.Until(*w.ResetsAt))
 }
 
-// resetForAccount returns the reset time of the binding capacity window.
-// When 7D is hard-full it is the binding constraint (5H resetting does not
-// restore capacity), so we surface the 7D reset time instead of 5H.
+// resetForAccount returns the reset time of the 7D window.
 func resetForAccount(u usage.AccountUsage) string {
-	if windowFull(u.SevenDay) {
-		return resetForWindow(u.SevenDay)
-	}
-	return resetForWindow(u.FiveHour)
+	return resetForWindow(u.SevenDay)
 }
 
 func capacityLabel(u usage.AccountUsage, thresholds usage.Thresholds) string {
@@ -834,7 +827,7 @@ func nextUsableSlot(state *store.State, cache usage.Cache, thresholds usage.Thre
 		if u.StaleReading(now) {
 			continue
 		}
-		return s, acct.Email, resetForWindow(u.FiveHour), true
+		return s, acct.Email, resetForWindow(u.SevenDay), true
 	}
 	return 0, "", "", false
 }
@@ -860,11 +853,11 @@ func nextResetSlot(state *store.State, cache usage.Cache) (slot int, email, rese
 	for _, s := range slots {
 		acct := state.Accounts[s]
 		u, _ := cachedUsage(cache, acct.CacheKey(), acct.Email)
-		if u.FiveHour == nil || u.FiveHour.ResetsAt == nil {
+		if u.SevenDay == nil || u.SevenDay.ResetsAt == nil {
 			continue
 		}
-		if best == nil || u.FiveHour.ResetsAt.Before(*best) {
-			t := *u.FiveHour.ResetsAt
+		if best == nil || u.SevenDay.ResetsAt.Before(*best) {
+			t := *u.SevenDay.ResetsAt
 			best = &t
 			bestSlot = s
 			bestEmail = acct.Email
@@ -882,7 +875,7 @@ func windowFull(w *usage.Window) bool {
 
 func nextPromptReset(u usage.AccountUsage) string {
 	var soonest *time.Time
-	for _, w := range []*usage.Window{u.FiveHour, u.SevenDay} {
+	for _, w := range []*usage.Window{u.SevenDay} {
 		if w == nil || w.ResetsAt == nil {
 			continue
 		}

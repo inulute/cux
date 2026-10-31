@@ -45,8 +45,8 @@ func TestRenderPromptUsageReportsAllExhaustedAtEffectiveCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": hookAccountUsage(94, 67),
-		"b@x.test": hookAccountUsage(0, 100),
+		"a@x.test": hookAccountUsage(100),
+		"b@x.test": hookAccountUsage(100),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -85,8 +85,8 @@ func TestUserPromptSubmitBareSwitchBlocksWhenAllAccountsExhausted(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": hookAccountUsage(94, 67),
-		"b@x.test": hookAccountUsage(0, 100),
+		"a@x.test": hookAccountUsage(100),
+		"b@x.test": hookAccountUsage(100),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestUserPromptSubmitBareSwitchBlocksWhenAllAccountsExhausted(t *testing.T) 
 }
 
 // TestHandleAutoSwitchPrompt_HardBlock_Threshold100 verifies that when the
-// active account is at 100% 5h utilization AND thresholds are set to 100
+// active account is at 100% 7d utilization AND thresholds are set to 100
 // (default/"reactive-only"), the prompt-submit hook switches credentials
 // in-place and approves the prompt (empty stdout) so Claude Code sends it
 // on the new account without any manual resend.
@@ -175,7 +175,7 @@ func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Two accounts: slot 1 active and hard-blocked at 100% 5h, slot 2 free.
+	// Two accounts: slot 1 active and hard-blocked at 100% 7d, slot 2 free.
 	state := &store.State{
 		ActiveSlot: 1,
 		Sequence:   []int{1, 2},
@@ -188,8 +188,8 @@ func TestHandleAutoSwitchPrompt_HardBlock_Threshold100(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"blocked@x.test": hookAccountUsage(100, 31), // 5h at hard limit
-		"free@x.test":    hookAccountUsage(0, 50),   // plenty of room
+		"blocked@x.test": hookAccountUsage(100), // 7d at hard limit
+		"free@x.test":    hookAccountUsage(50),  // plenty of room
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -264,16 +264,15 @@ func TestRateLimitStopFailureWritesSignal(t *testing.T) {
 	}
 }
 
-func hookAccountUsage(five, seven float64) usage.AccountUsage {
-	w5 := usage.Window{Utilization: five}
+func hookAccountUsage(seven float64) usage.AccountUsage {
 	w7 := usage.Window{Utilization: seven}
-	return usage.AccountUsage{FiveHour: &w5, SevenDay: &w7}
+	return usage.AccountUsage{SevenDay: &w7}
 }
 
 // agedAccountUsage is hookAccountUsage with a poll time, so a test can build
 // the reading a frozen cache actually holds.
-func agedAccountUsage(five, seven float64, age time.Duration) usage.AccountUsage {
-	u := hookAccountUsage(five, seven)
+func agedAccountUsage(seven float64, age time.Duration) usage.AccountUsage {
+	u := hookAccountUsage(seven)
 	u.PolledAt = time.Now().UTC().Add(-age)
 	return u
 }
@@ -302,9 +301,9 @@ func TestRenderPromptUsageMarksAStaleCacheUnknown(t *testing.T) {
 	}
 	const stale = 307 * time.Hour // 12.8 days, as reported
 	if err := usage.SaveCache(usage.Cache{
-		"cancelled@x.test": agedAccountUsage(0, 23, stale),
-		"active@x.test":    agedAccountUsage(0, 0, stale),
-		"other@x.test":     agedAccountUsage(4, 42, stale),
+		"cancelled@x.test": agedAccountUsage(23, stale),
+		"active@x.test":    agedAccountUsage(0, stale),
+		"other@x.test":     agedAccountUsage(42, stale),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -354,8 +353,8 @@ func TestRenderPromptUsageLeavesAFreshCacheAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": agedAccountUsage(10, 20, time.Minute),
-		"b@x.test": agedAccountUsage(5, 15, time.Minute),
+		"a@x.test": agedAccountUsage(20, time.Minute),
+		"b@x.test": agedAccountUsage(15, time.Minute),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -398,8 +397,8 @@ func TestPromptSwitchHasTargetDoesNotBlockOnAStaleCache(t *testing.T) {
 	}
 	// Both accounts look completely exhausted — on readings 12.8 days old.
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": agedAccountUsage(100, 100, 307*time.Hour),
-		"b@x.test": agedAccountUsage(100, 100, 307*time.Hour),
+		"a@x.test": agedAccountUsage(100, 307*time.Hour),
+		"b@x.test": agedAccountUsage(100, 307*time.Hour),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -428,8 +427,8 @@ func TestPromptSwitchHasTargetStillBlocksOnAFreshExhaustedPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": agedAccountUsage(100, 100, time.Minute),
-		"b@x.test": agedAccountUsage(100, 100, time.Minute),
+		"a@x.test": agedAccountUsage(100, time.Minute),
+		"b@x.test": agedAccountUsage(100, time.Minute),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -463,8 +462,8 @@ func TestUserPromptSubmitSwitchNeverSignalsTheWrapper(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := usage.SaveCache(usage.Cache{
-				"a@x.test": hookAccountUsage(80, 40),
-				"b@x.test": hookAccountUsage(5, 10),
+				"a@x.test": hookAccountUsage(40),
+				"b@x.test": hookAccountUsage(10),
 			}); err != nil {
 				t.Fatal(err)
 			}

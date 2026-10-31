@@ -8,14 +8,13 @@
 //     or the strategy auto-orders by highest 7-day utilisation
 //     (drain the closest-to-limit account first).
 //   - Balanced: spread load by always picking the account with the
-//     lowest 7-day utilisation, breaking ties by lowest 5-hour
-//     utilisation.
+//     lowest 7-day utilisation.
 //   - Manual: never picks; PickNext returns ok=false. The user must
 //     supply an explicit target via /switch.
 //
-// Drain mode also implements "5-hour recovery": ShouldRebalance
-// returns the account to swap *back to* when a higher-priority
-// account has recovered from its 5-hour limit. The wrapper calls this
+// Drain mode also implements recovery: ShouldRebalance returns the
+// account to swap *back to* when a higher-priority account has
+// recovered. The wrapper calls this
 // at every Stop signal so swaps stay on the priority account whenever
 // it's healthy.
 //
@@ -166,7 +165,7 @@ func PickNext(
 // no rebalance is warranted.
 //
 // Called at every Stop signal so the wrapper can hop back to a
-// preferred account as soon as a 5-hour window resets.
+// preferred account as soon as its window resets.
 func ShouldRebalance(
 	kind Kind,
 	order []string,
@@ -273,10 +272,6 @@ func pickDrain(
 	if cap7 == 0 || cap7 == 100 {
 		cap7 = 95
 	}
-	cap5 := thresholds.FiveHour
-	if cap5 == 0 || cap5 == 100 {
-		cap5 = 90
-	}
 	// Each pass runs twice: first over candidates whose model-specific
 	// weekly windows (Opus/Sonnet) still have room, then over the rest.
 	// Model windows never make an account ineligible — cux cannot know
@@ -293,15 +288,13 @@ func pickDrain(
 			if !isAvailable(cache, c.cacheKey()) {
 				continue
 			}
-			if fiveHourUtil(cache, c.cacheKey()) < float64(cap5) && sevenDayUtil(cache, c.cacheKey()) < float64(cap7) {
+			if sevenDayUtil(cache, c.cacheKey()) < float64(cap7) {
 				return Pick{Email: c.Email, Slot: c.Slot, Reason: "drain: 7d under cap"}, true
 			}
 		}
 	}
 
-	// Pass 2: 5h has any room — but never pick a 7D-hard-full account.
-	// A 7D-at-100% account has no recoverable capacity in this window
-	// regardless of 5h utilisation.
+	// Pass 2: anything below the 7d hard limit.
 	for _, preferModelClear := range []bool{true, false} {
 		for _, c := range ordered {
 			if preferModelClear && modelCapped(cache, c.cacheKey()) {
@@ -310,8 +303,8 @@ func pickDrain(
 			if !isAvailable(cache, c.cacheKey()) {
 				continue
 			}
-			if fiveHourUtil(cache, c.cacheKey()) < float64(cap5) && sevenDayUtil(cache, c.cacheKey()) < 100 {
-				return Pick{Email: c.Email, Slot: c.Slot, Reason: "drain: 5h has room"}, true
+			if sevenDayUtil(cache, c.cacheKey()) < 100 {
+				return Pick{Email: c.Email, Slot: c.Slot, Reason: "drain: 7d has room"}, true
 			}
 		}
 	}
@@ -326,9 +319,6 @@ func pickBalanced(accounts []Candidate, current Candidate, cache usage.Cache, th
 			continue
 		}
 		if !isAvailable(cache, c.cacheKey()) {
-			continue
-		}
-		if !hasFiveHourCapacity(cache, c.cacheKey(), thresholds) {
 			continue
 		}
 		if !hasSevenDayCapacity(cache, c.cacheKey()) {
@@ -346,11 +336,7 @@ func pickBalanced(accounts []Candidate, current Candidate, cache usage.Cache, th
 		if mi != mj {
 			return !mi
 		}
-		ai, bi := sevenDayUtil(cache, candidates[i].cacheKey()), sevenDayUtil(cache, candidates[j].cacheKey())
-		if ai != bi {
-			return ai < bi
-		}
-		return fiveHourUtil(cache, candidates[i].cacheKey()) < fiveHourUtil(cache, candidates[j].cacheKey())
+		return sevenDayUtil(cache, candidates[i].cacheKey()) < sevenDayUtil(cache, candidates[j].cacheKey())
 	})
 	return Pick{Email: candidates[0].Email, Slot: candidates[0].Slot, Reason: "balanced: lowest 7d"}, true
 }
@@ -457,28 +443,9 @@ func sevenDayUtil(cache usage.Cache, email string) float64 {
 	return 0
 }
 
-func fiveHourUtil(cache usage.Cache, email string) float64 {
-	if u, ok := cache[email]; ok && u.FiveHour != nil {
-		return u.FiveHour.Utilization
-	}
-	return 0
-}
-
-func hasFiveHourCapacity(cache usage.Cache, email string, thresholds usage.Thresholds) bool {
-	u, ok := cache[email]
-	if !ok || u.FiveHour == nil {
-		return true
-	}
-	cap5 := thresholds.FiveHour
-	if cap5 == 0 || cap5 == 100 {
-		cap5 = 90
-	}
-	return u.FiveHour.Utilization < float64(cap5)
-}
-
 // hasSevenDayCapacity returns false only when 7D utilisation is at the hard
-// 100% ceiling. Unlike hasFiveHourCapacity this uses the hard limit, not a
-// user-configured threshold, because a 7D-at-100% account has zero usable
+// 100% ceiling. It uses the hard limit, not a user-configured threshold,
+// because a 7D-at-100% account has zero usable
 // capacity regardless of strategy thresholds.
 func hasSevenDayCapacity(cache usage.Cache, email string) bool {
 	u, ok := cache[email]

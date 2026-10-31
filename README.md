@@ -209,7 +209,7 @@ are serialised with file locks (`flock` / `LockFileEx`).
 
 ```bash
 cux                          # launch claude under the wrapper
-cux list                     # accounts with 5h / 7d utilisation
+cux list                     # accounts with 7d utilisation
 cux list --refresh           # refresh usage before listing
 cux status                   # current login + cux state
 cux switch <slot|email>      # manual swap (no auto-resume)
@@ -286,7 +286,7 @@ the mirror over a local socket).
 ```bash
 cux config keys                                      # discover everything
 cux config show
-cux config set thresholds.five_hour 85
+cux config set thresholds.seven_day 85
 cux config set strategy.kind balanced
 cux config set strategy.order alice@x,bob@x         # drain priority
 cux config set auto_message ""                      # silent resume
@@ -296,7 +296,6 @@ cux config set update_check.enabled true            # opt in to update checks
 
 | Key | Default | Description |
 |---|---|---|
-| `thresholds.five_hour`        | `100`          | Auto-swap when 5h utilisation hits this %. `100` = reactive only. |
 | `thresholds.seven_day`        | `100`          | Auto-swap when 7d utilisation hits this %. `100` = reactive only. |
 | `strategy.kind`               | `drain`        | `drain` / `balanced` / `manual` |
 | `strategy.order`              | `[]`           | Drain mode priority (emails); empty = auto by highest 7d |
@@ -320,7 +319,7 @@ Config file: `~/.config/cux/config.json` (XDG-aware).
   on. Set `order` for explicit priority, or leave empty to auto-drain
   the highest-7d account first.
 - **balanced** — Always pick the account with the lowest 7-day
-  utilisation (tiebreak by lowest 5h).
+  utilisation.
 - **manual** — Never swap automatically. `/switch` and `cux switch`
   still work.
 
@@ -375,7 +374,7 @@ the project's directory tree, optionally windowed with `--days N`.
 $ cux history
 2026-05-01 14:12:33  alice@x → bob@x  [threshold]
     reason: 7d utilization 95% ≥ threshold 95%
-    usage: alice@x 5h:34% 7d:95% → bob@x 5h:8% 7d:30%
+    usage: alice@x 7d:95% → bob@x 7d:30%
     session: 143eec0f-277e-4ce1-95f1-58eb56331874
 
 2026-05-01 13:55:08  bob@x → alice@x  [manual]
@@ -397,7 +396,7 @@ $ cux history
 │       └── oauth.json              # the oauthAccount block, raw JSON
 └── runtime/
     ├── signals/                    # hook → wrapper signal files
-    ├── usage-cache.json            # per-account 5h / 7d snapshot
+    ├── usage-cache.json            # per-account 7d snapshot
     ├── update-cache.json           # update-check cadence cache
     └── swap-history.json           # capped at 1000 entries
 

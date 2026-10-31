@@ -6,9 +6,8 @@ import (
 	"github.com/inulute/cux/internal/usage"
 )
 
-func mw(five, seven float64, opus *float64) usage.AccountUsage {
+func mw(seven float64, opus *float64) usage.AccountUsage {
 	u := usage.AccountUsage{
-		FiveHour: &usage.Window{Utilization: five},
 		SevenDay: &usage.Window{Utilization: seven},
 	}
 	if opus != nil {
@@ -25,11 +24,11 @@ func TestDrainPrefersModelClearCandidate(t *testing.T) {
 	a := Candidate{Email: "a@x.test", CacheKey: "a"}
 	b := Candidate{Email: "b@x.test", CacheKey: "b"}
 	c := Candidate{Email: "c@x.test", CacheKey: "c"}
-	th := usage.Thresholds{FiveHour: 100, SevenDay: 100}
+	th := usage.Thresholds{SevenDay: 100}
 	cache := usage.Cache{
-		"a": mw(100, 80, nil),     // current, exhausted
-		"b": mw(10, 60, pct(100)), // healthiest overall but Opus-capped
-		"c": mw(10, 30, nil),      // model-clear
+		"a": mw(100, nil),     // current, exhausted
+		"b": mw(60, pct(100)), // healthiest overall but Opus-capped
+		"c": mw(30, nil),      // model-clear
 	}
 	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b, c}, a, cache, th, now())
 	if !ok || pick.Email != "c@x.test" {
@@ -43,11 +42,11 @@ func TestDrainFallsBackWhenAllModelCapped(t *testing.T) {
 	a := Candidate{Email: "a@x.test", CacheKey: "a"}
 	b := Candidate{Email: "b@x.test", CacheKey: "b"}
 	c := Candidate{Email: "c@x.test", CacheKey: "c"}
-	th := usage.Thresholds{FiveHour: 100, SevenDay: 100}
+	th := usage.Thresholds{SevenDay: 100}
 	cache := usage.Cache{
-		"a": mw(100, 80, pct(100)),
-		"b": mw(10, 60, pct(100)),
-		"c": mw(20, 30, pct(100)),
+		"a": mw(100, pct(100)),
+		"b": mw(60, pct(100)),
+		"c": mw(30, pct(100)),
 	}
 	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b, c}, a, cache, th, now())
 	if !ok {
@@ -63,10 +62,10 @@ func TestDrainUnchangedWhenModelWindowsAbsent(t *testing.T) {
 	// as before the preference existed.
 	a := Candidate{Email: "a@x.test", CacheKey: "a"}
 	b := Candidate{Email: "b@x.test", CacheKey: "b"}
-	th := usage.Thresholds{FiveHour: 100, SevenDay: 100}
+	th := usage.Thresholds{SevenDay: 100}
 	cache := usage.Cache{
-		"a": mw(100, 80, nil),
-		"b": mw(10, 60, nil),
+		"a": mw(100, nil),
+		"b": mw(60, nil),
 	}
 	pick, ok := PickNext(KindDrain, nil, []Candidate{a, b}, a, cache, th, now())
 	if !ok || pick.Email != "b@x.test" {
@@ -78,11 +77,11 @@ func TestBalancedSortsModelCappedLastButEligible(t *testing.T) {
 	a := Candidate{Email: "a@x.test", CacheKey: "a"}
 	b := Candidate{Email: "b@x.test", CacheKey: "b"}
 	c := Candidate{Email: "c@x.test", CacheKey: "c"}
-	th := usage.Thresholds{FiveHour: 100, SevenDay: 100}
+	th := usage.Thresholds{SevenDay: 100}
 	cache := usage.Cache{
-		"a": mw(100, 80, nil),    // current
-		"b": mw(5, 10, pct(100)), // lowest 7d but Opus-capped
-		"c": mw(5, 40, nil),      // model-clear, higher 7d
+		"a": mw(100, nil),     // current
+		"b": mw(10, pct(100)), // lowest 7d but Opus-capped
+		"c": mw(40, nil),      // model-clear, higher 7d
 	}
 	pick, ok := PickNext(KindBalanced, nil, []Candidate{a, b, c}, a, cache, th, now())
 	if !ok || pick.Email != "c@x.test" {
@@ -100,10 +99,10 @@ func TestBalancedSortsModelCappedLastButEligible(t *testing.T) {
 func TestRebalanceRefusesModelCappedPriority(t *testing.T) {
 	priority := Candidate{Email: "prio@x.test", CacheKey: "p"}
 	temp := Candidate{Email: "temp@x.test", CacheKey: "t"}
-	th := usage.Thresholds{FiveHour: 100, SevenDay: 100}
+	th := usage.Thresholds{SevenDay: 100}
 	cache := usage.Cache{
-		"p": mw(5, 10, pct(100)), // healthy overall, Opus-capped
-		"t": mw(20, 30, nil),
+		"p": mw(10, pct(100)), // healthy overall, Opus-capped
+		"t": mw(30, nil),
 	}
 	// Rebalance is proactive: hopping onto a model-capped seat trades a
 	// working account for an instant rate limit and a bounce back.
@@ -113,7 +112,7 @@ func TestRebalanceRefusesModelCappedPriority(t *testing.T) {
 	}
 
 	// Once the model window resets, the rebalance resumes.
-	cache["p"] = mw(5, 10, pct(40))
+	cache["p"] = mw(10, pct(40))
 	if pick, ok := ShouldRebalance(KindDrain, []string{"prio@x.test"},
 		[]Candidate{priority, temp}, temp, cache, th, now()); !ok || pick.Email != "prio@x.test" {
 		t.Errorf("got (%q, %v), want rebalance to prio@x.test", pick.Email, ok)
@@ -133,7 +132,7 @@ func TestModelCappedReadsEveryReportedModelWindow(t *testing.T) {
 		"overage",
 		"seven_day_some_model_that_does_not_exist_yet",
 	} {
-		u := mw(5, 10, nil)
+		u := mw(10, nil)
 		u.Models = map[string]*usage.Window{window: {Utilization: 100}}
 		if !modelCapped(usage.Cache{"k": u}, "k") {
 			t.Errorf("%s at 100%% must count as model-capped", window)
@@ -142,7 +141,7 @@ func TestModelCappedReadsEveryReportedModelWindow(t *testing.T) {
 
 	// Room in a model window is not a cap, and an unpolled seat is not one
 	// either — both must stay eligible as a first pick.
-	u := mw(5, 10, nil)
+	u := mw(10, nil)
 	u.Models = map[string]*usage.Window{"seven_day_opus": {Utilization: 99}}
 	if modelCapped(usage.Cache{"k": u}, "k") {
 		t.Error("a model window under 100%% must not count as capped")

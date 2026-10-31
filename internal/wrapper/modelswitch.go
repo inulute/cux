@@ -8,11 +8,9 @@ import (
 	"github.com/inulute/cux/internal/usage"
 )
 
-// Anthropic's rate limits are not one thing. Claude Code distinguishes six,
-// and only two of them — the 5-hour session limit and the account-wide
-// weekly limit — describe the seat. The rest are per model:
+// Anthropic's rate limits are not one thing. Only the account-wide weekly
+// limit and the credit limit describe the seat; the rest are per model:
 //
-//	five_hour                  "session limit"      account-wide
 //	seven_day                  "weekly limit"       account-wide
 //	seven_day_opus             "Opus limit"         model
 //	seven_day_sonnet           "Sonnet limit"       model

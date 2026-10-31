@@ -60,7 +60,7 @@ func seatAgainst429(t *testing.T, retryAfter string) (key string, hits *atomic.I
 	// against — which is the whole point.
 	if err := usage.SaveCache(usage.Cache{key: {
 		PolledAt: time.Now().Add(-2 * time.Hour),
-		FiveHour: &usage.Window{Utilization: 26},
+		SevenDay: &usage.Window{Utilization: 26},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +93,8 @@ func TestARefusedSeatIsNotPolledAgainImmediately(t *testing.T) {
 	if !u.InCooldown(time.Now()) {
 		t.Error("want the seat held back after a refusal")
 	}
-	if u.FiveHour == nil || u.FiveHour.Utilization != 26 {
-		t.Errorf("the last good reading must survive: %+v", u.FiveHour)
+	if u.SevenDay == nil || u.SevenDay.Utilization != 26 {
+		t.Errorf("the last good reading must survive: %+v", u.SevenDay)
 	}
 	if u.PolledAt.After(time.Now().Add(-time.Hour)) {
 		t.Error("a refusal must not pass itself off as a fresh poll")

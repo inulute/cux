@@ -227,7 +227,7 @@ func windowPct(w *usage.Window) string {
 // "1h32m", "2d", or "—" for missing data.
 func nextReset(u usage.AccountUsage) string {
 	var soonest *time.Time
-	for _, w := range []*usage.Window{u.FiveHour, u.SevenDay} {
+	for _, w := range []*usage.Window{u.SevenDay} {
 		if w == nil || w.ResetsAt == nil {
 			continue
 		}
@@ -443,7 +443,7 @@ func cmdProjectList(args []string) {
 			line := fmt.Sprintf("  [%02d] %-42s", slot, label)
 			if cache != nil {
 				if u, ok := cache[acct.CacheKey()]; ok {
-					line += "  5h:" + windowPct(u.FiveHour) + "  7d:" + windowPct(u.SevenDay)
+					line += "  7d:" + windowPct(u.SevenDay)
 					if u.TokenExpired {
 						line += "  (needs login)"
 					}
@@ -895,10 +895,9 @@ func cmdHistory(args []string) {
 		// Only show usage figures when at least one was nonzero —
 		// fresh installs would otherwise print a row of zeros that
 		// looks like real data.
-		if e.FromUsage5h+e.FromUsage7d+e.ToUsage5h+e.ToUsage7d > 0 {
-			fmt.Printf("    usage: %s 5h:%.0f%% 7d:%.0f%% → %s 5h:%.0f%% 7d:%.0f%%\n",
-				e.From, e.FromUsage5h, e.FromUsage7d,
-				e.To, e.ToUsage5h, e.ToUsage7d)
+		if e.FromUsage7d+e.ToUsage7d > 0 {
+			fmt.Printf("    usage: %s 7d:%.0f%% → %s 7d:%.0f%%\n",
+				e.From, e.FromUsage7d, e.To, e.ToUsage7d)
 		}
 		if e.SessionID != "" {
 			fmt.Printf("    session: %s\n", e.SessionID)
@@ -997,18 +996,6 @@ func editConfigInteractive() error {
 			fmt.Println("Settings saved.")
 			return nil
 		case "1":
-			v, ok, err := promptValue(raw, reader, "5h threshold %", strconv.Itoa(c.Thresholds.FiveHour))
-			if err != nil || !ok {
-				if err != nil {
-					return err
-				}
-				continue
-			}
-			if err := setAndSaveConfig("thresholds.five_hour", v); err != nil {
-				fmt.Printf("error: %v\r\n", err)
-				waitEnter(raw, reader)
-			}
-		case "2":
 			v, ok, err := promptValue(raw, reader, "7d threshold %", strconv.Itoa(c.Thresholds.SevenDay))
 			if err != nil || !ok {
 				if err != nil {
@@ -1020,7 +1007,7 @@ func editConfigInteractive() error {
 				fmt.Printf("error: %v\r\n", err)
 				waitEnter(raw, reader)
 			}
-		case "3":
+		case "2":
 			next := map[string]string{"drain": "balanced", "balanced": "manual", "manual": "drain"}[strings.ToLower(c.Strategy.Kind)]
 			if next == "" {
 				next = "drain"
@@ -1028,7 +1015,7 @@ func editConfigInteractive() error {
 			if err := setAndSaveConfig("strategy.kind", next); err != nil {
 				return err
 			}
-		case "4":
+		case "3":
 			v, ok, err := promptValue(raw, reader, "drain order (comma-separated emails, blank = auto)", strings.Join(c.Strategy.Order, ","))
 			if err != nil || !ok {
 				if err != nil {
@@ -1040,19 +1027,19 @@ func editConfigInteractive() error {
 				fmt.Printf("error: %v\r\n", err)
 				waitEnter(raw, reader)
 			}
-		case "5":
+		case "4":
 			if err := setAndSaveConfig("auto_switch_on_threshold", strconv.FormatBool(!c.AutoSwitchOnThreshold)); err != nil {
 				return err
 			}
-		case "6":
+		case "5":
 			if err := setAndSaveConfig("auto_switch_on_rate_limit", strconv.FormatBool(!c.AutoSwitchOnRateLimit)); err != nil {
 				return err
 			}
-		case "7":
+		case "6":
 			if err := setAndSaveConfig("auto_resume", strconv.FormatBool(!c.AutoResume)); err != nil {
 				return err
 			}
-		case "8":
+		case "7":
 			v, ok, err := promptValue(raw, reader, `resume message (blank = no auto prompt)`, c.AutoMessage)
 			if err != nil || !ok {
 				if err != nil {
@@ -1067,11 +1054,11 @@ func editConfigInteractive() error {
 				fmt.Printf("error: %v\r\n", err)
 				waitEnter(raw, reader)
 			}
-		case "9":
+		case "8":
 			if err := setAndSaveConfig("update_check.enabled", strconv.FormatBool(!c.UpdateCheck.Enabled)); err != nil {
 				return err
 			}
-		case "10":
+		case "9":
 			v, ok, err := promptValue(raw, reader, "update cadence hours", strconv.Itoa(c.UpdateCheck.CadenceHours))
 			if err != nil || !ok {
 				if err != nil {
@@ -1083,11 +1070,11 @@ func editConfigInteractive() error {
 				fmt.Printf("error: %v\r\n", err)
 				waitEnter(raw, reader)
 			}
-		case "11":
+		case "10":
 			if err := setAndSaveConfig("notify", strconv.FormatBool(!c.Notify)); err != nil {
 				return err
 			}
-		case "12":
+		case "11":
 			next := "default"
 			if c.Theme == "default" {
 				next = "claude"
@@ -1095,7 +1082,7 @@ func editConfigInteractive() error {
 			if err := setAndSaveConfig("theme", next); err != nil {
 				return err
 			}
-		case "13":
+		case "12":
 			if err := setAndSaveConfig("attach", strconv.FormatBool(!c.Attach)); err != nil {
 				return err
 			}
@@ -1138,19 +1125,18 @@ func printConfigEditor(c config.Config) {
 		fmt.Printf("%s│%s\r\n", g, r)
 	}
 
-	row(1, "5h threshold", strconv.Itoa(c.Thresholds.FiveHour)+"%", "edit percent", false)
-	row(2, "7d threshold", strconv.Itoa(c.Thresholds.SevenDay)+"%", "edit percent", false)
-	row(3, "strategy", c.Strategy.Kind, "cycle drain/balanced/manual", false)
-	row(4, "drain order", clip(strings.Join(c.Strategy.Order, ","), 26), "edit comma-separated emails", false)
-	row(5, "threshold auto-switch", checkbox(c.AutoSwitchOnThreshold), "toggle", true)
-	row(6, "rate-limit auto-switch", checkbox(c.AutoSwitchOnRateLimit), "toggle", true)
-	row(7, "auto resume", checkbox(c.AutoResume), "toggle", true)
-	row(8, "resume message", clip(displayEmpty(c.AutoMessage), 26), "edit text", false)
-	row(9, "update check", checkbox(c.UpdateCheck.Enabled), "toggle", true)
-	row(10, "update cadence", strconv.Itoa(c.UpdateCheck.CadenceHours)+"h", "edit hours", false)
-	row(11, "notifications", checkbox(c.Notify), "toggle", true)
-	row(12, "theme", c.Theme, "cycle default/claude", false)
-	row(13, "attach", checkbox(c.Attach), "toggle", true)
+	row(1, "7d threshold", strconv.Itoa(c.Thresholds.SevenDay)+"%", "edit percent", false)
+	row(2, "strategy", c.Strategy.Kind, "cycle drain/balanced/manual", false)
+	row(3, "drain order", clip(strings.Join(c.Strategy.Order, ","), 26), "edit comma-separated emails", false)
+	row(4, "threshold auto-switch", checkbox(c.AutoSwitchOnThreshold), "toggle", true)
+	row(5, "rate-limit auto-switch", checkbox(c.AutoSwitchOnRateLimit), "toggle", true)
+	row(6, "auto resume", checkbox(c.AutoResume), "toggle", true)
+	row(7, "resume message", clip(displayEmpty(c.AutoMessage), 26), "edit text", false)
+	row(8, "update check", checkbox(c.UpdateCheck.Enabled), "toggle", true)
+	row(9, "update cadence", strconv.Itoa(c.UpdateCheck.CadenceHours)+"h", "edit hours", false)
+	row(10, "notifications", checkbox(c.Notify), "toggle", true)
+	row(11, "theme", c.Theme, "cycle default/claude", false)
+	row(12, "attach", checkbox(c.Attach), "toggle", true)
 
 	fmt.Printf("%s└────┴────────────────────────────┴────────────────────────────┴────────────────────────────────────┘%s\r\n\r\n", g, r)
 }
@@ -1691,7 +1677,6 @@ func printSetupConfigSummary(c config.Config) {
 	hline("├", "─", "┼", "┤")
 	row("theme", c.Theme)
 	row("strategy", c.Strategy.Kind)
-	row("5h threshold", strconv.Itoa(c.Thresholds.FiveHour)+"%")
 	row("7d threshold", strconv.Itoa(c.Thresholds.SevenDay)+"%")
 	row("threshold switch", boolVal(c.AutoSwitchOnThreshold, "on", "off"))
 	row("rate-limit switch", boolVal(c.AutoSwitchOnRateLimit, "on", "off"))
@@ -1864,10 +1849,10 @@ func accountState(email, liveEmail string, au usage.AccountUsage, stale bool) st
 	if stale {
 		return "STALE"
 	}
-	if au.FiveHour != nil && au.FiveHour.Utilization >= 100 {
+	if au.SevenDay != nil && au.SevenDay.Utilization >= 100 {
 		return "FULL"
 	}
-	if au.FiveHour != nil {
+	if au.SevenDay != nil {
 		return "READY"
 	}
 	return "IDLE"
@@ -1877,7 +1862,7 @@ func accountState(email, liveEmail string, au usage.AccountUsage, stale bool) st
 // left/mid/right are the box-drawing corner/junction characters.
 func tableSep(left, mid, right string) string {
 	g, r := colorGray, colorReset
-	cols := []int{colSlotW, colEmailW, colStateW, colBarW, colBarW, colResetW}
+	cols := []int{colSlotW, colEmailW, colStateW, colBarW, colResetW}
 	var sb strings.Builder
 	sb.WriteString(" " + g + left)
 	for i, w := range cols {
@@ -1963,11 +1948,10 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 	}
 
 	fmt.Fprintln(w, tableSep("┌", "┬", "┐"))
-	fmt.Fprintf(w, " %s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s\n",
+	fmt.Fprintf(w, " %s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s\n",
 		g, r, hCell("SLOT", colSlotW),
 		g, r, hCell("ACCOUNT", colEmailW),
 		g, r, hCell("STATE", colStateW),
-		g, r, hCell("5H USAGE", colBarW),
 		g, r, hCell("7D USAGE", colBarW),
 		g, r, hCell("RESET", colResetW),
 		g, r)
@@ -2009,16 +1993,11 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 			resetStr = "?"
 		}
 
-		var barFive, barSeven string
+		var barSeven string
 		switch {
 		case stale:
-			barFive, barSeven = unknownBar, unknownBar
+			barSeven = unknownBar
 		default:
-			if au.FiveHour != nil {
-				barFive = " " + renderColorBar(au.FiveHour.Utilization, barBlocks) + " "
-			} else {
-				barFive = noBar
-			}
 			if au.SevenDay != nil {
 				barSeven = " " + renderColorBar(au.SevenDay.Utilization, barBlocks) + " "
 			} else {
@@ -2040,11 +2019,10 @@ func printAccountTable(w io.Writer, st *store.State, liveEmail string, cache usa
 		stateCell := " " + sc + padTo(sl, colStateW-2) + r + " "
 		resetCell := " " + t + padTo(resetStr, colResetW-2) + r + " "
 
-		fmt.Fprintf(w, " %s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s\n",
+		fmt.Fprintf(w, " %s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s%s%s│%s\n",
 			g, r, slotCell,
 			g, r, emailCell,
 			g, r, stateCell,
-			g, r, barFive,
 			g, r, barSeven,
 			g, r, resetCell,
 			g, r)

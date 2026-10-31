@@ -56,8 +56,25 @@ func TestPartialFileMergesWithDefaults(t *testing.T) {
 	if c.AutoMessage != Defaults().AutoMessage {
 		t.Errorf("auto_message lost defaults: got %q", c.AutoMessage)
 	}
-	if c.Thresholds.FiveHour != 100 {
-		t.Errorf("thresholds.five_hour lost defaults: got %d", c.Thresholds.FiveHour)
+	if c.Thresholds.SevenDay != 100 {
+		t.Errorf("thresholds.seven_day lost defaults: got %d", c.Thresholds.SevenDay)
+	}
+}
+
+func TestLegacyFiveHourThresholdIgnored(t *testing.T) {
+	path := tempConfig(t)
+	if err := os.WriteFile(path, []byte(`{"thresholds":{"five_hour":80,"seven_day":90}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("old config with five_hour must still load: %v", err)
+	}
+	if c.Thresholds.SevenDay != 90 {
+		t.Errorf("thresholds.seven_day not loaded: got %d", c.Thresholds.SevenDay)
+	}
+	if _, err := Set(c, "thresholds.five_hour", "80"); err == nil {
+		t.Error("thresholds.five_hour must no longer be settable")
 	}
 }
 
@@ -145,7 +162,7 @@ func TestSetAndSave(t *testing.T) {
 func TestSetRejectsBadInput(t *testing.T) {
 	c := Defaults()
 	cases := []struct{ key, val string }{
-		{"thresholds.five_hour", "200"},
+		{"thresholds.seven_day", "200"},
 		{"thresholds.seven_day", "abc"},
 		{"strategy.kind", "raid"},
 		{"auto_resume", "maybe"},

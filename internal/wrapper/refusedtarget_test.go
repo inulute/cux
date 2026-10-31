@@ -24,8 +24,8 @@ import (
 // Target selection stays fail-open on staleness by design (#46). What
 // changes here is that being wrong about it is survivable.
 
-func freshUsage(five, seven float64) usage.AccountUsage {
-	u := accountUsage(five, seven)
+func freshUsage(seven float64) usage.AccountUsage {
+	u := accountUsage(seven)
 	u.PolledAt = time.Now().UTC()
 	return u
 }
@@ -95,9 +95,9 @@ func rateLimit() *pending {
 func TestCompleteSwapDropsARefusedTargetAndTakesTheNext(t *testing.T) {
 	accounts := threeSeats()
 	attempts, _ := swapFixture(t, accounts, usage.Cache{
-		"live@x.test": freshUsage(100, 100),
-		"b@x.test":    freshUsage(10, 10),
-		"c@x.test":    freshUsage(10, 10),
+		"live@x.test": freshUsage(100),
+		"b@x.test":    freshUsage(10),
+		"c@x.test":    freshUsage(10),
 	})
 	// Refuse whichever seat is offered first — the test must not depend on
 	// which of the two healthy candidates the strategy prefers.
@@ -140,9 +140,9 @@ func TestCompleteSwapDropsARefusedTargetAndTakesTheNext(t *testing.T) {
 func TestCompleteSwapTakesAWorkingTarget(t *testing.T) {
 	accounts := threeSeats()
 	attempts, slept := swapFixture(t, accounts, usage.Cache{
-		"live@x.test": freshUsage(100, 100),
-		"b@x.test":    freshUsage(10, 10),
-		"c@x.test":    freshUsage(10, 10),
+		"live@x.test": freshUsage(100),
+		"b@x.test":    freshUsage(10),
+		"c@x.test":    freshUsage(10),
 	})
 	switchTo = func(id string) (store.Account, store.Account, error) {
 		*attempts = append(*attempts, id)
@@ -179,9 +179,9 @@ func TestCompleteSwapSurvivesAPoolWithNowhereToGo(t *testing.T) {
 		2: {Slot: 2, Email: "cancelled@x.test"},
 	}
 	attempts, slept := swapFixture(t, accounts, usage.Cache{
-		"live@x.test": freshUsage(100, 100),
+		"live@x.test": freshUsage(100),
 		// The reading that caused this: months out of date, still plausible.
-		"cancelled@x.test": freshUsage(12, 40),
+		"cancelled@x.test": freshUsage(40),
 	})
 	switchTo = func(id string) (store.Account, store.Account, error) {
 		*attempts = append(*attempts, id)
@@ -220,8 +220,8 @@ func TestCompleteSwapBacksOffWhenNoTargetResolves(t *testing.T) {
 		2: {Slot: 2, Email: "alsofull@x.test"},
 	}
 	attempts, slept := swapFixture(t, accounts, usage.Cache{
-		"live@x.test":     freshUsage(100, 100),
-		"alsofull@x.test": freshUsage(100, 100),
+		"live@x.test":     freshUsage(100),
+		"alsofull@x.test": freshUsage(100),
 	})
 
 	cfg := config.Defaults()
@@ -278,9 +278,9 @@ func TestExcludeTargetRefusesToRepeat(t *testing.T) {
 func TestCompleteSwapKeepsASwapThatOnlyFailedToRecordItself(t *testing.T) {
 	accounts := threeSeats()
 	attempts, _ := swapFixture(t, accounts, usage.Cache{
-		"live@x.test": freshUsage(100, 100),
-		"b@x.test":    freshUsage(10, 10),
-		"c@x.test":    freshUsage(10, 10),
+		"live@x.test": freshUsage(100),
+		"b@x.test":    freshUsage(10),
+		"c@x.test":    freshUsage(10),
 	})
 	switchTo = func(id string) (store.Account, store.Account, error) {
 		*attempts = append(*attempts, id)

@@ -1,13 +1,13 @@
 // Package usage talks to the Anthropic usage API
 // (https://api.anthropic.com/api/oauth/usage) so cux can show users
-// how much of their 5-hour and 7-day budgets each managed account has
+// how much of their 7-day budgets each managed account has
 // consumed, and so the wrapper can swap accounts before a hard cap is
 // hit.
 //
 // The API requires an OAuth bearer token from a Pro/Max subscription
 // account and the beta header `anthropic-beta: oauth-2025-04-20`
 // (verified live on 2026-05-01). Responses include a small set of
-// always-present windows (five_hour, seven_day) plus model- and
+// always-present seven_day window plus model- and
 // program-specific windows that may appear or disappear over time;
 // we tolerate unknown fields silently rather than fail on them.
 //
@@ -53,7 +53,6 @@ type Window struct {
 // returned 401 (so the user knows to `claude login` and `cux add`
 // again).
 type AccountUsage struct {
-	FiveHour *Window
 	SevenDay *Window
 	// Models holds every other usage window the endpoint reports: top-level
 	// windows under the API's own name, limits[] model scopes under
@@ -117,8 +116,9 @@ func (u AccountUsage) NextRetry(now time.Time, named time.Duration) time.Time {
 // Reserved top-level keys in the cache and API shapes: everything that is
 // not one of these, and looks like a window, is a model window.
 const (
-	keyFiveHour     = "five_hour"
-	keySevenDay     = "seven_day"
+	keySevenDay = "seven_day"
+	// keySession is the retired session window; it is dropped on read.
+	keySession      = "five_hour"
 	keyPolledAt     = "polled_at"
 	keyTokenExpired = "token_expired"
 	keyLimits       = "limits"
@@ -189,8 +189,8 @@ func slugify(s string) string {
 
 // decodeLimits turns each weekly_scoped entry naming a model into a window
 // keyed seven_day_<model>, so it sits beside seven_day in the cache. Entries
-// without a model scope describe the seat as a whole, which five_hour and
-// seven_day already cover.
+// without a model scope describe the seat as a whole, which seven_day
+// already covers.
 func decodeLimits(v json.RawMessage) map[string]*Window {
 	var entries []limitEntry
 	if err := json.Unmarshal(v, &entries); err != nil {
@@ -210,16 +210,13 @@ func decodeLimits(v json.RawMessage) map[string]*Window {
 	return out
 }
 
-// AccountUsage is stored flat — `seven_day_opus` sits beside `five_hour` at
+// AccountUsage is stored flat — `seven_day_opus` sits beside `seven_day` at
 // the top level rather than under a nested `models` object — so the on-disk
 // format is unchanged by the move to an open set. A cache written here still
 // reads correctly in a build that knew only the fixed pair, which matters
 // because a user can downgrade cux without being asked to discard state.
 func (u AccountUsage) MarshalJSON() ([]byte, error) {
 	out := map[string]any{keyPolledAt: u.PolledAt}
-	if u.FiveHour != nil {
-		out[keyFiveHour] = u.FiveHour
-	}
 	if u.SevenDay != nil {
 		out[keySevenDay] = u.SevenDay
 	}
@@ -262,8 +259,7 @@ func (u *AccountUsage) UnmarshalJSON(b []byte) error {
 			_ = json.Unmarshal(v, &u.RetryAfter)
 		case keyFailures:
 			_ = json.Unmarshal(v, &u.Failures)
-		case keyFiveHour:
-			u.FiveHour = decodeWindow(v)
+		case keySession:
 		case keySevenDay:
 			u.SevenDay = decodeWindow(v)
 		case keyLimits:
@@ -288,7 +284,7 @@ func (u *AccountUsage) UnmarshalJSON(b []byte) error {
 
 func reservedKey(name string) bool {
 	switch name {
-	case keyFiveHour, keySevenDay, keyPolledAt, keyTokenExpired, keyLimits, keyRetryAfter, keyFailures:
+	case keySession, keySevenDay, keyPolledAt, keyTokenExpired, keyLimits, keyRetryAfter, keyFailures:
 		return true
 	}
 	return false
@@ -427,13 +423,12 @@ func HumanAge(d time.Duration) string {
 // Thresholds are integer percentages 0–100. A threshold of 100 means
 // "reactive only" — never preemptively swap on this window.
 type Thresholds struct {
-	FiveHour int `json:"five_hour"`
 	SevenDay int `json:"seven_day"`
 }
 
 // Default thresholds.
 func DefaultThresholds() Thresholds {
-	return Thresholds{FiveHour: 100, SevenDay: 100}
+	return Thresholds{SevenDay: 100}
 }
 
 // Fetch hits the usage API with the given OAuth access token and
@@ -587,9 +582,6 @@ func SaveCache(c Cache) error {
 func IsOverThreshold(u AccountUsage, t Thresholds) (over bool, reason string) {
 	// Hard-limit check: genuinely exhausted accounts must always trigger a
 	// switch regardless of the configured threshold.
-	if u.FiveHour != nil && u.FiveHour.Utilization >= 100 {
-		return true, "5h utilization at hard limit (100%)"
-	}
 	if u.SevenDay != nil && u.SevenDay.Utilization >= 100 {
 		return true, "7d utilization at hard limit (100%)"
 	}
@@ -597,12 +589,6 @@ func IsOverThreshold(u AccountUsage, t Thresholds) (over bool, reason string) {
 		if u.SevenDay.Utilization >= float64(t.SevenDay) {
 			return true, fmt.Sprintf("7d utilization %.0f%% ≥ threshold %d%%",
 				u.SevenDay.Utilization, t.SevenDay)
-		}
-	}
-	if t.FiveHour > 0 && t.FiveHour < 100 && u.FiveHour != nil {
-		if u.FiveHour.Utilization >= float64(t.FiveHour) {
-			return true, fmt.Sprintf("5h utilization %.0f%% ≥ threshold %d%%",
-				u.FiveHour.Utilization, t.FiveHour)
 		}
 	}
 	return false, ""
@@ -623,9 +609,6 @@ func (u AccountUsage) Settled(now time.Time) AccountUsage {
 		return w != nil && w.ResetsAt != nil && !w.ResetsAt.After(now)
 	}
 	out := u
-	if elapsed(out.FiveHour) {
-		out.FiveHour = nil
-	}
 	if elapsed(out.SevenDay) {
 		out.SevenDay = nil
 	}
@@ -703,12 +686,5 @@ func HasSwitchCapacity(u AccountUsage, t Thresholds, now time.Time) bool {
 	if u.TokenExpired {
 		return false
 	}
-	if u.SevenDay != nil && u.SevenDay.Utilization >= 100 {
-		return false
-	}
-	cap5 := t.FiveHour
-	if cap5 == 0 || cap5 == 100 {
-		cap5 = 90
-	}
-	return u.FiveHour == nil || u.FiveHour.Utilization < float64(cap5)
+	return u.SevenDay == nil || u.SevenDay.Utilization < 100
 }
