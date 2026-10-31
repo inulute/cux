@@ -52,8 +52,8 @@ func TestLiveAccountWithCapacity(t *testing.T) {
 	t.Run("healthy live account skips the swap", func(t *testing.T) {
 		// Another session already swapped live to fresh@x.test.
 		isolateLive(t, "fresh@x.test", usage.Cache{
-			"limited@x.test": hookStyleUsage(100, 40),
-			"fresh@x.test":   hookStyleUsage(5, 10),
+			"limited@x.test": hookStyleUsage(100),
+			"fresh@x.test":   hookStyleUsage(10),
 		})
 		acct, ok := liveAccountWithCapacity(&cfg)
 		if !ok || acct.Email != "fresh@x.test" {
@@ -63,8 +63,8 @@ func TestLiveAccountWithCapacity(t *testing.T) {
 
 	t.Run("exhausted live account does not skip", func(t *testing.T) {
 		isolateLive(t, "limited@x.test", usage.Cache{
-			"limited@x.test": hookStyleUsage(100, 40),
-			"fresh@x.test":   hookStyleUsage(5, 10),
+			"limited@x.test": hookStyleUsage(100),
+			"fresh@x.test":   hookStyleUsage(10),
 		})
 		if _, ok := liveAccountWithCapacity(&cfg); ok {
 			t.Error("expected ok=false for an exhausted live account")
@@ -80,7 +80,7 @@ func TestLiveAccountWithCapacity(t *testing.T) {
 
 	t.Run("unmanaged live account does not skip", func(t *testing.T) {
 		isolateLive(t, "stranger@x.test", usage.Cache{
-			"fresh@x.test": hookStyleUsage(5, 10),
+			"fresh@x.test": hookStyleUsage(10),
 		})
 		if _, ok := liveAccountWithCapacity(&cfg); ok {
 			t.Error("expected ok=false for an unmanaged live account")
@@ -88,7 +88,7 @@ func TestLiveAccountWithCapacity(t *testing.T) {
 	})
 
 	t.Run("expired token does not skip", func(t *testing.T) {
-		u := hookStyleUsage(5, 10)
+		u := hookStyleUsage(10)
 		u.TokenExpired = true
 		isolateLive(t, "fresh@x.test", usage.Cache{"fresh@x.test": u})
 		if _, ok := liveAccountWithCapacity(&cfg); ok {
@@ -97,9 +97,8 @@ func TestLiveAccountWithCapacity(t *testing.T) {
 	})
 }
 
-func hookStyleUsage(five, seven float64) usage.AccountUsage {
+func hookStyleUsage(seven float64) usage.AccountUsage {
 	return usage.AccountUsage{
-		FiveHour: &usage.Window{Utilization: five},
 		SevenDay: &usage.Window{Utilization: seven},
 	}
 }

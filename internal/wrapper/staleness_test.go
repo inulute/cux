@@ -15,15 +15,15 @@ import (
 // issue #46.
 const staleAge = 307 * time.Hour
 
-func agedUsage(five, seven float64, age time.Duration) usage.AccountUsage {
-	u := accountUsage(five, seven)
+func agedUsage(seven float64, age time.Duration) usage.AccountUsage {
+	u := accountUsage(seven)
 	u.PolledAt = time.Now().UTC().Add(-age)
 	return u
 }
 
 // stalenessFixture stands up a two-account pool with a@x.test live, and
 // writes cache readings of the given age.
-func stalenessFixture(t *testing.T, age time.Duration, activeFive, activeSeven float64) {
+func stalenessFixture(t *testing.T, age time.Duration, activeSeven float64) {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	home := t.TempDir()
@@ -53,8 +53,8 @@ func stalenessFixture(t *testing.T, age time.Duration, activeFive, activeSeven f
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": agedUsage(activeFive, activeSeven, age),
-		"b@x.test": agedUsage(0, 20, age),
+		"a@x.test": agedUsage(activeSeven, age),
+		"b@x.test": agedUsage(20, age),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -64,9 +64,9 @@ func stalenessFixture(t *testing.T, age time.Duration, activeFive, activeSeven f
 // the decision side: the pool looks exhausted, but the reading predates any
 // evidence for that, and a threshold swap costs a process restart (#39).
 func TestEvaluateThresholdSwapIgnoresAStaleReading(t *testing.T) {
-	stalenessFixture(t, staleAge, 100, 67)
+	stalenessFixture(t, staleAge, 100)
 	cfg := config.Defaults()
-	cfg.Thresholds = usage.Thresholds{FiveHour: 98, SevenDay: 98}
+	cfg.Thresholds = usage.Thresholds{SevenDay: 98}
 	if p := evaluateThresholdSwap(&cfg, ""); p != nil {
 		t.Fatalf("swapped on a %s-old reading: %+v", staleAge, p)
 	}
@@ -75,9 +75,9 @@ func TestEvaluateThresholdSwapIgnoresAStaleReading(t *testing.T) {
 // TestEvaluateThresholdSwapFiresOnAFreshReading is the control. Without it,
 // "no swap happened" cannot be told apart from "swapping is broken".
 func TestEvaluateThresholdSwapFiresOnAFreshReading(t *testing.T) {
-	stalenessFixture(t, time.Minute, 100, 67)
+	stalenessFixture(t, time.Minute, 100)
 	cfg := config.Defaults()
-	cfg.Thresholds = usage.Thresholds{FiveHour: 98, SevenDay: 98}
+	cfg.Thresholds = usage.Thresholds{SevenDay: 98}
 	p := evaluateThresholdSwap(&cfg, "")
 	if p == nil {
 		t.Fatal("a fresh hard-limit reading should still swap")
@@ -92,11 +92,11 @@ func TestEvaluateThresholdSwapFiresOnAFreshReading(t *testing.T) {
 // the session and must not refuse to launch it either. Uncertainty is not
 // exhaustion (issues #37, #39).
 func TestPrelaunchOnAStaleCacheNeitherSwapsNorBlocks(t *testing.T) {
-	stalenessFixture(t, staleAge, 100, 100)
+	stalenessFixture(t, staleAge, 100)
 	// Both accounts exhausted-looking, all of it unverifiable.
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": agedUsage(100, 100, staleAge),
-		"b@x.test": agedUsage(100, 100, staleAge),
+		"a@x.test": agedUsage(100, staleAge),
+		"b@x.test": agedUsage(100, staleAge),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -112,10 +112,10 @@ func TestPrelaunchOnAStaleCacheNeitherSwapsNorBlocks(t *testing.T) {
 
 // TestPrelaunchStillBlocksOnAFreshExhaustedPool is that test's control.
 func TestPrelaunchStillBlocksOnAFreshExhaustedPool(t *testing.T) {
-	stalenessFixture(t, time.Minute, 100, 100)
+	stalenessFixture(t, time.Minute, 100)
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": agedUsage(100, 100, time.Minute),
-		"b@x.test": agedUsage(100, 100, time.Minute),
+		"a@x.test": agedUsage(100, time.Minute),
+		"b@x.test": agedUsage(100, time.Minute),
 	}); err != nil {
 		t.Fatal(err)
 	}

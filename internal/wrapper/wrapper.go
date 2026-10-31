@@ -157,7 +157,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 
 	// A silenced reactive path looks exactly like a working one, so say so
 	// at launch — this is the only moment cux can, and the alternative is a
-	// session waiting out a five-hour window next to a free seat (#56).
+	// session waiting out a usage window next to a free seat (#56).
 	for _, warning := range claudeEnvWarnings(&cfg, os.Getenv) {
 		fmt.Fprintf(w, "cux: warning: %s\n", warning)
 	}
@@ -215,7 +215,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	// inPlaceRetries scales a separate fibonacci backoff for the case
 	// where a rate limit fires but no other seat has capacity and the
 	// live seat still does (a transient usage-endpoint 429, or a
-	// session/burst sub-cap that never moves the 5h/7d windows). We resume
+	// session/burst sub-cap that never moves the 7d window). We resume
 	// on the live seat rather than stranding the session in wait-for-reset;
 	// the backoff keeps a genuinely recurring cap from tight-looping (#21).
 	// It is deliberately distinct from apiRetries, which the retry-only
@@ -386,9 +386,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 					Reason:      p.reason,
 					SessionID:   sessionID,
 					CWD:         cwd,
-					FromUsage5h: utilizationOrZero(p.fromUsage.FiveHour),
 					FromUsage7d: utilizationOrZero(p.fromUsage.SevenDay),
-					ToUsage5h:   utilizationOrZero(toUsage.FiveHour),
 					ToUsage7d:   utilizationOrZero(toUsage.SevenDay),
 				}
 				_ = history.Append(entry)
@@ -1015,7 +1013,7 @@ func evaluateThresholdSwap(cfg *config.Config, manualTarget string) *pending {
 		return nil
 	}
 
-	// Hard-limit check: 5h or 7d at exactly 100% → bypass both guards.
+	// Hard-limit check: 7d at exactly 100% → bypass both guards.
 	// At soft-threshold triggers we still respect manual choices.
 	atHardLimit := isHardLimitUsage(u.Settled(now))
 	if !atHardLimit {
@@ -1088,8 +1086,7 @@ func evaluatePrelaunchHardLimitSwap(cfg *config.Config) (*pending, string) {
 }
 
 func isHardLimitUsage(u usage.AccountUsage) bool {
-	return (u.FiveHour != nil && u.FiveHour.Utilization >= 100) ||
-		(u.SevenDay != nil && u.SevenDay.Utilization >= 100)
+	return u.SevenDay != nil && u.SevenDay.Utilization >= 100
 }
 
 func appendPrelaunchHistory(from, to store.Account, p *pending) {
@@ -1102,9 +1099,7 @@ func appendPrelaunchHistory(from, to store.Account, p *pending) {
 		Trigger:     p.trigger,
 		Reason:      p.reason,
 		CWD:         cwd,
-		FromUsage5h: utilizationOrZero(p.fromUsage.FiveHour),
 		FromUsage7d: utilizationOrZero(p.fromUsage.SevenDay),
-		ToUsage5h:   utilizationOrZero(toUsage.FiveHour),
 		ToUsage7d:   utilizationOrZero(toUsage.SevenDay),
 	})
 }
@@ -1305,7 +1300,7 @@ func completeSwap(p *pending, cfg *config.Config, hadTurns bool, inPlaceRetries 
 			return holdInPlace(err, hadTurns, inPlaceRetries, w)
 		}
 		// No other seat has capacity. Before sleeping until a reset, check
-		// whether the live seat itself still has real 5h/7d room: a
+		// whether the live seat itself still has real 7d room: a
 		// rate-limit signal can fire on a healthy account — a transient 429
 		// on the usage endpoint, or a session/burst sub-cap that never moves
 		// the tracked windows. Waiting there strands a usable session for the
@@ -1528,7 +1523,7 @@ func allTokensExpired(accounts map[int]store.Account, cache usage.Cache) bool {
 // because the live account already reports capacity. A rate-limit signal
 // is ground truth about the seat that triggered it: the API just refused
 // it, so its utilisation numbers (a session cap, a burst cap, or a
-// per-model Opus/Sonnet cap need not move the 5h/7d figures) cannot be
+// per-model Opus/Sonnet cap need not move the 7d figure) cannot be
 // trusted to say "usable". Skipping is therefore only safe on a
 // rate-limit when the live seat is a DIFFERENT one than the one that hit
 // the limit — i.e. another concurrent session already swapped us onto a
@@ -1596,8 +1591,7 @@ func liveAccountWithCapacity(cfg *config.Config) (store.Account, bool) {
 
 // nextAvailability returns the earliest instant any account becomes
 // usable again and which account that is. An account's ready time is
-// the latest reset among its over-threshold windows — a 5h reset does
-// not help while the 7d window is still capped. Accounts whose binding
+// the latest reset among its over-threshold windows. Accounts whose binding
 // window carries no reset stamp are skipped: there is nothing to wait
 // for. ok is false when no account has a known ready time.
 func nextAvailability(
@@ -1620,7 +1614,6 @@ func nextAvailability(
 			win *usage.Window
 			cap int
 		}{
-			{u.FiveHour, thresholds.FiveHour},
 			{u.SevenDay, thresholds.SevenDay},
 		} {
 			if wc.win == nil || wc.win.Utilization < float64(wc.cap) {
@@ -1694,7 +1687,7 @@ func renderAllAccountsExhaustedMessage(cfg *config.Config) string {
 		acct := state.Accounts[slot]
 		u, _ := cachedUsage(cache, acct.CacheKey(), acct.Email)
 		reset := availabilityReset(u)
-		b.WriteString(fmt.Sprintf("  [%02d] %s  5h:%s  7d:%s", slot, acct.Email, pct(u.FiveHour), pct(u.SevenDay)))
+		b.WriteString(fmt.Sprintf("  [%02d] %s  7d:%s", slot, acct.Email, pct(u.SevenDay)))
 		if reset != nil {
 			b.WriteString("  available in " + shortDuration(time.Until(*reset)))
 			if nextReset == nil || reset.Before(*nextReset) {
@@ -1721,9 +1714,6 @@ func renderAllAccountsExhaustedMessage(cfg *config.Config) string {
 func availabilityReset(u usage.AccountUsage) *time.Time {
 	if u.SevenDay != nil && u.SevenDay.Utilization >= 100 {
 		return u.SevenDay.ResetsAt
-	}
-	if u.FiveHour != nil && u.FiveHour.Utilization >= 100 {
-		return u.FiveHour.ResetsAt
 	}
 	return nil
 }
@@ -2296,7 +2286,6 @@ func appendModelSwitchHistory(p *pending, model string) {
 		Trigger:     history.TriggerModelSwitch,
 		Reason:      fmt.Sprintf("%s limit — switched model %s → %s on the same account: %s", p.refusedModel, p.refusedModel, model, p.reason),
 		CWD:         cwd,
-		FromUsage5h: utilizationOrZero(p.fromUsage.FiveHour),
 		FromUsage7d: utilizationOrZero(p.fromUsage.SevenDay),
 	})
 }

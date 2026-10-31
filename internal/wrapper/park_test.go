@@ -58,7 +58,7 @@ func TestShouldPark(t *testing.T) {
 // carry auto_message: another seat if one freed up, otherwise a plain
 // relaunch on the live seat once it recovers.
 func TestParkResumeTarget(t *testing.T) {
-	parked := &pending{trigger: history.TriggerRateLimit, reason: "5h limit"}
+	parked := &pending{trigger: history.TriggerRateLimit, reason: "7d limit"}
 	var unused bool
 
 	t.Run("another seat freed up: swap", func(t *testing.T) {

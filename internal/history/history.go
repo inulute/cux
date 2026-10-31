@@ -53,9 +53,7 @@ type Entry struct {
 	SessionID string    `json:"sessionId,omitempty"`
 	CWD       string    `json:"cwd,omitempty"`
 
-	FromUsage5h float64 `json:"fromUsage5h,omitempty"`
 	FromUsage7d float64 `json:"fromUsage7d,omitempty"`
-	ToUsage5h   float64 `json:"toUsage5h,omitempty"`
 	ToUsage7d   float64 `json:"toUsage7d,omitempty"`
 }
 

@@ -75,7 +75,7 @@ func TestCooldownRoundTripsThroughTheCache(t *testing.T) {
 	at := time.Date(2026, 9, 22, 12, 30, 0, 0, time.UTC)
 	in := AccountUsage{
 		PolledAt:   at.Add(-2 * time.Hour),
-		FiveHour:   &Window{Utilization: 26},
+		SevenDay:   &Window{Utilization: 26},
 		RetryAfter: at,
 		Failures:   3,
 	}
@@ -90,8 +90,8 @@ func TestCooldownRoundTripsThroughTheCache(t *testing.T) {
 	if !out.RetryAfter.Equal(at) || out.Failures != 3 {
 		t.Fatalf("round trip lost the hold-off: %+v", out)
 	}
-	if out.FiveHour == nil || out.FiveHour.Utilization != 26 {
-		t.Errorf("the last good reading must survive a refusal: %+v", out.FiveHour)
+	if out.SevenDay == nil || out.SevenDay.Utilization != 26 {
+		t.Errorf("the last good reading must survive a refusal: %+v", out.SevenDay)
 	}
 	if _, isWindow := out.Models[keyRetryAfter]; isWindow {
 		t.Error("retry_after must not be read back as a model window")

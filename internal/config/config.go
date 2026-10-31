@@ -7,7 +7,7 @@
 // Defaults match claude-revolver's so users porting from there see
 // familiar behavior:
 //
-//   - thresholds: 100% (5h), 100% (7d)
+//   - thresholds: 100% (7d)
 //   - strategy: drain, no fixed order (auto by highest 7d)
 //   - auto_resume: true
 //   - auto_message: "Go continue."   (set to "" to skip the prompt
@@ -178,12 +178,6 @@ func Save(c Config) error {
 // listed in `Keys()` — Set and Keys are kept in lockstep.
 func Set(c Config, key, value string) (Config, error) {
 	switch key {
-	case "thresholds.five_hour":
-		n, err := parsePct(value)
-		if err != nil {
-			return c, err
-		}
-		c.Thresholds.FiveHour = n
 	case "thresholds.seven_day":
 		n, err := parsePct(value)
 		if err != nil {
@@ -320,11 +314,6 @@ type KeyInfo struct {
 // well.
 func Keys(c Config) []KeyInfo {
 	return []KeyInfo{
-		{
-			Key: "thresholds.five_hour", Default: "100",
-			Description: "auto-swap when 5h utilisation reaches this % (100 = reactive only)",
-			Current:     strconv.Itoa(c.Thresholds.FiveHour),
-		},
 		{
 			Key: "thresholds.seven_day", Default: "100",
 			Description: "auto-swap when 7d utilisation reaches this % (100 = reactive only)",

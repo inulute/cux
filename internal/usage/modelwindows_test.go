@@ -29,16 +29,12 @@ func TestParseResponseKeepsEveryWindowItIsGiven(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseResponse: %v", err)
 	}
-	if u.FiveHour == nil || u.FiveHour.Utilization != 10 {
-		t.Errorf("five_hour = %+v, want 10", u.FiveHour)
-	}
 	if u.SevenDay == nil || u.SevenDay.Utilization != 20 {
 		t.Errorf("seven_day = %+v, want 20", u.SevenDay)
 	}
-	// The account-wide pair has its own fields and must not be duplicated
-	// into the model set, or every seat would read as model-capped the
-	// moment its weekly window filled.
-	for _, reserved := range []string{keyFiveHour, keySevenDay} {
+	// seven_day has its own field and the retired session window is
+	// dropped; neither may appear in the model set.
+	for _, reserved := range []string{keySession, keySevenDay} {
 		if _, dup := u.Models[reserved]; dup {
 			t.Errorf("%s must not also appear as a model window", reserved)
 		}
@@ -84,7 +80,7 @@ func TestParseResponseIgnoresFieldsThatAreNotWindows(t *testing.T) {
 func TestAccountUsageStaysFlatOnDisk(t *testing.T) {
 	reset := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	u := AccountUsage{
-		FiveHour: &Window{Utilization: 10, ResetsAt: &reset},
+		SevenDay: &Window{Utilization: 10, ResetsAt: &reset},
 		Models: map[string]*Window{
 			"seven_day_opus":             {Utilization: 30},
 			"seven_day_overage_included": {Utilization: 100},
@@ -97,7 +93,7 @@ func TestAccountUsageStaysFlatOnDisk(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	got := string(b)
-	for _, want := range []string{`"five_hour":`, `"seven_day_opus":`, `"seven_day_overage_included":`, `"polled_at":`} {
+	for _, want := range []string{`"seven_day":`, `"seven_day_opus":`, `"seven_day_overage_included":`, `"polled_at":`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("serialized form %s is missing top-level %s", got, want)
 		}
@@ -107,7 +103,7 @@ func TestAccountUsageStaysFlatOnDisk(t *testing.T) {
 	}
 	// A nil window is an absent key, not a null one: a null may read as
 	// "present, zero" to a stricter decoder.
-	if strings.Contains(got, "null") || strings.Contains(got, `"seven_day"`) {
+	if strings.Contains(got, "null") || strings.Contains(got, `"token_expired"`) {
 		t.Errorf("absent windows must be omitted entirely, got %s", got)
 	}
 
@@ -115,11 +111,11 @@ func TestAccountUsageStaysFlatOnDisk(t *testing.T) {
 	if err := json.Unmarshal(b, &back); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if back.FiveHour == nil || back.FiveHour.Utilization != 10 || !back.FiveHour.ResetsAt.Equal(reset) {
-		t.Errorf("five_hour did not round-trip: %+v", back.FiveHour)
+	if back.SevenDay == nil || back.SevenDay.Utilization != 10 || !back.SevenDay.ResetsAt.Equal(reset) {
+		t.Errorf("seven_day did not round-trip: %+v", back.SevenDay)
 	}
-	if back.SevenDay != nil {
-		t.Errorf("absent seven_day came back as %+v", back.SevenDay)
+	if back.TokenExpired {
+		t.Error("absent token_expired came back set")
 	}
 	if len(back.Models) != 2 || back.Models["seven_day_opus"].Utilization != 30 {
 		t.Errorf("models did not round-trip: %v", back.Models)
@@ -149,8 +145,11 @@ func TestAccountUsageReadsACacheWrittenByTheFixedPairBuild(t *testing.T) {
 	if !ok {
 		t.Fatal("legacy cache entry did not survive the read")
 	}
-	if u.FiveHour == nil || u.FiveHour.Utilization != 26 || u.SevenDay.Utilization != 57 {
-		t.Errorf("account-wide windows = %+v / %+v, want 26 / 57", u.FiveHour, u.SevenDay)
+	if u.SevenDay == nil || u.SevenDay.Utilization != 57 {
+		t.Errorf("seven_day = %+v, want 57", u.SevenDay)
+	}
+	if _, kept := u.Models[keySession]; kept {
+		t.Error("a legacy five_hour entry must be dropped, not kept as a model window")
 	}
 	if w := u.Models["seven_day_opus"]; w == nil || w.Utilization != 100 {
 		t.Errorf("legacy model window = %+v, want 100", w)

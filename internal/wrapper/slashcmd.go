@@ -92,9 +92,7 @@ func SlashSwitch(target string, w io.Writer) error {
 		Trigger:     history.TriggerManual,
 		Reason:      "user requested via /switch",
 		CWD:         cwd,
-		FromUsage5h: utilizationOrZero(fromU.FiveHour),
 		FromUsage7d: utilizationOrZero(fromU.SevenDay),
-		ToUsage5h:   utilizationOrZero(toU.FiveHour),
 		ToUsage7d:   utilizationOrZero(toU.SevenDay),
 	})
 
@@ -149,14 +147,10 @@ func slotSuffix(a store.Account) string {
 // headroom reports what is left on the seat just switched to, so the user can
 // see straight away whether the swap actually bought them anything.
 func headroom(u usage.AccountUsage) string {
-	parts := make([]string, 0, 2)
-	if u.FiveHour != nil {
-		parts = append(parts, fmt.Sprintf("5h %.0f%% used", u.FiveHour.Utilization))
+	if u.SevenDay == nil {
+		return ""
 	}
-	if u.SevenDay != nil {
-		parts = append(parts, fmt.Sprintf("7d %.0f%% used", u.SevenDay.Utilization))
-	}
-	return strings.Join(parts, "   ")
+	return fmt.Sprintf("7d %.0f%% used", u.SevenDay.Utilization)
 }
 
 func clipTo(s string, n int) string {

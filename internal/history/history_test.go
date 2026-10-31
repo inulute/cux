@@ -33,7 +33,7 @@ func TestAppendAndTail(t *testing.T) {
 
 	entries := []Entry{
 		{From: "a@x", To: "b@x", Trigger: TriggerManual, Reason: "user"},
-		{From: "b@x", To: "a@x", Trigger: TriggerRateLimit, Reason: "hit 5h cap"},
+		{From: "b@x", To: "a@x", Trigger: TriggerRateLimit, Reason: "hit 7d cap"},
 		{From: "a@x", To: "b@x", Trigger: TriggerThreshold, Reason: "7d 96%"},
 	}
 	for _, e := range entries {

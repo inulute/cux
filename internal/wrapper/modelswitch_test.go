@@ -27,7 +27,6 @@ func TestModelLimitSeparatesModelCapsFromAccountCaps(t *testing.T) {
 
 		// Account-wide: a different model cannot help, so these must keep
 		// rotating the account exactly as they do today.
-		{name: "five_hour", message: "You've reached your session limit."},
 		{name: "seven_day", message: "You've reached your weekly limit."},
 		{name: "overage", message: "You've reached your usage credit limit."},
 		{name: "a plain 429", message: "rate_limit_error: Rate limited. Please try again later."},

@@ -32,8 +32,8 @@ func TestResolveTargetDoesNotRotateToWeeklyFullFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": accountUsage(100, 67),
-		"b@x.test": accountUsage(0, 100),
+		"a@x.test": accountUsage(100),
+		"b@x.test": accountUsage(100),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +109,8 @@ func TestEvaluatePrelaunchHardLimitSwapUsesRateLimitTrigger(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": accountUsage(100, 67),
-		"b@x.test": accountUsage(0, 20),
+		"a@x.test": accountUsage(100),
+		"b@x.test": accountUsage(20),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -166,8 +166,8 @@ func TestEvaluatePrelaunchHardLimitSwapBlocksWhenAllAccountsFull(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := usage.SaveCache(usage.Cache{
-		"a@x.test": accountUsage(100, 67),
-		"b@x.test": accountUsage(100, 20),
+		"a@x.test": accountUsage(100),
+		"b@x.test": accountUsage(100),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -185,10 +185,9 @@ func TestEvaluatePrelaunchHardLimitSwapBlocksWhenAllAccountsFull(t *testing.T) {
 	}
 }
 
-func accountUsage(five, seven float64) usage.AccountUsage {
-	w5 := usage.Window{Utilization: five}
+func accountUsage(seven float64) usage.AccountUsage {
 	w7 := usage.Window{Utilization: seven}
-	return usage.AccountUsage{FiveHour: &w5, SevenDay: &w7}
+	return usage.AccountUsage{SevenDay: &w7}
 }
 
 func TestIsResumeArgv(t *testing.T) {
