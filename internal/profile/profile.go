@@ -18,6 +18,7 @@
 package profile
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -183,22 +184,49 @@ func loginIn(state *store.State, slot int, configDir string) (string, bool, erro
 	}
 }
 
-// NeedsCopy reports whether target's stored login has to be copied into
+// Copy is what a terminal switch does with a seat's stored login
+// (PlanCopy).
+type Copy int
+
+const (
+	// NoCopy moves the switch onto the profile's own login.
+	NoCopy Copy = iota
+	// CopyLogin copies the stored login into a profile that holds no login
+	// of the seat. Without the copy there is nothing to switch to, so a
+	// switch that cannot make it refuses.
+	CopyLogin
+	// RepairLogin copies the stored login over a login of the seat cux
+	// revoked (repairsDeadLogin). It only replaces a dead login, so a
+	// switch that cannot make the copy moves onto that login instead of
+	// refusing, as it did before the repair existed.
+	RepairLogin
+)
+
+// NeedsCopy reports whether PlanCopy copies anything into dir.
+func NeedsCopy(state *store.State, target store.Account, dir string) (bool, error) {
+	c, err := PlanCopy(state, target, dir)
+	return c != NoCopy, err
+}
+
+// PlanCopy reports whether target's stored login has to be copied into
 // dir, its profile, and refuses when that copy would give the login a
 // second live holder, rewrite the login this terminal's sessions share, or
 // replace another login dir holds. A profile already logged in as the seat
-// needs no copy, unless its login is one cux revoked (see repairsDeadLogin).
-// It writes nothing.
-func NeedsCopy(state *store.State, target store.Account, dir string) (bool, error) {
+// needs no copy, unless its login is one cux revoked (RepairLogin). It
+// writes nothing.
+func PlanCopy(state *store.State, target store.Account, dir string) (Copy, error) {
 	if own, ok, err := loginIn(state, target.Slot, dir); err != nil {
-		return false, err
+		return NoCopy, err
 	} else if ok {
 		// The profile's own claude keeps this login fresh; nothing to copy,
 		// unless cux revoked it.
-		return repairsDeadLogin(state, target, dir, own, time.Now()), nil
+		if repairsDeadLogin(state, target, dir, own, time.Now()) {
+			return RepairLogin, nil
+		}
+		return NoCopy, nil
 	}
 	if creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
-		return false, fmt.Errorf(
+		return NoCopy, fmt.Errorf(
 			"%s is the directory every session of this terminal shares, and it is not logged in as slot %d (%s); "+
 				"copying the seat's login there would move all of them — run `cux switch --all %s` for that, "+
 				"or log in there with `CLAUDE_CONFIG_DIR=%s claude` and /login",
@@ -206,29 +234,29 @@ func NeedsCopy(state *store.State, target store.Account, dir string) (bool, erro
 	}
 	stored, err := creds.ReadBackup(target.Slot, target.Email)
 	if err != nil && !errors.Is(err, creds.ErrNotFound) {
-		return false, err
+		return NoCopy, err
 	}
 	switch live, err := creds.ReadLiveIn(dir); {
 	case err == nil:
 		// A login that can refresh is some claude's; replacing it would sign
 		// that claude out and drop the token, whichever seat it belongs to.
 		if creds.HasRefreshToken(live) && !creds.SameLogin(live, stored) {
-			return false, fmt.Errorf(
+			return NoCopy, fmt.Errorf(
 				"%s is logged in as %s, not slot %d (%s); copying the seat's login there would sign that login out — "+
 					"log out there first (`CLAUDE_CONFIG_DIR=%s claude`, then /logout)",
 				dir, accountIn(dir), target.Slot, target.Email, dir)
 		}
 	case errors.Is(err, creds.ErrNotFound), errors.Is(err, creds.ErrNoAccountToken):
 	default:
-		return false, fmt.Errorf("reading the login in %s: %w", dir, err)
+		return NoCopy, fmt.Errorf("reading the login in %s: %w", dir, err)
 	}
 	if stored != "" {
 		// The identity file can lag the credentials (mid-switch, issue #46),
 		// so look for the token itself too.
 		if h, ok, err := HeldElsewhere(dir, stored); err != nil {
-			return false, err
+			return NoCopy, err
 		} else if ok {
-			return false, fmt.Errorf(
+			return NoCopy, fmt.Errorf(
 				"slot %d (%s)'s stored login is live at %s; copying it into %s would leave one refresh token in two "+
 					"places, and whichever refreshes first signs the other out — run `CLAUDE_CONFIG_DIR=%s claude` "+
 					"and /login once instead",
@@ -237,18 +265,40 @@ func NeedsCopy(state *store.State, target store.Account, dir string) (bool, erro
 	}
 	holders, err := Holders(state, target.Slot)
 	if err != nil {
-		return false, err
+		return NoCopy, err
 	}
 	for _, h := range holders {
 		if creds.LiveLocation(h.Dir) != creds.LiveLocation(dir) {
-			return false, fmt.Errorf(
+			return NoCopy, fmt.Errorf(
 				"slot %d (%s) is logged in at %s and %s is not; copying cux's stored login into %s would leave "+
 					"one refresh token in two places, and whichever refreshes first signs the other out — "+
 					"run `CLAUDE_CONFIG_DIR=%s claude` and /login once instead",
 				target.Slot, target.Email, Label(h.Dir), dir, dir, dir)
 		}
 	}
-	return true, nil
+	return CopyLogin, nil
+}
+
+// CopySource reads what a copy of target's stored login into a profile
+// takes: the stored login, which must carry an access token, and the
+// oauthAccount block that names the seat in the profile. PlanCopy plans a
+// repair only when this succeeds, and a terminal switch copies what it
+// returns.
+func CopySource(target store.Account) (string, json.RawMessage, error) {
+	blob, err := creds.ReadBackup(target.Slot, target.Email)
+	if err != nil {
+		return "", nil, fmt.Errorf("target credentials missing: %w", err)
+	}
+	if _, err := creds.ExtractAccessToken(blob); err != nil {
+		return "", nil, fmt.Errorf(
+			"slot %d (%s) has no usable stored login — run `claude login` as %s, then `cux add` to recapture the slot",
+			target.Slot, target.Email, target.Email)
+	}
+	oauth, err := store.ReadOAuthBlockBackup(target.Slot, target.Email)
+	if err != nil {
+		return "", nil, fmt.Errorf("target oauthAccount missing: %w", err)
+	}
+	return blob, oauth, nil
 }
 
 // repairsDeadLogin reports whether own, the login dir holds of target, is
@@ -261,11 +311,12 @@ func NeedsCopy(state *store.State, target store.Account, dir string) (bool, erro
 //
 // The repair only ever adds a copy where the switch would otherwise land on
 // a dead login. Whenever it is not sure (the login has not expired yet, dir
-// is this terminal's shared directory, the revocation record or the backup
-// cannot be read, own is another managed seat's stored login, or the
-// backup's token or another login of the seat is live in another
-// directory) it returns false, and the switch moves onto dir's own login as
-// it did before the repair existed: dir's claude then asks for /login.
+// is this terminal's shared directory, the revocation record, the backup or
+// its oauthAccount block cannot be read, the backup has no access token, own
+// is another managed seat's stored login, or the backup's token or another
+// login of the seat is live in another directory) it returns false, and the
+// switch moves onto dir's own login as it did before the repair existed:
+// dir's claude then asks for /login.
 func repairsDeadLogin(state *store.State, target store.Account, dir, own string, now time.Time) bool {
 	if expires := creds.ExpiresAt(own); expires == 0 || expires > now.UnixMilli() {
 		return false
@@ -278,7 +329,7 @@ func repairsDeadLogin(state *store.State, target store.Account, dir, own string,
 	if revoked, err := creds.RevokedByRefresh(target.Slot, target.Email, own); err != nil || !revoked {
 		return false
 	}
-	stored, err := creds.ReadBackup(target.Slot, target.Email)
+	stored, _, err := CopySource(target)
 	if err != nil || !creds.HasRefreshToken(stored) || creds.SameLogin(own, stored) ||
 		creds.ExpiresAt(stored) <= now.UnixMilli() {
 		return false

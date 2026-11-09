@@ -454,6 +454,22 @@ func TestSwitchTerminalStillLandsOnTheProfilesOwnExpiredLogin(t *testing.T) {
 			},
 		},
 		{
+			// Without the stored oauthAccount block there is nothing to copy
+			// the login under: no repair, and no refusal either.
+			name: "revoked own login, stored oauthAccount missing",
+			setup: func(t *testing.T, b store.Account, fresh, profileB string) []string {
+				own := idle()
+				loginIn(t, profileB, "b@example.com", "uuid-b", own)
+				if err := creds.RecordRevoked(b.Slot, b.Email, own, fresh); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(filepath.Join(paths.AccountDir(b.Slot, b.Email), "oauth.json")); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			},
+		},
+		{
 			name: "revoked own login, backup unreadable",
 			setup: func(t *testing.T, b store.Account, fresh, profileB string) []string {
 				own := idle()

@@ -49,6 +49,9 @@ func seat(t *testing.T, stored string) (*store.State, store.Account) {
 	if err := creds.WriteBackup(a.Slot, a.Email, stored); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.WriteOAuthBlockBackup(a.Slot, a.Email, json.RawMessage(`{"emailAddress":"b@example.com"}`)); err != nil {
+		t.Fatal(err)
+	}
 	return state, a
 }
 
@@ -278,6 +281,9 @@ func TestNeedsCopyRevivesADeadProfileLogin(t *testing.T) {
 	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || !need {
 		t.Fatalf("NeedsCopy = %v, %v; want the backup copied over the dead login", need, err)
 	}
+	if plan, err := PlanCopy(state, a, Dir("bb")); err != nil || plan != RepairLogin {
+		t.Fatalf("PlanCopy = %v, %v; want RepairLogin", plan, err)
+	}
 }
 
 // A profile that logged in on its own and sat idle past its access token's
@@ -305,6 +311,8 @@ func TestNeedsCopyKeepsTheProfilesOwnLogin(t *testing.T) {
 		{"live, newer backup", blob("own", now.Add(time.Hour)), blob("fresh", now.Add(8*time.Hour))},
 		{"expired, backup expired too", blob("own", now.Add(-time.Hour)), blob("old", now.Add(-2*time.Hour))},
 		{"expired, backup holds the same token", blob("own", now.Add(-time.Hour)), blob("own", now.Add(-time.Hour))},
+		{"expired, backup still on the revoked refresh token", blob("own", now.Add(-time.Hour)),
+			fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"later","refreshToken":"r-own","expiresAt":%d}}`, now.Add(8*time.Hour).UnixMilli())},
 		{"no expiry recorded", `{"claudeAiOauth":{"accessToken":"own","refreshToken":"r-own"}}`, blob("fresh", now.Add(8*time.Hour))},
 		{"expired, backup cannot refresh", blob("own", now.Add(-time.Hour)),
 			fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"fresh","expiresAt":%d}}`, now.Add(8*time.Hour).UnixMilli())},
@@ -376,7 +384,7 @@ func TestNeedsCopyLeavesAnotherSeatsLoginAlone(t *testing.T) {
 func TestNeedsCopyKeepsAnExpiredLoginWhenTheRecordsCannotBeRead(t *testing.T) {
 	now := time.Now()
 	dead := blob("dead", now.Add(-time.Hour))
-	for _, broken := range []string{"credentials.json", "revoked-refresh-tokens.json"} {
+	for _, broken := range []string{"credentials.json", "revoked-refresh-tokens.json", "oauth.json"} {
 		t.Run(broken, func(t *testing.T) {
 			state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
 			login(t, Dir("bb"), a.Email, dead)
@@ -406,5 +414,49 @@ func TestNeedsCopyLeavesADeadSharedLoginAlone(t *testing.T) {
 	t.Setenv(paths.EnvClaudeConfigDir, Dir("bb"))
 	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
 		t.Fatalf("NeedsCopy = %v, %v; want the shared login left alone", need, err)
+	}
+}
+
+// Another managed seat's stored login that cannot be read might be the
+// profile's login. The repair is skipped, and the switch is not refused.
+func TestNeedsCopyLeavesADeadLoginWhenAnotherSeatsBackupCannotBeRead(t *testing.T) {
+	now := time.Now()
+	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
+	other := store.Account{Slot: 2, Email: "c@example.com", Alias: "cc"}
+	state.Accounts[2] = other
+	state.Sequence = []int{1, 2}
+	if err := creds.WriteBackup(other.Slot, other.Email, blob("c-login", now.Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(paths.AccountDir(other.Slot, other.Email), "credentials.json")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dead := blob("dead", now.Add(-time.Hour))
+	login(t, Dir("bb"), a.Email, dead)
+	revoked(t, a, dead)
+	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
+		t.Fatalf("NeedsCopy = %v, %v; want the profile's own login kept", need, err)
+	}
+}
+
+// A stored login edited by hand to carry no access token cannot be copied.
+// The repair is skipped, and the switch is not refused.
+func TestNeedsCopyKeepsAnExpiredLoginWhenTheBackupHasNoAccessToken(t *testing.T) {
+	now := time.Now()
+	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
+	dead := blob("dead", now.Add(-time.Hour))
+	login(t, Dir("bb"), a.Email, dead)
+	revoked(t, a, dead)
+	tokenless := fmt.Sprintf(`{"claudeAiOauth":{"refreshToken":"r-fresh","expiresAt":%d}}`, now.Add(8*time.Hour).UnixMilli())
+	p := filepath.Join(paths.AccountDir(a.Slot, a.Email), "credentials.json")
+	if err := os.WriteFile(p, []byte(tokenless), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
+		t.Fatalf("NeedsCopy = %v, %v; want the profile's own login kept", need, err)
 	}
 }

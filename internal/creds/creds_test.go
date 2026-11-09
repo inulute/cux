@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -448,6 +450,20 @@ func TestRecordRevokedKeepsOnlyRotatedAwayTokens(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "secret-r0") {
 		t.Fatalf("the record holds a raw refresh token: %s", raw)
+	}
+	if runtime.GOOS != "windows" {
+		for path, want := range map[string]os.FileMode{
+			revokedFilePath(1, "a@example.com"):               0o600,
+			filepath.Dir(revokedFilePath(1, "a@example.com")): 0o700,
+		} {
+			fi, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fi.Mode().Perm(); got != want {
+				t.Fatalf("%s has mode %o, want %o", path, got, want)
+			}
+		}
 	}
 
 	for i := 0; i < maxRevoked; i++ {

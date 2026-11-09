@@ -89,16 +89,25 @@ func ProfileDir(a store.Account) (string, error) { return profile.Check(a) }
 // get there without a second live holder. A /switch runs it before the
 // wrapper stops claude, so a refusal does not cost the session.
 func PrepareTerminal(state *store.State, target store.Account) (dir string, needsCopy bool, err error) {
-	dir, err = profile.Check(target)
-	if err != nil {
-		return "", false, err
-	}
-	needsCopy, err = profile.NeedsCopy(state, target, dir)
-	if err != nil {
-		return "", false, err
-	}
-	return dir, needsCopy, nil
+	dir, plan, err := prepareTerminal(state, target)
+	return dir, plan != profile.NoCopy, err
 }
+
+// prepareTerminal is PrepareTerminal with the kind of copy it plans.
+func prepareTerminal(state *store.State, target store.Account) (string, profile.Copy, error) {
+	dir, err := profile.Check(target)
+	if err != nil {
+		return "", profile.NoCopy, err
+	}
+	plan, err := profile.PlanCopy(state, target, dir)
+	if err != nil {
+		return "", profile.NoCopy, err
+	}
+	return dir, plan, nil
+}
+
+// readCopySource is profile.CopySource; tests replace it.
+var readCopySource = profile.CopySource
 
 // SessionSlot is the seat this process runs on: its own profile's seat
 // under a terminal scope, the shared login's seat (state.ActiveSlot)
@@ -127,7 +136,9 @@ func LiveSlot(state *store.State) int {
 // login, the shared .claude.json, or state.json. It copies the seat's
 // stored login into the profile only when no other directory is logged in
 // as that seat and the profile is not either, or is with a login cux's own
-// refresh of the backup revoked (see profile.NeedsCopy).
+// refresh of the backup revoked (see profile.PlanCopy). A repair it cannot
+// make is skipped, never refused: the switch lands on the profile's own
+// login, as it did before the repair existed.
 //
 // On success CLAUDE_CONFIG_DIR and CUX_SCOPE are set in this process's
 // environment, and CUX_SHARED_CONFIG_DIR records the directory the first
@@ -157,26 +168,24 @@ func SwitchTerminal(identifier string) (from, to store.Account, err error) {
 	if callerSlot != 0 {
 		from = state.Accounts[callerSlot]
 	}
-	dir, needsCopy, err := PrepareTerminal(state, target)
+	dir, plan, err := prepareTerminal(state, target)
 	if err != nil {
 		return store.Account{}, store.Account{}, err
 	}
 
+	needsCopy := plan != profile.NoCopy
 	var targetCreds string
 	var targetOAuth json.RawMessage
 	if needsCopy {
-		targetCreds, err = creds.ReadBackup(target.Slot, target.Email)
-		if err != nil {
-			return store.Account{}, store.Account{}, fmt.Errorf("target credentials missing: %w", err)
-		}
-		if _, tokErr := creds.ExtractAccessToken(targetCreds); tokErr != nil {
-			return store.Account{}, store.Account{}, fmt.Errorf(
-				"slot %d (%s) has no usable stored login — run `claude login` as %s, then `cux add` to recapture the slot",
-				target.Slot, target.Email, target.Email)
-		}
-		targetOAuth, err = store.ReadOAuthBlockBackup(target.Slot, target.Email)
-		if err != nil {
-			return store.Account{}, store.Account{}, fmt.Errorf("target oauthAccount missing: %w", err)
+		targetCreds, targetOAuth, err = readCopySource(target)
+		switch {
+		case err == nil:
+		case plan == profile.RepairLogin:
+			// The repair only replaces a dead login. Without a stored login
+			// to put there, move onto that login, as before the repair.
+			needsCopy = false
+		default:
+			return store.Account{}, store.Account{}, err
 		}
 	}
 
