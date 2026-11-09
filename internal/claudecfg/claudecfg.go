@@ -41,7 +41,17 @@ var ErrNoOAuthAccount = errors.New("claudecfg: oauthAccount block not present")
 // parsed identifying fields. The raw JSON is what we store in backups
 // so unknown fields round-trip without loss.
 func ReadOAuthBlock() (raw json.RawMessage, parsed OAuthAccount, err error) {
-	cfg, err := readConfig()
+	return readOAuthBlockAt(paths.ClaudeConfig())
+}
+
+// ReadOAuthBlockIn is ReadOAuthBlock for the configuration directory
+// configDir ("" is the default), without touching CLAUDE_CONFIG_DIR.
+func ReadOAuthBlockIn(configDir string) (raw json.RawMessage, parsed OAuthAccount, err error) {
+	return readOAuthBlockAt(paths.ClaudeConfigIn(configDir))
+}
+
+func readOAuthBlockAt(path string) (raw json.RawMessage, parsed OAuthAccount, err error) {
+	cfg, err := readConfigAt(path)
 	if err != nil {
 		return nil, OAuthAccount{}, err
 	}
@@ -59,10 +69,20 @@ func ReadOAuthBlock() (raw json.RawMessage, parsed OAuthAccount, err error) {
 // the config file is untouched. If the file does not exist, returns
 // ErrNoConfig — we never create a Claude Code config from scratch.
 func WriteOAuthBlock(raw json.RawMessage) error {
+	return writeOAuthBlockAt(paths.ClaudeConfig(), raw)
+}
+
+// WriteOAuthBlockIn is WriteOAuthBlock for the configuration directory
+// configDir, written without touching CLAUDE_CONFIG_DIR.
+func WriteOAuthBlockIn(configDir string, raw json.RawMessage) error {
+	return writeOAuthBlockAt(paths.ClaudeConfigIn(configDir), raw)
+}
+
+func writeOAuthBlockAt(path string, raw json.RawMessage) error {
 	if len(raw) == 0 {
 		return errors.New("claudecfg: refusing to write empty oauthAccount block")
 	}
-	cfg, err := readConfig()
+	cfg, err := readConfigAt(path)
 	if err != nil {
 		return err
 	}
@@ -74,13 +94,16 @@ func WriteOAuthBlock(raw json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("claudecfg: marshal: %w", err)
 	}
-	return atomicfile.Write(paths.ClaudeConfig(), out, 0o600)
+	return atomicfile.Write(path, out, 0o600)
 }
 
 // readConfig parses the config as a map preserving raw JSON for every
 // value, so we can rewrite oauthAccount without disturbing anything else.
 func readConfig() (map[string]json.RawMessage, error) {
-	path := paths.ClaudeConfig()
+	return readConfigAt(paths.ClaudeConfig())
+}
+
+func readConfigAt(path string) (map[string]json.RawMessage, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

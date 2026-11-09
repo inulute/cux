@@ -36,6 +36,7 @@ import (
 	"github.com/inulute/cux/internal/lockfile"
 	"github.com/inulute/cux/internal/monitor"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/profile"
 	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/supportnotice"
@@ -816,6 +817,7 @@ func cmdSwitchTerminal(target string, command []string) {
 	quote := func(v string) string { return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'" }
 	fmt.Printf("export CLAUDE_CONFIG_DIR=%s\n", quote(dir))
 	fmt.Printf("export %s=%s\n", switcher.EnvScope, switcher.ScopeTerminal)
+	fmt.Printf("export %s=%s\n", profile.EnvSharedConfigDir, quote(os.Getenv(profile.EnvSharedConfigDir)))
 	fmt.Fprintf(os.Stderr, "cux: %s is ready in %s; apply it to this shell with: eval \"$(cux switch %s)\"\n", label, dir, target)
 }
 
@@ -1994,8 +1996,8 @@ func printFancyHeader(w io.Writer, st *store.State, liveEmail string) {
 	slotStr := "--"
 	if liveEmail != "" {
 		statusLabel = "ACTIVE"
-		if st.ActiveSlot != 0 {
-			slotStr = fmt.Sprintf("%02d", st.ActiveSlot)
+		if slot := switcher.SessionSlot(st); slot != 0 {
+			slotStr = fmt.Sprintf("%02d", slot)
 		}
 	}
 	managedStr := fmt.Sprintf("%02d", len(st.Accounts))

@@ -52,6 +52,7 @@ func slashFixture(t *testing.T) (wrapperPID int, profile string) {
 	if err := os.WriteFile(filepath.Join(profile, ".claude.json"), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	setUpCuxIn(t, profile)
 	state := &store.State{ActiveSlot: 1, Sequence: []int{1, 2}, Accounts: map[int]store.Account{
 		1: {Slot: 1, Email: "a@x.test"},
 		2: {Slot: 2, Email: "b@x.test", Alias: "work"},

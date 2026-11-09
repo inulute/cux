@@ -47,6 +47,7 @@ func seatsForSwitch(t *testing.T) string {
 		if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(`{}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		setUpCuxIn(t, dir)
 	}
 	login("b@example.com", "tb", "bb")
 	login("a@example.com", "ta", "aa")

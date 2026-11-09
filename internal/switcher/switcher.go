@@ -7,6 +7,7 @@ package switcher
 import (
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/inulute/cux/internal/creds"
 	"github.com/inulute/cux/internal/lockfile"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/profile"
 	"github.com/inulute/cux/internal/store"
 )
 
@@ -256,6 +258,19 @@ func SwitchTo(identifier string) (from, to store.Account, err error) {
 	targetOAuth, err := store.ReadOAuthBlockBackup(target.Slot, target.Email)
 	if err != nil {
 		return store.Account{}, store.Account{}, fmt.Errorf("target oauthAccount missing: %w", err)
+	}
+	// A seat logged in somewhere else — its own profile, typically — keeps
+	// its refresh token there, and the backup follows that copy. Writing
+	// the backup into the shared login too would leave one refresh token in
+	// two places, and whichever refreshes first signs the other out.
+	if at, elsewhere, err := profile.LiveElsewhere(state, target.Slot, os.Getenv(paths.EnvClaudeConfigDir)); err != nil {
+		return store.Account{}, store.Account{}, err
+	} else if elsewhere {
+		return store.Account{}, store.Account{}, fmt.Errorf(
+			"slot %d (%s) is logged in at %s; copying its stored login into the shared login would leave one refresh "+
+				"token in two places, and whichever refreshes first signs the other out — run `cux switch %s` to move "+
+				"this terminal onto that seat instead, or log out there first",
+			target.Slot, target.Email, profile.Label(at), identifier)
 	}
 
 	// Refresh-backup of current live state. We always do this — the

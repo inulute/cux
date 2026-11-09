@@ -26,6 +26,7 @@ import (
 	"github.com/inulute/cux/internal/creds"
 	"github.com/inulute/cux/internal/lockfile"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/profile"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/usage"
 )
@@ -139,7 +140,7 @@ func refreshAll(maxAge time.Duration) (usage.Cache, []error) {
 		}
 		go func(slot int, a store.Account, others []store.Account) {
 			defer wg.Done()
-			entry, err := refreshOne(slot, a.Email, a.OrgUUID, others)
+			entry, err := refreshOne(state, a, others)
 			ch <- result{cacheKey: a.CacheKey(), entry: entry, err: err, email: a.Email}
 		}(slot, a, others)
 	}
@@ -265,7 +266,7 @@ func refreshActive(email string, maxAge time.Duration) error {
 			others = append(others, other)
 		}
 	}
-	entry, err := refreshOne(slot, acct.Email, acct.OrgUUID, others)
+	entry, err := refreshOne(state, acct, others)
 	if err != nil && !entry.TokenExpired {
 		// Network blips shouldn't blow away the prior entry.
 		return err
@@ -287,7 +288,30 @@ func refreshActive(email string, maxAge time.Duration) error {
 // refreshOne polls one account. others is the rest of the managed pool, used
 // only on the post-401 fallback path to check a live token is not already
 // filed under another slot; pass nil to skip that check.
-func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.AccountUsage, error) {
+//
+// A seat logged in in its own profile (~/.claude-<alias>) is kept in step
+// with the backup both ways: a login the profile's claude refreshed is
+// taken into the backup first (profile.Reconcile), and a token refreshed
+// here is handed to the profile (profile.SyncRefreshed). Without that the
+// two hold one refresh token that only one of them still has valid.
+func refreshOne(state *store.State, acct store.Account, others []store.Account) (usage.AccountUsage, error) {
+	slot, email, orgUUID := acct.Slot, acct.Email, acct.OrgUUID
+	owned, err := profile.Reconcile(state, acct)
+	if err != nil {
+		return usage.AccountUsage{}, fmt.Errorf("monitor: take the profile's login into the backup: %w", err)
+	}
+	// When the seat lives in its own profile, the backup follows the
+	// profile. Writing it into this process's directory as well, because
+	// that directory's identity file names the seat, would give the
+	// profile's token a second holder.
+	ownProfile := owned && creds.LiveLocation(profile.Dir(acct.Alias)) != creds.LiveLocation(os.Getenv(paths.EnvClaudeConfigDir))
+	syncCurrent := func(b string) error {
+		if ownProfile {
+			return nil
+		}
+		_, err := syncLiveIfActive(email, orgUUID, b)
+		return err
+	}
 	blob, err := creds.ReadBackup(slot, email)
 	if err != nil {
 		return usage.AccountUsage{}, err
@@ -304,8 +328,11 @@ func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.
 				// token we cannot save.
 				return usage.AccountUsage{}, fmt.Errorf("monitor: save refreshed token: %w", writeErr)
 			}
-			if _, writeErr := syncLiveIfActive(email, orgUUID, freshBlob); writeErr != nil {
+			if writeErr := syncCurrent(freshBlob); writeErr != nil {
 				return usage.AccountUsage{}, fmt.Errorf("monitor: save refreshed live token: %w", writeErr)
+			}
+			if writeErr := profile.SyncRefreshed(state, acct, blob, freshBlob); writeErr != nil {
+				return usage.AccountUsage{}, fmt.Errorf("monitor: save refreshed token into the profile: %w", writeErr)
 			}
 			blob = freshBlob
 		}
@@ -319,7 +346,7 @@ func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.
 	}
 	u, err := usage.Fetch(token)
 	if err == nil {
-		if _, writeErr := syncLiveIfActive(email, orgUUID, blob); writeErr != nil {
+		if writeErr := syncCurrent(blob); writeErr != nil {
 			return usage.AccountUsage{}, fmt.Errorf("monitor: save active live token: %w", writeErr)
 		}
 		return u, nil
@@ -373,6 +400,17 @@ func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.
 	// still worth having, and leaving the stale backup in place keeps the
 	// slot repairable by `cux add`, which can attribute the token properly.
 	// `cux status` reports pools already in this state.
+	//
+	// Under a terminal scope this process's directory is a profile, which
+	// may hold a login of this seat made there on its own while the backup
+	// follows another directory. Adopting it then would let that other
+	// directory's next sync copy it, giving one token two holders; adopt
+	// only when the profile is the seat's sole holder.
+	if profile.TerminalScoped() {
+		if _, elsewhere, lerr := profile.LiveElsewhere(state, slot, os.Getenv(paths.EnvClaudeConfigDir)); lerr != nil || elsewhere {
+			return u2, nil
+		}
+	}
 	refs := make([]creds.SlotRef, 0, len(others))
 	for _, o := range others {
 		refs = append(refs, creds.SlotRef{Slot: o.Slot, Email: o.Email})
@@ -384,8 +422,12 @@ func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.
 	return u2, nil
 }
 
+// syncLiveIfActive writes blob into this process's live login when that
+// login is the same account. Under a terminal scope this process's
+// directory is a profile, and profile.SyncRefreshed — which also checks the
+// profile holds the token being replaced — is what writes there.
 func syncLiveIfActive(email, orgUUID, blob string) (bool, error) {
-	if email == "" || blob == "" {
+	if email == "" || blob == "" || profile.TerminalScoped() {
 		return false, nil
 	}
 	_, parsed, err := claudecfg.ReadOAuthBlock()

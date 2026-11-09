@@ -532,7 +532,7 @@ func promptSwitchHasTarget() (bool, string) {
 		if !inPool {
 			continue
 		}
-		if slot != state.ActiveSlot && accountHasPromptCapacity(cache, acct, cfg.Thresholds) {
+		if slot != switcher.SessionSlot(state) && accountHasPromptCapacity(cache, acct, cfg.Thresholds) {
 			return true, ""
 		}
 	}
@@ -568,8 +568,10 @@ func renderPromptUsage(refresh bool) (string, error) {
 	liveEmail, _ := switcher.CurrentLiveEmail()
 	activeSlot := 0
 	activeEmail := "(unknown)"
-	if state.ActiveSlot != 0 {
-		if acct, ok := state.Accounts[state.ActiveSlot]; ok {
+	// Inside a terminal-scoped session the seat that matters is the one this
+	// session runs on, not the shared login's.
+	if sessionSlot := switcher.SessionSlot(state); sessionSlot != 0 {
+		if acct, ok := state.Accounts[sessionSlot]; ok {
 			activeSlot = acct.Slot
 			activeEmail = acct.Email
 		}

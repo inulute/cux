@@ -277,13 +277,27 @@ Terminal scope needs, per seat:
 2. a profile directory that Claude Code has already initialised:
    run `CLAUDE_CONFIG_DIR=~/.claude-<name> claude` once, and
    `CLAUDE_CONFIG_DIR=~/.claude-<name> cux setup` so `/switch` and the
-   hooks exist inside it too.
+   hooks exist inside it too. cux refuses a profile without them.
 
-cux copies the seat's stored login into the profile only while the
-profile is not already logged in as that seat. Once it is, the
-profile's own Claude Code keeps refreshing that login and cux leaves it
-alone. A session started on a profile stays on profiles: automatic
-swaps move it to the next seat's profile, and `--all` is refused there.
+A refresh token may be live in one config directory at most: the
+server rotates it on every refresh and revokes the old one, so two
+directories holding one token sign each other out. So:
+
+- cux copies the seat's stored login into the profile only while no
+  config directory — the shared one, or any other `~/.claude-*` — is
+  logged in as that seat. If one is, the switch is refused with a hint
+  to `/login` once in the profile instead.
+- Once the profile is logged in as the seat, the profile owns that
+  login: its Claude Code keeps refreshing it, cux takes the refreshed
+  login into its backup, hands a token it refreshed itself to the
+  profile, and never copies the login into the shared directory —
+  `--all` to that seat is refused while the profile holds it.
+- Only the account login is copied; MCP server logins stay in the
+  directory they were made in.
+
+A session started on a profile stays on profiles: automatic swaps move
+it to the next seat's profile, rotation starts from the profile's seat,
+and `--all` is refused there.
 
 A `/switch` sent to a session whose wrapper started before this version
 refuses rather than moving every session; restart that session with

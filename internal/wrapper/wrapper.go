@@ -1940,9 +1940,10 @@ func poolExcluding(state *store.State, excluded map[int]bool) map[int]store.Acco
 // fresh installs can rotate before the first refresh completes.
 func rotateFallback(state *store.State, cache usage.Cache, cfg *config.Config, excluded map[int]bool) (string, error) {
 	pool := poolExcluding(state, excluded)
+	current := switcher.SessionSlot(state)
 	for _, slot := range rotationSlots(state) {
 		acct, ok := pool[slot]
-		if !ok || slot == state.ActiveSlot {
+		if !ok || slot == current {
 			continue
 		}
 		if accountHasSwitchCapacity(cache, acct.CacheKey(), cfg) {
@@ -1952,9 +1953,11 @@ func rotateFallback(state *store.State, cache usage.Cache, cfg *config.Config, e
 	return "", errors.New("no usable accounts available; all managed accounts are exhausted or need login")
 }
 
+// rotationSlots starts after the seat this session runs on, which under a
+// terminal scope is its profile's seat rather than the shared login's.
 func rotationSlots(state *store.State) []int {
 	slots := state.SortedSlots()
-	if next := state.NextInRotation(state.ActiveSlot); next != 0 {
+	if next := state.NextInRotation(switcher.SessionSlot(state)); next != 0 {
 		for i, slot := range slots {
 			if slot == next {
 				return append(slots[i:], slots[:i]...)

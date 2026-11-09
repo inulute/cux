@@ -70,7 +70,18 @@ func Install() ([]string, error) {
 // settings file. It is intentionally tolerant of older cux hook shapes:
 // if an event contains a cux-owned command, setup has at least been run.
 func Installed() (bool, error) {
-	settings, err := loadSettings(false)
+	return installedAt(settingsPath())
+}
+
+// InstalledIn is Installed for the configuration directory configDir, read
+// without touching CLAUDE_CONFIG_DIR. A claude started on that directory
+// reads its hooks from there, not from the shared settings.
+func InstalledIn(configDir string) (bool, error) {
+	return installedAt(filepath.Join(paths.ClaudeDirIn(configDir), "settings.json"))
+}
+
+func installedAt(path string) (bool, error) {
+	settings, err := loadSettingsAt(path, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -138,7 +149,10 @@ func VerifyOnPATH() (string, error) {
 // If the file is missing and createIfMissing is true, returns an empty
 // map ready to be written back.
 func loadSettings(createIfMissing bool) (map[string]json.RawMessage, error) {
-	path := settingsPath()
+	return loadSettingsAt(settingsPath(), createIfMissing)
+}
+
+func loadSettingsAt(path string, createIfMissing bool) (map[string]json.RawMessage, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

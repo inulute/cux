@@ -2,10 +2,13 @@ package switcher
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/inulute/cux/internal/hookinstall"
 	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/store"
 )
@@ -35,7 +38,58 @@ func twoSeatsWithProfiles(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(`{"theme":"dark"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		setUpCuxIn(t, dir)
 	}
+}
+
+// setUpCuxIn does what `CLAUDE_CONFIG_DIR=<dir> cux setup` does for a
+// profile: cux's hooks and /switch in that directory.
+func setUpCuxIn(t *testing.T, dir string) {
+	t.Helper()
+	prev, had := os.LookupEnv(paths.EnvClaudeConfigDir)
+	_ = os.Setenv(paths.EnvClaudeConfigDir, dir)
+	_, err := hookinstall.Install()
+	if had {
+		_ = os.Setenv(paths.EnvClaudeConfigDir, prev)
+	} else {
+		_ = os.Unsetenv(paths.EnvClaudeConfigDir)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "commands"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "commands", "switch.md"), []byte("/switch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// loginIn logs configDir in as email with blob, the way Claude Code's own
+// /login in that directory would.
+func loginIn(t *testing.T, configDir, email, uuid, blob string) {
+	t.Helper()
+	if err := os.MkdirAll(paths.ClaudeDirIn(configDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ClaudeCredentialsIn(configDir), []byte(blob), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := json.Marshal(map[string]any{
+		"theme":        "dark",
+		"oauthAccount": map[string]any{"emailAddress": email, "accountUuid": uuid},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ClaudeConfigIn(configDir), cfg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// blobExpiring is a login whose access token expires at ms.
+func blobExpiring(token string, ms int64) string {
+	return fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q,"refreshToken":"r-%s","expiresAt":%d}}`, token, token, ms)
 }
 
 func snapshot(t *testing.T, files ...string) [][]byte {

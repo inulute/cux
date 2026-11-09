@@ -143,8 +143,9 @@ func slashSwitchTerminal(state *store.State, acct store.Account, resolved string
 		fmt.Fprintf(w, "cux: this session is already on %s, nothing to do\n", acct.Email)
 		return nil
 	}
-	// Refuse before the wrapper stops claude, not after.
-	dir, err := switcher.ProfileDir(acct)
+	// Refuse before the wrapper stops claude, not after: a profile that is
+	// not ready, or a login that would get a second live holder.
+	dir, _, err := switcher.PrepareTerminal(state, acct)
 	if err != nil {
 		return err
 	}

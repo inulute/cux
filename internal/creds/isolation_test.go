@@ -11,5 +11,6 @@ import (
 func TestMain(m *testing.M) {
 	_ = os.Unsetenv("CLAUDE_CONFIG_DIR")
 	_ = os.Unsetenv("CUX_SCOPE")
+	_ = os.Unsetenv("CUX_SHARED_CONFIG_DIR")
 	os.Exit(m.Run())
 }

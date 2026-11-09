@@ -22,6 +22,19 @@ Starts at v0.3.10. Earlier releases are on the
   the next seat's profile, and `--all` is refused inside it.
 - A terminal-only `/switch` sent to a wrapper from an earlier version refuses
   instead of moving every session, since that wrapper would ignore the scope.
+- A seat's login is copied into its profile only while no config directory
+  (the shared one or another `~/.claude-*`) is logged in as that seat; one
+  refresh token in two places lets the first refresh sign the other out.
+  `--all` likewise refuses a seat whose own profile holds its login.
+- The backup and a profile that owns the seat's login follow each other: a
+  login the profile refreshed is taken into the backup (on every poll and when
+  a terminal leaves the profile), and a token cux refreshed is written into the
+  profile. Only the account login is copied, never another directory's MCP
+  logins.
+- A profile without cux's hooks and `/switch` is refused, with the
+  `CLAUDE_CONFIG_DIR=… cux setup` hint.
+- Inside a terminal-scoped session, rotation and `/cux:list` use the seat that
+  session runs on, not the shared login's.
 
 ### Fixed
 
