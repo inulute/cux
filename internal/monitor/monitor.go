@@ -289,26 +289,21 @@ func refreshActive(email string, maxAge time.Duration) error {
 // only on the post-401 fallback path to check a live token is not already
 // filed under another slot; pass nil to skip that check.
 //
-// A seat logged in in its own profile (~/.claude-<alias>) is kept in step
-// with the backup both ways: a login the profile's claude refreshed is
-// taken into the backup first (profile.Reconcile), and a token refreshed
-// here is handed to the profile (profile.SyncRefreshed). Without that the
-// two hold one refresh token that only one of them still has valid.
+// A refresh rotates the seat's refresh token and revokes the old one, so it
+// is only safe where cux can hand the new token to every directory holding
+// the old one. That is this process's own directory and nothing else: a
+// seat whose stored refresh token is live in any other directory — the
+// shared login seen from a terminal-scoped process, or a seat's own
+// ~/.claude-<alias> profile seen from the shared terminal — is polled with
+// that directory's token and never refreshed from here. Its claude
+// refreshes it. A login a profile's claude refreshed on its own is taken
+// into the backup first (profile.Reconcile).
 func refreshOne(state *store.State, acct store.Account, others []store.Account) (usage.AccountUsage, error) {
 	slot, email, orgUUID := acct.Slot, acct.Email, acct.OrgUUID
-	owned, err := profile.Reconcile(state, acct)
-	if err != nil {
+	if _, err := profile.Reconcile(state, acct); err != nil {
 		return usage.AccountUsage{}, fmt.Errorf("monitor: take the profile's login into the backup: %w", err)
 	}
-	// When the seat lives in its own profile, the backup follows the
-	// profile. Writing it into this process's directory as well, because
-	// that directory's identity file names the seat, would give the
-	// profile's token a second holder.
-	ownProfile := owned && creds.LiveLocation(profile.Dir(acct.Alias)) != creds.LiveLocation(os.Getenv(paths.EnvClaudeConfigDir))
 	syncCurrent := func(b string) error {
-		if ownProfile {
-			return nil
-		}
 		_, err := syncLiveIfActive(email, orgUUID, b)
 		return err
 	}
@@ -316,11 +311,18 @@ func refreshOne(state *store.State, acct store.Account, others []store.Account) 
 	if err != nil {
 		return usage.AccountUsage{}, err
 	}
+	holder, held, err := profile.HeldElsewhere(state, slot, os.Getenv(paths.EnvClaudeConfigDir), blob)
+	if err != nil {
+		return usage.AccountUsage{}, fmt.Errorf("monitor: %w", err)
+	}
+	if held {
+		return pollHeldElsewhere(slot, holder)
+	}
 
 	// Proactively refresh before we even try the API if the token is
 	// expired or within the 5-minute buffer window.
 	if creds.IsTokenExpired(blob) {
-		if freshBlob, refreshErr := creds.RefreshBlob(blob); refreshErr == nil {
+		if freshBlob, refreshErr := refreshBlob(blob); refreshErr == nil {
 			if writeErr := creds.WriteBackup(slot, email, freshBlob); writeErr != nil {
 				// If we can't persist the new token, the refresh token may
 				// be single-use (OAuth 2.1) and we'd permanently lose access.
@@ -420,6 +422,25 @@ func refreshOne(state *store.State, acct store.Account, others []store.Account) 
 		_ = creds.WriteBackup(slot, email, liveBlob)
 	}
 	return u2, nil
+}
+
+// refreshBlob is creds.RefreshBlob; tests replace it to count refreshes.
+var refreshBlob = creds.RefreshBlob
+
+// pollHeldElsewhere reads a seat's usage with the token of the directory
+// that runs on it. It never refreshes: that would revoke the token the
+// directory's claude holds. When the token has expired the last reading is
+// kept until that claude refreshes it.
+func pollHeldElsewhere(slot int, h profile.Holder) (usage.AccountUsage, error) {
+	if creds.IsTokenExpired(h.Blob) {
+		return usage.AccountUsage{}, fmt.Errorf("monitor: slot %d is logged in at %s, whose claude refreshes it; "+
+			"its access token has expired, so the last reading stays until that claude runs", slot, profile.Label(h.Dir))
+	}
+	token, err := creds.ExtractAccessToken(h.Blob)
+	if err != nil {
+		return usage.AccountUsage{}, err
+	}
+	return usage.Fetch(token)
 }
 
 // syncLiveIfActive writes blob into this process's live login when that

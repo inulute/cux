@@ -9,10 +9,13 @@
 // refreshes first revokes the other.
 //
 // cux's own backup of a seat is the one copy allowed beside the live one,
-// and only because cux keeps the two in step. This package is where that
-// is decided for profiles: which directories hold a seat, whether a stored
-// login may be copied into a profile, and how a profile's login and the
-// backup follow each other.
+// and only because cux never refreshes it while another directory runs on
+// the same token: the monitor refreshes a backup only when no directory but
+// its own process's, which it can hand the new token to, holds that token.
+// This package is where that
+// is decided: which directories hold a seat, whether a stored login may be
+// copied into a profile, and how a profile's login and the backup follow
+// each other.
 package profile
 
 import (
@@ -208,21 +211,23 @@ func LiveElsewhere(state *store.State, slot int, configDir string) (string, bool
 	return "", false, nil
 }
 
-// HeldByOwnProfile reports whether a's own profile is logged in as a, with
-// a login that can refresh, and stores it somewhere other than configDir.
-func HeldByOwnProfile(state *store.State, a store.Account, configDir string) (bool, error) {
-	if a.Alias == "" {
-		return false, nil
+// HeldElsewhere returns a directory other than configDir that is logged in
+// with stored's login, the same refresh token. That directory's
+// claude runs on the token, so refreshing stored anywhere else would revoke
+// it there, and only configDir's own login can be handed the new one. It
+// checks by token, not by identity file: a directory logged in as the seat
+// on its own, with another token, is not affected by a refresh of stored.
+func HeldElsewhere(state *store.State, slot int, configDir, stored string) (Holder, bool, error) {
+	holders, err := Holders(state, slot)
+	if err != nil {
+		return Holder{}, false, err
 	}
-	dir := Dir(a.Alias)
-	if creds.LiveLocation(dir) == creds.LiveLocation(configDir) {
-		return false, nil
+	for _, h := range holders {
+		if creds.LiveLocation(h.Dir) != creds.LiveLocation(configDir) && creds.SameLogin(h.Blob, stored) {
+			return h, true, nil
+		}
 	}
-	blob, ok, err := loginIn(state, a.Slot, dir)
-	if err != nil || !ok {
-		return false, err
-	}
-	return creds.HasRefreshToken(blob), nil
+	return Holder{}, false, nil
 }
 
 // Reconcile brings a seat's backup up to date with its own profile when the

@@ -156,11 +156,26 @@ func TestHoldersSkipsLoginsThatCannotRefresh(t *testing.T) {
 	if len(hs) != 1 || hs[0].Dir != Dir("bb") {
 		t.Fatalf("holders = %+v, want only the profile", hs)
 	}
-	if held, err := HeldByOwnProfile(state, a, ""); err != nil || !held {
-		t.Fatalf("HeldByOwnProfile = %v, %v", held, err)
+	if h, held, err := HeldElsewhere(state, a.Slot, "", blob("t1", time.Now())); err != nil || !held || h.Dir != Dir("bb") {
+		t.Fatalf("HeldElsewhere = %+v, %v, %v", h, held, err)
 	}
-	if held, _ := HeldByOwnProfile(state, a, Dir("bb")); held {
+	if _, held, _ := HeldElsewhere(state, a.Slot, Dir("bb"), blob("t1", time.Now())); held {
 		t.Fatal("the profile itself is not elsewhere")
+	}
+}
+
+// A directory logged in as the seat with its own token does not hold the
+// stored login: refreshing the stored one cannot sign it out.
+func TestHeldElsewhereMatchesByTokenNotByIdentity(t *testing.T) {
+	stored := blob("t1", time.Now())
+	state, a := seat(t, stored)
+	login(t, Dir("bb"), a.Email, blob("own", time.Now()))
+	if _, held, err := HeldElsewhere(state, a.Slot, "", stored); err != nil || held {
+		t.Fatalf("HeldElsewhere = %v, %v; the profile holds another token", held, err)
+	}
+	login(t, "", a.Email, stored)
+	if h, held, err := HeldElsewhere(state, a.Slot, Dir("bb"), stored); err != nil || !held || h.Dir != "" {
+		t.Fatalf("HeldElsewhere from the profile = %+v, %v, %v; want the shared login", h, held, err)
 	}
 }
 
