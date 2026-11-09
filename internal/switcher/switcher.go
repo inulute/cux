@@ -263,7 +263,15 @@ func SwitchTo(identifier string) (from, to store.Account, err error) {
 	// its refresh token there, and the backup follows that copy. Writing
 	// the backup into the shared login too would leave one refresh token in
 	// two places, and whichever refreshes first signs the other out.
-	if at, elsewhere, err := profile.LiveElsewhere(state, target.Slot, os.Getenv(paths.EnvClaudeConfigDir)); err != nil {
+	// The identity file can lag the credentials (issue #46), so the stored
+	// token itself is looked for as well.
+	at, elsewhere, err := profile.LiveElsewhere(state, target.Slot, os.Getenv(paths.EnvClaudeConfigDir))
+	if err == nil && !elsewhere {
+		var h profile.Holder
+		h, elsewhere, err = profile.HeldElsewhere(os.Getenv(paths.EnvClaudeConfigDir), targetCreds)
+		at = h.Dir
+	}
+	if err != nil {
 		return store.Account{}, store.Account{}, err
 	} else if elsewhere {
 		return store.Account{}, store.Account{}, fmt.Errorf(

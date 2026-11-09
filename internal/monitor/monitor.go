@@ -292,12 +292,13 @@ func refreshActive(email string, maxAge time.Duration) error {
 // A refresh rotates the seat's refresh token and revokes the old one, so it
 // is only safe where cux can hand the new token to every directory holding
 // the old one. That is this process's own directory and nothing else: a
-// seat whose stored refresh token is live in any other directory — the
-// shared login seen from a terminal-scoped process, or a seat's own
-// ~/.claude-<alias> profile seen from the shared terminal — is polled with
-// that directory's token and never refreshed from here. Its claude
+// seat whose stored refresh token is live in any other directory cux can
+// find — the shared login seen from a terminal-scoped process, or a seat's
+// own ~/.claude-<alias> profile seen from the shared terminal — is polled
+// with that directory's token and never refreshed from here. Its claude
 // refreshes it. A login a profile's claude refreshed on its own is taken
-// into the backup first (profile.Reconcile).
+// into the backup first (profile.Reconcile), and an expired backup is not
+// refreshed while another directory holds a newer login of the seat.
 func refreshOne(state *store.State, acct store.Account, others []store.Account) (usage.AccountUsage, error) {
 	slot, email, orgUUID := acct.Slot, acct.Email, acct.OrgUUID
 	if _, err := profile.Reconcile(state, acct); err != nil {
@@ -311,7 +312,8 @@ func refreshOne(state *store.State, acct store.Account, others []store.Account) 
 	if err != nil {
 		return usage.AccountUsage{}, err
 	}
-	holder, held, err := profile.HeldElsewhere(state, slot, os.Getenv(paths.EnvClaudeConfigDir), blob)
+	own := os.Getenv(paths.EnvClaudeConfigDir)
+	holder, held, err := profile.HeldElsewhere(own, blob)
 	if err != nil {
 		return usage.AccountUsage{}, fmt.Errorf("monitor: %w", err)
 	}
@@ -322,6 +324,18 @@ func refreshOne(state *store.State, acct store.Account, others []store.Account) 
 	// Proactively refresh before we even try the API if the token is
 	// expired or within the 5-minute buffer window.
 	if creds.IsTokenExpired(blob) {
+		// Another directory's claude refreshed the seat since cux saw it, so
+		// the backup's token is most likely revoked, and every poll would
+		// try it again until the shared terminal adopts the new one. Poll
+		// with that directory's token instead. Not when this process's own
+		// login is the backup's: that one is refreshed here and handed over.
+		if ownLive, _ := creds.ReadLiveIn(own); !creds.SameLogin(ownLive, blob) {
+			if newer, ok, err := profile.NewerElsewhere(state, slot, own, blob); err != nil {
+				return usage.AccountUsage{}, fmt.Errorf("monitor: %w", err)
+			} else if ok {
+				return pollHeldElsewhere(slot, newer)
+			}
+		}
 		if freshBlob, refreshErr := refreshBlob(blob); refreshErr == nil {
 			if writeErr := creds.WriteBackup(slot, email, freshBlob); writeErr != nil {
 				// If we can't persist the new token, the refresh token may

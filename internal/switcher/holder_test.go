@@ -11,6 +11,7 @@ import (
 	"github.com/inulute/cux/internal/creds"
 	"github.com/inulute/cux/internal/paths"
 	"github.com/inulute/cux/internal/profile"
+	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/store"
 )
 
@@ -246,4 +247,106 @@ func TestSwitchTerminalRecordsTheSharedDirectoryOnce(t *testing.T) {
 	if _, _, err := SwitchTerminal("aa"); err == nil {
 		t.Fatal("aa is live in the shared login; the copy must be refused from a profile too")
 	}
+}
+
+// This terminal runs unscoped on ~/.claude-bb, which is logged in as aa: a
+// realistic setup when a seat's profile doubles as a terminal's everyday
+// directory. A terminal switch to bb would copy bb's login into the
+// directory every session of this terminal shares, moving all of them, and
+// drop aa's refresh token there. Refuse and write nothing.
+func TestSwitchTerminalRefusesTheTerminalsOwnSharedDirectory(t *testing.T) {
+	twoSeatsWithProfiles(t)
+	own := filepath.Join(paths.Home(), ".claude-bb")
+	loginIn(t, own, "a@example.com", "uuid-a", blobFor("token-a-own"))
+	t.Setenv(paths.EnvClaudeConfigDir, own)
+	watched := []string{paths.ClaudeCredentialsIn(own), paths.ClaudeConfigIn(own), paths.StateFile()}
+	before := snapshot(t, watched...)
+
+	_, _, err := SwitchTerminal("bb")
+	if err == nil || !strings.Contains(err.Error(), "every session of this terminal shares") {
+		t.Fatalf("SwitchTerminal(bb) = %v, want a refusal naming the shared directory", err)
+	}
+	assertUnchanged(t, watched, before)
+	if os.Getenv(paths.EnvClaudeConfigDir) != own || TerminalScoped() {
+		t.Fatal("a refusal moved this terminal")
+	}
+}
+
+// The same profile logged out: there is no login to lose, but the copy
+// would still rewrite the login this terminal's sessions share.
+func TestSwitchTerminalRefusesTheSharedDirectoryWhenItIsLoggedOut(t *testing.T) {
+	twoSeatsWithProfiles(t)
+	own := filepath.Join(paths.Home(), ".claude-bb")
+	t.Setenv(paths.EnvClaudeConfigDir, own)
+	if _, _, err := SwitchTerminal("bb"); err == nil {
+		t.Fatal("SwitchTerminal(bb) copied a login into this terminal's shared directory")
+	}
+	if _, err := os.Stat(paths.ClaudeCredentialsIn(own)); !os.IsNotExist(err) {
+		t.Fatalf("a login was written into %s: %v", own, err)
+	}
+}
+
+// From inside a scoped terminal, the directory the terminal came from is
+// the shared one, wherever this process now runs.
+func TestSwitchTerminalRefusesTheRecordedSharedDirectory(t *testing.T) {
+	twoSeatsWithProfiles(t)
+	home := paths.Home()
+	profileA, profileB := filepath.Join(home, ".claude-aa"), filepath.Join(home, ".claude-bb")
+	loginIn(t, profileA, "a@example.com", "uuid-a", blobFor("token-a-own"))
+	t.Setenv(paths.EnvClaudeConfigDir, profileA)
+	t.Setenv(EnvScope, ScopeTerminal)
+	t.Setenv(profile.EnvSharedConfigDir, profileB)
+	if _, _, err := SwitchTerminal("bb"); err == nil || !strings.Contains(err.Error(), "every session of this terminal shares") {
+		t.Fatalf("SwitchTerminal(bb) = %v, want a refusal naming the shared directory", err)
+	}
+	if _, err := os.Stat(paths.ClaudeCredentialsIn(profileB)); !os.IsNotExist(err) {
+		t.Fatalf("a login was written into %s: %v", profileB, err)
+	}
+}
+
+// A profile someone ran /login in with the wrong account holds that
+// account's login. Copying the seat's over it would sign that login out.
+func TestSwitchTerminalRefusesAProfileLoggedInAsAnotherAccount(t *testing.T) {
+	twoSeatsWithProfiles(t)
+	profileB := filepath.Join(paths.Home(), ".claude-bb")
+	loginIn(t, profileB, "someone@example.com", "uuid-x", blobFor("token-x"))
+	watched := []string{paths.ClaudeCredentialsIn(profileB), paths.ClaudeConfigIn(profileB)}
+	before := snapshot(t, watched...)
+	if _, _, err := SwitchTerminal("bb"); err == nil || !strings.Contains(err.Error(), "someone@example.com") {
+		t.Fatalf("SwitchTerminal(bb) = %v, want a refusal naming the login there", err)
+	}
+	assertUnchanged(t, watched, before)
+}
+
+// A directory outside $HOME/.claude and $HOME/.claude-* that a running
+// wrapper launched claude on is looked in too.
+func TestSwitchTerminalRefusesASeatLiveInAWrappersDirectory(t *testing.T) {
+	twoSeatsWithProfiles(t)
+	custom := t.TempDir()
+	loginIn(t, custom, "b@example.com", "uuid-b", blobFor("token-b"))
+	registry.UpdateSelf(func(e *registry.Entry) { e.ConfigDir = custom })
+	t.Cleanup(registry.RemoveSelf)
+	if _, _, err := SwitchTerminal("bb"); err == nil || !strings.Contains(err.Error(), custom) {
+		t.Fatalf("SwitchTerminal(bb) = %v, want a refusal naming %s", err, custom)
+	}
+	if _, err := os.Stat(paths.ClaudeCredentialsIn(filepath.Join(paths.Home(), ".claude-bb"))); !os.IsNotExist(err) {
+		t.Fatalf("B's login was copied: %v", err)
+	}
+}
+
+// A directory whose identity file lags its credentials still runs on the
+// token it holds; the copy and --all both look for the token itself.
+func TestSwitchesRefuseATokenLiveUnderAnotherIdentity(t *testing.T) {
+	twoSeatsWithProfiles(t)
+	spare := filepath.Join(paths.Home(), ".claude-spare")
+	loginIn(t, spare, "someone@example.com", "uuid-x", blobFor("token-b"))
+	if _, _, err := SwitchTerminal("bb"); err == nil || !strings.Contains(err.Error(), spare) {
+		t.Fatalf("SwitchTerminal(bb) = %v, want a refusal naming %s", err, spare)
+	}
+	shared := []string{paths.ClaudeCredentials(), paths.ClaudeConfig(), paths.StateFile()}
+	before := snapshot(t, shared...)
+	if _, _, err := SwitchTo("bb"); err == nil || !strings.Contains(err.Error(), spare) {
+		t.Fatalf("SwitchTo(bb) = %v, want a refusal naming %s", err, spare)
+	}
+	assertUnchanged(t, shared, before)
 }

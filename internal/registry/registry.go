@@ -42,7 +42,8 @@ type Entry struct {
 	PID        int       `json:"pid"`
 	CWD        string    `json:"cwd"`
 	SessionID  string    `json:"sessionId,omitempty"`
-	Seat       string    `json:"seat,omitempty"` // email claude was last launched on
+	Seat       string    `json:"seat,omitempty"`      // email claude was last launched on
+	ConfigDir  string    `json:"configDir,omitempty"` // CLAUDE_CONFIG_DIR claude was last launched with, "" for the default
 	State      string    `json:"state"`
 	Attachable bool      `json:"attachable,omitempty"` // wrapper serves an attach socket
 	Detail     string    `json:"detail,omitempty"`     // human hint: "reset in 1h23m", "attempt 3"
@@ -111,6 +112,33 @@ func List() []Entry {
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.Before(out[j].StartedAt) })
+	return out
+}
+
+// ConfigDirs returns the configuration directories live wrappers last
+// launched claude on, as each reported it, leaving out the default. Unlike
+// List it only reads: it runs on every usage poll.
+func ConfigDirs() []string {
+	entries, err := os.ReadDir(dir())
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, de := range entries {
+		if de.IsDir() || filepath.Ext(de.Name()) != ".json" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir(), de.Name()))
+		if err != nil {
+			continue
+		}
+		var e Entry
+		if json.Unmarshal(b, &e) != nil || e.PID == 0 || e.ConfigDir == "" || !processAlive(e.PID) {
+			continue
+		}
+		out = append(out, e.ConfigDir)
+	}
+	sort.Strings(out)
 	return out
 }
 

@@ -241,6 +241,9 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 	triedModels := map[string]bool{}
 
 	for {
+		// Recorded whether or not the seat can be read: other cux processes
+		// look for a seat's live logins in every directory a wrapper runs on.
+		registry.UpdateSelf(func(e *registry.Entry) { e.ConfigDir = os.Getenv(paths.EnvClaudeConfigDir) })
 		if seat, err := switcher.CurrentLiveEmail(); err == nil {
 			registry.UpdateSelf(func(e *registry.Entry) {
 				e.State = registry.StateRunning

@@ -10,6 +10,7 @@ import (
 
 	"github.com/inulute/cux/internal/creds"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/store"
 )
 
@@ -156,10 +157,10 @@ func TestHoldersSkipsLoginsThatCannotRefresh(t *testing.T) {
 	if len(hs) != 1 || hs[0].Dir != Dir("bb") {
 		t.Fatalf("holders = %+v, want only the profile", hs)
 	}
-	if h, held, err := HeldElsewhere(state, a.Slot, "", blob("t1", time.Now())); err != nil || !held || h.Dir != Dir("bb") {
+	if h, held, err := HeldElsewhere("", blob("t1", time.Now())); err != nil || !held || h.Dir != Dir("bb") {
 		t.Fatalf("HeldElsewhere = %+v, %v, %v", h, held, err)
 	}
-	if _, held, _ := HeldElsewhere(state, a.Slot, Dir("bb"), blob("t1", time.Now())); held {
+	if _, held, _ := HeldElsewhere(Dir("bb"), blob("t1", time.Now())); held {
 		t.Fatal("the profile itself is not elsewhere")
 	}
 }
@@ -168,13 +169,13 @@ func TestHoldersSkipsLoginsThatCannotRefresh(t *testing.T) {
 // stored login: refreshing the stored one cannot sign it out.
 func TestHeldElsewhereMatchesByTokenNotByIdentity(t *testing.T) {
 	stored := blob("t1", time.Now())
-	state, a := seat(t, stored)
+	_, a := seat(t, stored)
 	login(t, Dir("bb"), a.Email, blob("own", time.Now()))
-	if _, held, err := HeldElsewhere(state, a.Slot, "", stored); err != nil || held {
+	if _, held, err := HeldElsewhere("", stored); err != nil || held {
 		t.Fatalf("HeldElsewhere = %v, %v; the profile holds another token", held, err)
 	}
 	login(t, "", a.Email, stored)
-	if h, held, err := HeldElsewhere(state, a.Slot, Dir("bb"), stored); err != nil || !held || h.Dir != "" {
+	if h, held, err := HeldElsewhere(Dir("bb"), stored); err != nil || !held || h.Dir != "" {
 		t.Fatalf("HeldElsewhere from the profile = %+v, %v, %v; want the shared login", h, held, err)
 	}
 }
@@ -192,5 +193,66 @@ func TestConfigDirsCountsOneLocationOnce(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("the default login is listed %d times", n)
+	}
+}
+
+// A directory whose identity file names someone else while its credentials
+// carry the stored token (a switch caught half way, issue #46) still runs on
+// that token.
+func TestHeldElsewhereIgnoresALaggingIdentityFile(t *testing.T) {
+	stored := blob("t1", time.Now())
+	_, a := seat(t, stored)
+	login(t, Dir("spare"), "someone-else@example.com", stored)
+	if h, held, err := HeldElsewhere(Dir(a.Alias), stored); err != nil || !held || h.Dir != Dir("spare") {
+		t.Fatalf("HeldElsewhere = %+v, %v, %v; want %s", h, held, err, Dir("spare"))
+	}
+}
+
+// A seat's claude in another directory refreshed on its own: its login
+// outlives the backup, and is reported. An older one is not.
+func TestNewerElsewhereComparesExpiry(t *testing.T) {
+	now := time.Now()
+	stored := blob("t1", now)
+	state, a := seat(t, stored)
+	login(t, "", a.Email, blob("t0", now.Add(-time.Hour)))
+	if _, ok, err := NewerElsewhere(state, a.Slot, Dir("bb"), stored); err != nil || ok {
+		t.Fatalf("NewerElsewhere = %v, %v; the shared login is older than the backup", ok, err)
+	}
+	login(t, "", a.Email, blob("t2", now.Add(time.Hour)))
+	if h, ok, err := NewerElsewhere(state, a.Slot, Dir("bb"), stored); err != nil || !ok || h.Dir != "" {
+		t.Fatalf("NewerElsewhere = %+v, %v, %v; want the shared login", h, ok, err)
+	}
+	if _, ok, _ := NewerElsewhere(state, a.Slot, "", stored); ok {
+		t.Fatal("this process's own directory is not elsewhere")
+	}
+}
+
+// A running wrapper's directory is looked in even when it is outside
+// $HOME/.claude and $HOME/.claude-*.
+func TestConfigDirsIncludesARunningWrappersDirectory(t *testing.T) {
+	seat(t, blob("t1", time.Now()))
+	custom := t.TempDir()
+	registry.UpdateSelf(func(e *registry.Entry) { e.ConfigDir = custom })
+	t.Cleanup(registry.RemoveSelf)
+	for _, d := range ConfigDirs() {
+		if d == custom {
+			return
+		}
+	}
+	t.Fatalf("ConfigDirs() = %v, want %s in it", ConfigDirs(), custom)
+}
+
+// The terminal's own shared directory: its CLAUDE_CONFIG_DIR until a
+// scoped switch, and the one recorded by that switch afterwards.
+func TestSharedDirFollowsTheScope(t *testing.T) {
+	seat(t, blob("t1", time.Now()))
+	t.Setenv(paths.EnvClaudeConfigDir, Dir("bb"))
+	if got := SharedDir(); got != Dir("bb") {
+		t.Fatalf("unscoped SharedDir() = %q", got)
+	}
+	t.Setenv(EnvScope, ScopeTerminal)
+	t.Setenv(EnvSharedConfigDir, "/somewhere")
+	if got := SharedDir(); got != "/somewhere" {
+		t.Fatalf("scoped SharedDir() = %q", got)
 	}
 }

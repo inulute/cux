@@ -202,3 +202,70 @@ func TestRefreshStillRunsForASeatNoOtherDirectoryHolds(t *testing.T) {
 		t.Fatalf("shared = %s, backup = %s; want both on the refreshed token", shared, backup)
 	}
 }
+
+// The shared claude refreshed A on its own, so A's backup holds a token
+// the server has already revoked. A terminal scoped on B's profile does not
+// retry that dead token on every poll: it reads A's usage with the shared
+// login's newer one and leaves the backup for the shared terminal to adopt.
+func TestScopedPollDoesNotRetryABackupTheSharedLoginOutgrew(t *testing.T) {
+	home, refreshes := holderEnv(t)
+	holderSeats(t,
+		store.Account{Slot: 1, Email: "a@example.com", UUID: "u-a"},
+		store.Account{Slot: 2, Email: "b@example.com", UUID: "u-b", Alias: "bb"})
+	staleA := holderBlob("ta", time.Now().Add(-time.Hour))
+	if err := creds.WriteBackup(1, "a@example.com", staleA); err != nil {
+		t.Fatal(err)
+	}
+	rotatedA := holderBlob("ta2", time.Now().Add(7*time.Hour))
+	holderLogin(t, "", "a@example.com", "u-a", rotatedA)
+	profileB := filepath.Join(home, ".claude-bb")
+	ownB := holderBlob("tb", time.Now().Add(time.Hour))
+	if err := creds.WriteBackup(2, "b@example.com", ownB); err != nil {
+		t.Fatal(err)
+	}
+	holderLogin(t, profileB, "b@example.com", "u-b", ownB)
+	t.Setenv(paths.EnvClaudeConfigDir, profileB)
+	t.Setenv(profile.EnvScope, profile.ScopeTerminal)
+
+	if _, errs := RefreshAll(); len(errs) != 0 {
+		t.Fatalf("RefreshAll: %v", errs)
+	}
+	if *refreshes != 0 {
+		t.Fatalf("%d refreshes of a backup the shared login has outgrown", *refreshes)
+	}
+	backupA, _ := creds.ReadBackup(1, "a@example.com")
+	if shared := readLogin(t, ""); shared != rotatedA || backupA != staleA {
+		t.Fatalf("shared = %s, backup = %s; a scoped poll must write neither", shared, backupA)
+	}
+}
+
+// The shared terminal runs B on the backup's token, which has expired, and
+// B's profile holds a newer login of its own. The backup's token is this
+// process's, so it is still refreshed here and handed to the shared login;
+// the profile's newer login does not stand in for it.
+func TestSharedTerminalStillRefreshesItsOwnLoginBesideANewerProfileLogin(t *testing.T) {
+	home, refreshes := holderEnv(t)
+	holderSeats(t, store.Account{Slot: 2, Email: "b@example.com", UUID: "u-b", Alias: "bb"})
+	sharedB := holderBlob("ts", time.Now().Add(-time.Minute))
+	if err := creds.WriteBackup(2, "b@example.com", sharedB); err != nil {
+		t.Fatal(err)
+	}
+	holderLogin(t, "", "b@example.com", "u-b", sharedB)
+	ownProfile := holderBlob("tp", time.Now().Add(5*time.Hour))
+	profileB := filepath.Join(home, ".claude-bb")
+	holderLogin(t, profileB, "b@example.com", "u-b", ownProfile)
+
+	if _, errs := RefreshAll(); len(errs) != 0 {
+		t.Fatalf("RefreshAll: %v", errs)
+	}
+	if *refreshes != 1 {
+		t.Fatalf("refreshes = %d, want 1", *refreshes)
+	}
+	backup, _ := creds.ReadBackup(2, "b@example.com")
+	if shared := readLogin(t, ""); !creds.SameLogin(shared, backup) || creds.SameLogin(backup, sharedB) {
+		t.Fatalf("shared = %s, backup = %s; the shared login must get the refreshed token", shared, backup)
+	}
+	if got := readLogin(t, profileB); got != ownProfile {
+		t.Fatalf("the profile's own login was replaced: %s", got)
+	}
+}

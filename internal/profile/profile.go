@@ -9,11 +9,10 @@
 // refreshes first revokes the other.
 //
 // cux's own backup of a seat is the one copy allowed beside the live one,
-// and only because cux never refreshes it while another directory runs on
-// the same token: the monitor refreshes a backup only when no directory but
-// its own process's, which it can hand the new token to, holds that token.
-// This package is where that
-// is decided: which directories hold a seat, whether a stored login may be
+// and only because cux never refreshes it while another directory it can
+// find runs on the same token: the monitor refreshes a backup only when no
+// directory but its own process's, which it can hand the new token to,
+// holds that token. This package is where that is decided: which directories hold a seat, whether a stored login may be
 // copied into a profile, and how a profile's login and the backup follow
 // each other.
 package profile
@@ -29,6 +28,7 @@ import (
 	"github.com/inulute/cux/internal/creds"
 	"github.com/inulute/cux/internal/hookinstall"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/store"
 )
 
@@ -48,6 +48,16 @@ const (
 // through a terminal-scoped switch.
 func TerminalScoped() bool {
 	return os.Getenv(EnvScope) == ScopeTerminal
+}
+
+// SharedDir is the configuration directory whose login every session of
+// this terminal shares: CLAUDE_CONFIG_DIR until a terminal-scoped switch,
+// and the directory that switch recorded afterwards ("" for the default).
+func SharedDir() string {
+	if TerminalScoped() {
+		return os.Getenv(EnvSharedConfigDir)
+	}
+	return os.Getenv(paths.EnvClaudeConfigDir)
 }
 
 // Dir is a seat's own profile directory, $HOME/.claude-<alias>.
@@ -94,9 +104,11 @@ func Check(a store.Account) (string, error) {
 }
 
 // ConfigDirs returns every Claude Code configuration directory a login can
-// be live in on this machine: the default one, $HOME/.claude named
-// explicitly, the shared directory a scoped terminal came from, this
-// process's own, and every initialised $HOME/.claude-* directory. Two
+// be live in on this machine, as far as cux can tell: the default one,
+// $HOME/.claude named explicitly, the shared directory a scoped terminal
+// came from, this process's own, every directory a running cux wrapper
+// launched claude on, and every initialised $HOME/.claude-* directory. A
+// claude started without cux on a directory outside these is not seen. Two
 // directories that store their login in one place count once.
 func ConfigDirs() []string {
 	cands := []string{
@@ -105,6 +117,7 @@ func ConfigDirs() []string {
 		os.Getenv(EnvSharedConfigDir),
 		os.Getenv(paths.EnvClaudeConfigDir),
 	}
+	cands = append(cands, registry.ConfigDirs()...)
 	matches, _ := filepath.Glob(filepath.Join(paths.Home(), ".claude-*"))
 	sort.Strings(matches)
 	for _, m := range matches {
@@ -171,13 +184,52 @@ func loginIn(state *store.State, slot int, configDir string) (string, bool, erro
 
 // NeedsCopy reports whether target's stored login has to be copied into
 // dir, its profile, and refuses when that copy would give the login a
-// second live holder. It writes nothing.
+// second live holder, rewrite the login this terminal's sessions share, or
+// replace another login dir holds. It writes nothing.
 func NeedsCopy(state *store.State, target store.Account, dir string) (bool, error) {
 	if _, ok, err := loginIn(state, target.Slot, dir); err != nil {
 		return false, err
 	} else if ok {
 		// The profile's own claude keeps this login fresh; nothing to copy.
 		return false, nil
+	}
+	if creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
+		return false, fmt.Errorf(
+			"%s is the directory every session of this terminal shares, and it is not logged in as slot %d (%s); "+
+				"copying the seat's login there would move all of them — run `cux switch --all %s` for that, "+
+				"or log in there with `CLAUDE_CONFIG_DIR=%s claude` and /login",
+			dir, target.Slot, target.Email, target.Alias, dir)
+	}
+	stored, err := creds.ReadBackup(target.Slot, target.Email)
+	if err != nil && !errors.Is(err, creds.ErrNotFound) {
+		return false, err
+	}
+	switch live, err := creds.ReadLiveIn(dir); {
+	case err == nil:
+		// A login that can refresh is some claude's; replacing it would sign
+		// that claude out and drop the token, whichever seat it belongs to.
+		if creds.HasRefreshToken(live) && !creds.SameLogin(live, stored) {
+			return false, fmt.Errorf(
+				"%s is logged in as %s, not slot %d (%s); copying the seat's login there would sign that login out — "+
+					"log out there first (`CLAUDE_CONFIG_DIR=%s claude`, then /logout)",
+				dir, accountIn(dir), target.Slot, target.Email, dir)
+		}
+	case errors.Is(err, creds.ErrNotFound), errors.Is(err, creds.ErrNoAccountToken):
+	default:
+		return false, fmt.Errorf("reading the login in %s: %w", dir, err)
+	}
+	if stored != "" {
+		// The identity file can lag the credentials (mid-switch, issue #46),
+		// so look for the token itself too.
+		if h, ok, err := HeldElsewhere(dir, stored); err != nil {
+			return false, err
+		} else if ok {
+			return false, fmt.Errorf(
+				"slot %d (%s)'s stored login is live at %s; copying it into %s would leave one refresh token in two "+
+					"places, and whichever refreshes first signs the other out — run `CLAUDE_CONFIG_DIR=%s claude` "+
+					"and /login once instead",
+				target.Slot, target.Email, Label(h.Dir), dir, dir)
+		}
 	}
 	holders, err := Holders(state, target.Slot)
 	if err != nil {
@@ -211,23 +263,62 @@ func LiveElsewhere(state *store.State, slot int, configDir string) (string, bool
 	return "", false, nil
 }
 
-// HeldElsewhere returns a directory other than configDir that is logged in
-// with stored's login, the same refresh token. That directory's
-// claude runs on the token, so refreshing stored anywhere else would revoke
-// it there, and only configDir's own login can be handed the new one. It
-// checks by token, not by identity file: a directory logged in as the seat
-// on its own, with another token, is not affected by a refresh of stored.
-func HeldElsewhere(state *store.State, slot int, configDir, stored string) (Holder, bool, error) {
+// HeldElsewhere returns a directory other than configDir whose live login
+// is stored's, the same refresh token. That directory's claude runs on the
+// token, so refreshing stored anywhere else would revoke it there, and only
+// configDir's own login can be handed the new one. It checks by token, not
+// by identity file: a directory logged in as the seat on its own, with
+// another token, is not affected by a refresh of stored, and a directory
+// whose identity file lags its credentials still is.
+func HeldElsewhere(configDir, stored string) (Holder, bool, error) {
+	if !creds.HasRefreshToken(stored) {
+		return Holder{}, false, nil
+	}
+	here := creds.LiveLocation(configDir)
+	for _, d := range ConfigDirs() {
+		if creds.LiveLocation(d) == here {
+			continue
+		}
+		blob, err := creds.ReadLiveIn(d)
+		switch {
+		case err == nil:
+		case errors.Is(err, creds.ErrNotFound), errors.Is(err, creds.ErrNoAccountToken):
+			continue
+		default:
+			return Holder{}, false, fmt.Errorf("reading the login in %s: %w", Label(d), err)
+		}
+		if creds.SameLogin(blob, stored) {
+			return Holder{Dir: d, Blob: blob}, true, nil
+		}
+	}
+	return Holder{}, false, nil
+}
+
+// NewerElsewhere returns a directory other than configDir logged in as slot
+// whose access token outlives stored's. The seat's claude there has
+// refreshed since cux last saw it, so stored's refresh token is most likely
+// revoked: refreshing it from here can only fail.
+func NewerElsewhere(state *store.State, slot int, configDir, stored string) (Holder, bool, error) {
 	holders, err := Holders(state, slot)
 	if err != nil {
 		return Holder{}, false, err
 	}
+	here := creds.LiveLocation(configDir)
 	for _, h := range holders {
-		if creds.LiveLocation(h.Dir) != creds.LiveLocation(configDir) && creds.SameLogin(h.Blob, stored) {
+		if creds.LiveLocation(h.Dir) != here && creds.ExpiresAt(h.Blob) > creds.ExpiresAt(stored) {
 			return h, true, nil
 		}
 	}
 	return Holder{}, false, nil
+}
+
+// accountIn names the account configDir's identity file says it is logged
+// in as, for messages.
+func accountIn(configDir string) string {
+	if _, id, err := claudecfg.ReadOAuthBlockIn(configDir); err == nil && id.EmailAddress != "" {
+		return id.EmailAddress
+	}
+	return "another account"
 }
 
 // Reconcile brings a seat's backup up to date with its own profile when the
