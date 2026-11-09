@@ -326,7 +326,9 @@ func TestNeedsCopyRefusesToReviveAnotherSeatsLogin(t *testing.T) {
 	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
 	other := store.Account{Slot: 2, Email: "c@example.com", Alias: "cc"}
 	state.Accounts[2] = other
-	state.Sequence = append(state.Sequence, 2)
+	// A drifted sequence of the same length (slot 9 does not exist) hides
+	// slot 2 from the rotation order; its stored login still counts.
+	state.Sequence = []int{1, 9}
 	foreign := blob("c-login", now.Add(-time.Hour))
 	if err := creds.WriteBackup(other.Slot, other.Email, foreign); err != nil {
 		t.Fatal(err)

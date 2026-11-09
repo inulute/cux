@@ -294,9 +294,16 @@ func NeedsCopy(state *store.State, target store.Account, dir string) (bool, erro
 // to overwrite. A login of an account cux does not manage cannot be told
 // apart from the seat's own and is replaced.
 func refuseForeignLogin(state *store.State, target store.Account, dir, own string) error {
-	for _, slot := range state.SortedSlots() {
+	// Every stored account, not the rotation order: a seat missing from the
+	// sequence still owns its login.
+	slots := make([]int, 0, len(state.Accounts))
+	for slot := range state.Accounts {
+		slots = append(slots, slot)
+	}
+	sort.Ints(slots)
+	for _, slot := range slots {
 		a := state.Accounts[slot]
-		if slot == target.Slot {
+		if slot == target.Slot || a.Slot == target.Slot {
 			continue
 		}
 		b, err := creds.ReadBackup(a.Slot, a.Email)
