@@ -10,5 +10,6 @@ import (
 // so an exported value would point them at a real profile.
 func TestMain(m *testing.M) {
 	_ = os.Unsetenv("CLAUDE_CONFIG_DIR")
+	_ = os.Unsetenv("CUX_SCOPE")
 	os.Exit(m.Run())
 }

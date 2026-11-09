@@ -206,7 +206,14 @@ func slotSharingToken(state *store.State, skipSlot int, blob string) (int, strin
 // The operation is staged: target backups are read and validated before
 // any live state is touched, so a missing or corrupt backup aborts
 // without disturbing the running login.
+//
+// Inside a terminal-scoped process (see TerminalScoped) this moves only
+// that process, through SwitchTerminal: writing the shared login from there
+// would undo the reason the terminal was scoped.
 func SwitchTo(identifier string) (from, to store.Account, err error) {
+	if TerminalScoped() {
+		return SwitchTerminal(identifier)
+	}
 	if err := ensureBackupRoot(); err != nil {
 		return store.Account{}, store.Account{}, err
 	}

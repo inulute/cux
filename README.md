@@ -156,8 +156,11 @@ cux                 # launch claude under cux instead of `claude` directly
 After `cux setup`, restart Claude Code so it picks up the newly
 installed hooks. From then on:
 
-- `/switch` from inside a Claude Code session rotates accounts.
+- `/switch` from inside a Claude Code session rotates this session to
+  the next account; other sessions keep theirs (see
+  [Switch scope](#switch-scope)).
 - `/switch <slot|email>` switches to a specific one.
+- `/switch --all` swaps the shared login for every session instead.
 - `/cux:add`, `/cux:list`, `/cux:status`, `/cux:config`, `/cux:remove`,
   `/cux:switch`, `/cux:usage-refresh`, and `/cux:support` run
   account-management commands in-session.
@@ -212,7 +215,9 @@ cux                          # launch claude under the wrapper
 cux list                     # accounts with 5h / 7d utilisation
 cux list --refresh           # refresh usage before listing
 cux status                   # current login + cux state
-cux switch <slot|email>      # manual swap (no auto-resume)
+cux switch <slot|email>      # this terminal only: opens a shell on the seat's profile
+cux switch <slot|email> -- claude   # ...or run one command on it
+cux switch --all <slot|email>       # swap the shared login for every session
 cux remove <slot|email>      # forget an account
 cux history                  # recent swaps with reasons
 cux sessions                 # running sessions, plus recently ended ones and how to resume them
@@ -226,9 +231,10 @@ cux upgrade                  # update cux (npm or installer; auto-detects)
 From inside a session started with `cux`:
 
 ```text
-/switch                      # rotate per the configured strategy
+/switch                      # rotate this session per the configured strategy
 /switch 2                    # by slot number
 /switch alt@example.com      # by email
+/switch 2 --all              # move every session, not just this one
 /cux:switch 2                # same switch flow under the /cux namespace
 /cux:add                     # add/refresh the current login
 /cux:list --refresh          # list accounts from inside Claude Code
@@ -248,6 +254,40 @@ run this from another terminal:
 cux force-switch             # rotate the active cux-wrapped session
 cux force-switch 2           # force a specific slot/email
 ```
+
+### Switch scope
+
+A switch moves **this terminal only** unless you pass `--all`.
+
+- **Terminal (default).** cux points the session at the seat's own
+  Claude Code profile, `~/.claude-<alias>`, through `CLAUDE_CONFIG_DIR`.
+  The shared login in `~/.claude` is not touched, so every other
+  running session keeps its account. `cux switch <seat>` opens a new
+  shell on that profile (`exit` returns to the previous one), runs the
+  command after `--`, or — without a terminal — prints the variables
+  for `eval "$(cux switch <seat>)"`. `/switch` restarts Claude Code on
+  the profile and resumes the conversation there.
+- **All (`--all`, or `--scope all`).** cux rewrites the shared login,
+  as every release before this one did. Every session reading that
+  config directory continues on the new account.
+
+Terminal scope needs, per seat:
+
+1. an alias (`cux alias <slot> <name>`), and
+2. a profile directory that Claude Code has already initialised:
+   run `CLAUDE_CONFIG_DIR=~/.claude-<name> claude` once, and
+   `CLAUDE_CONFIG_DIR=~/.claude-<name> cux setup` so `/switch` and the
+   hooks exist inside it too.
+
+cux copies the seat's stored login into the profile only while the
+profile is not already logged in as that seat. Once it is, the
+profile's own Claude Code keeps refreshing that login and cux leaves it
+alone. A session started on a profile stays on profiles: automatic
+swaps move it to the next seat's profile, and `--all` is refused there.
+
+A `/switch` sent to a session whose wrapper started before this version
+refuses rather than moving every session; restart that session with
+`cux`, or use `--all`.
 
 ### Watch & attach to running sessions
 

@@ -53,6 +53,11 @@ const (
 	envWrapped    = "CUX_WRAPPED"
 	envWrapperPID = "CUX_WRAPPER_PID"
 	envClaudeBin  = "CUX_CLAUDE_BIN"
+	// envScopedSwitch tells `cux __slash-switch` that this wrapper honours
+	// SwitchRequestedPayload.Scope. A wrapper from before scoped switching
+	// ignores the field and swaps the shared login, so a terminal-only
+	// request must not be handed to one.
+	envScopedSwitch = "CUX_SCOPED_SWITCH"
 
 	pollInterval           = 100 * time.Millisecond
 	gracefulExitWait       = 5 * time.Second
@@ -90,6 +95,7 @@ type pending struct {
 	refusedModel   string             // the model a model-specific cap refused, if the rejection named one (#57)
 	fromUsage      usage.AccountUsage // best-effort snapshot
 	fromKey        string             // cache key of the seat live when the swap was decided; lets a rate-limit swap tell "another session already moved us" from "still on the exhausted seat"
+	scope          string             // switcher.ScopeTerminal when a human asked to move only this session; "" swaps the shared login
 }
 
 // Run executes the wrapper loop. argv is the args passed to `claude`
@@ -183,6 +189,7 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 		_, _ = monitor.RefreshAll()
 		if p, _ := evaluatePrelaunchHardLimitSwap(&cfg); p != nil {
 			target, err := resolveTarget(p.explicitTarget, p.trigger, &cfg, nil)
+			dirBefore := paths.ClaudeDir()
 			if err != nil {
 				fmt.Fprintf(w, "cux: %v — staying on current account\n", err)
 			} else if from, to, err := switcher.SwitchTo(target); err != nil {
@@ -190,7 +197,12 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 			} else {
 				fmt.Fprintf(w, "cux: %s on %s → switched to %s before resume\n", p.reason, from.Email, to.Email)
 				lastManualTarget = ""
-				setManualSwitchState("")
+				if dirAfter := paths.ClaudeDir(); dirAfter != dirBefore {
+					carryTranscripts(dirBefore, dirAfter, w, resumeSessionID(argv))
+				}
+				if !switcher.TerminalScoped() {
+					setManualSwitchState("")
+				}
 				appendPrelaunchHistory(from, to, p)
 			}
 		}
@@ -373,7 +385,15 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 
 		cwd, _ := os.Getwd()
 		if swapped {
+			dirBefore := paths.ClaudeDir()
 			from, to, swapped = completeSwap(p, &cfg, hadTurns, &inPlaceRetries, w)
+			if dirAfter := paths.ClaudeDir(); swapped && dirAfter != dirBefore {
+				// A terminal-scoped swap moved this session to another
+				// config directory. Claude Code resumes only from that
+				// directory's projects/, so bring the conversation along.
+				carryTranscripts(dirBefore, dirAfter, w, sessionID, lastSessionID, resumeSessionID(currentArgv))
+				fmt.Fprintf(w, "cux: this session now runs on %s (%s); other sessions keep their account\n", to.Email, dirAfter)
+			}
 			if swapped {
 				// Append swap to the history log. Best-effort — a failure
 				// here doesn't unwind the swap.
@@ -407,12 +427,20 @@ func Run(claudeBin string, argv []string, w io.Writer) (int, error) {
 
 		// Update the manual-switch guard. A deliberate /switch sets the
 		// guard; a rate-limit or threshold swap clears it (necessity wins).
+		// The guard lives in the shared state.json, where every wrapper reads
+		// it as a choice about the shared login; a session on its own
+		// profile made no such choice, so it keeps its guard to itself.
+		shared := p.scope != switcher.ScopeTerminal && !switcher.TerminalScoped()
 		if p.trigger == history.TriggerManual {
 			lastManualTarget = to.Email
-			setManualSwitchState(to.Email)
+			if shared {
+				setManualSwitchState(to.Email)
+			}
 		} else {
 			lastManualTarget = ""
-			setManualSwitchState("")
+			if shared {
+				setManualSwitchState("")
+			}
 		}
 
 		resumeSID, canResume := resumableSession(sessionID, currentArgv, cfg.AutoResume, hadTurns)
@@ -503,6 +531,7 @@ func launch(claudeBin string, argv []string, wrapperPID int, cfg *config.Config,
 	env := append(os.Environ(),
 		envWrapped+"=1",
 		envWrapperPID+"="+strconv.Itoa(wrapperPID),
+		envScopedSwitch+"=1",
 	)
 	// startChild is platform-specific: with an attach host claude runs on a
 	// PTY slave (start_other.go) or a ConPTY (start_windows.go), otherwise it
@@ -729,6 +758,7 @@ func step(
 				explicitTarget: p.Target,
 				resumeMessage:  p.ResumeMessage,
 				fromUsage:      snapshotActiveUsage(),
+				scope:          p.Scope,
 			}
 		}
 		hasSwap = *swap != nil
@@ -1236,8 +1266,9 @@ func (a *activity) idleFor(now time.Time) (time.Duration, bool) {
 // credential swap against the OS keystore and a real multi-second sleep;
 // neither belongs in a unit test, and both are worth covering.
 var (
-	switchTo = switcher.SwitchTo
-	sleepFor = time.Sleep
+	switchTo       = switcher.SwitchTo
+	switchTerminal = switcher.SwitchTerminal
+	sleepFor       = time.Sleep
 )
 
 // completeSwap carries out a pending swap and always comes back with the
@@ -1269,7 +1300,11 @@ func completeSwap(p *pending, cfg *config.Config, hadTurns bool, inPlaceRetries 
 		target, err := resolveTarget(explicit, p.trigger, cfg, excluded)
 		if err == nil {
 			registry.UpdateSelf(func(e *registry.Entry) { e.State = registry.StateSwapping })
-			f, t, swapErr := switchTo(target)
+			swap := switchTo
+			if p.scope == switcher.ScopeTerminal {
+				swap = switchTerminal
+			}
+			f, t, swapErr := swap(target)
 			if swapErr == nil {
 				// A real swap onto another seat is progress — clear any
 				// in-place backoff carried over from earlier iterations.

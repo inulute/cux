@@ -5,6 +5,24 @@ Starts at v0.3.10. Earlier releases are on the
 
 ## Unreleased
 
+### Changed (breaking default)
+
+- **`cux switch` and `/switch` move only the current terminal.** One switch
+  used to rewrite the shared login, so every running session moved to the new
+  account on its next request. A switch now points just this session at the
+  seat's own profile, `~/.claude-<alias>`, through `CLAUDE_CONFIG_DIR`; the
+  shared login, the shared `.claude.json` and `state.json` are not written.
+  `--all` (or `--scope all`) keeps the old behaviour. Terminal scope needs the
+  seat to have an alias and an initialised profile directory; see
+  [Switch scope](README.md#switch-scope).
+- `cux switch <seat>` opens a shell on the seat's profile, runs the command
+  after `--`, or prints the variables for `eval` when there is no terminal.
+  `/switch` restarts Claude Code on the profile and resumes the conversation.
+- A session started on a profile stays on profiles: automatic swaps move it to
+  the next seat's profile, and `--all` is refused inside it.
+- A terminal-only `/switch` sent to a wrapper from an earlier version refuses
+  instead of moving every session, since that wrapper would ignore the scope.
+
 ### Fixed
 
 - **cux ignored `CLAUDE_CONFIG_DIR`.** It always read `~/.claude` and, on
