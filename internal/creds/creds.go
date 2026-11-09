@@ -4,7 +4,7 @@
 //
 //   - "Live" credentials are wherever Claude Code itself reads from.
 //     cux must write here to actually change the active account.
-//     macOS:     Keychain generic password; see macKeychainServices.
+//     macOS:     Keychain generic password; see liveKeychainServices.
 //     Linux/Win: File at ~/.claude/.credentials.json, mode 0600.
 //
 //   - "Backup" credentials are cux's per-account stash. On macOS/Windows
@@ -61,6 +61,27 @@ import (
 var macKeychainServices = []string{
 	"Claude Code-credentials",
 	"Orca Claude Code Managed Credentials",
+}
+
+// liveKeychainServices returns the service names the live login is looked
+// up and written under for the current Claude Code configuration directory.
+//
+// With CLAUDE_CONFIG_DIR set, Claude Code keys its login item by that
+// directory: "Claude Code-credentials-" plus the first 8 hex digits of the
+// SHA-256 of the path. That item, and only that one, belongs to the
+// directory. The unsuffixed items belong to the default ~/.claude login, so
+// falling back to them would read — and on a switch overwrite — the login
+// every other session shares.
+//
+// Claude Code NFC-normalises the path before hashing; a path that is
+// already NFC, as typed paths almost always are, hashes the same here.
+func liveKeychainServices() []string {
+	dir := os.Getenv(paths.EnvClaudeConfigDir)
+	if dir == "" {
+		return macKeychainServices
+	}
+	sum := sha256.Sum256([]byte(dir))
+	return []string{macKeychainServices[0] + "-" + hex.EncodeToString(sum[:])[:8]}
 }
 
 // keychainExitNotFound is `security`'s exit code for "no such item".
@@ -551,7 +572,7 @@ func readMacKeychainSecret(service string, account ...string) (string, error) {
 }
 
 // findMacKeychainItems returns every known credentials item that exists, in
-// macKeychainServices order. `security find-generic-password -s` returns an
+// liveKeychainServices order. `security find-generic-password -s` returns an
 // arbitrary single match, so the metadata-only dump supplies every account
 // and each secret is then read by its exact (service, account) pair.
 //
@@ -575,7 +596,7 @@ func findMacKeychainItems() ([]macKeychainItem, error) {
 		out      []macKeychainItem
 		firstErr error
 	)
-	for _, service := range macKeychainServices {
+	for _, service := range liveKeychainServices() {
 		accounts := parseMacKeychainAccounts(string(dump), service)
 		for _, account := range accounts {
 			blob, err := readMacKeychainSecret(service, account)
@@ -628,7 +649,7 @@ func selectLiveItem(items []macKeychainItem) (macKeychainItem, error) {
 	if len(items) == 0 {
 		return macKeychainItem{}, ErrNotFound
 	}
-	for _, service := range macKeychainServices {
+	for _, service := range liveKeychainServices() {
 		firstToken := -1
 		for i := range items {
 			if items[i].service != service || !hasAccountToken(items[i].blob) {
@@ -695,7 +716,7 @@ func writeLiveMacOS(blob string) error {
 	// Write into whichever item the read path selects, so a switch lands
 	// where Claude Code is actually looking. Falling back to the classic
 	// service only when nothing exists keeps a first-ever write working.
-	service := macKeychainServices[0]
+	service := liveKeychainServices()[0]
 	account := ""
 	if items, err := findMacKeychainItems(); err == nil {
 		if it, _ := selectLiveItem(items); it.service != "" {
