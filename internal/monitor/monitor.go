@@ -346,17 +346,16 @@ func refreshOne(state *store.State, acct store.Account, others []store.Account) 
 			}
 			// Recorded before the token is handed on, so a directory the
 			// handover misses keeps a login a later switch can recognise as
-			// revoked and repair (profile.NeedsCopy). A failure to record is
-			// reported once the handover is done: it costs only that repair.
-			recordErr := creds.RecordRevoked(slot, email, blob, freshBlob)
+			// revoked and repair (profile.NeedsCopy). The record is
+			// best-effort: the refreshed token is already saved, and a
+			// failure to record costs only that later repair, not this
+			// poll's reading.
+			_ = creds.RecordRevoked(slot, email, blob, freshBlob)
 			if writeErr := syncCurrent(freshBlob); writeErr != nil {
 				return usage.AccountUsage{}, fmt.Errorf("monitor: save refreshed live token: %w", writeErr)
 			}
 			if writeErr := profile.SyncRefreshed(state, acct, blob, freshBlob); writeErr != nil {
 				return usage.AccountUsage{}, fmt.Errorf("monitor: save refreshed token into the profile: %w", writeErr)
-			}
-			if recordErr != nil {
-				return usage.AccountUsage{}, fmt.Errorf("monitor: record the revoked token: %w", recordErr)
 			}
 			blob = freshBlob
 		}
