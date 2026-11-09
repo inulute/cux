@@ -298,11 +298,15 @@ directories holding one token sign each other out. So:
   login into its backup, hands a token it refreshed itself to the
   profile, and never copies the login into the shared directory —
   `--all` to that seat is refused while the profile holds it.
-- One exception: when the profile's login has expired and cux's backup
-  holds a newer, unexpired token for the seat (the backup was refreshed
-  from the profile's token, which revoked it), `cux switch` copies the
-  backup in, under the same checks as a first copy: refused while that
-  token, or another login of the seat, is live in another directory.
+- One exception: when the profile still holds a token cux itself
+  revoked — cux refreshed the backup from it and could not hand the
+  profile the new one — and that token has expired, `cux switch` copies
+  the backup in. cux keeps a hashed record of the tokens it rotated away
+  to tell this apart from a login the profile made on its own, which is
+  never replaced, however long it sat idle. The copy happens only while
+  neither the backup's token nor another login of the seat is live in
+  another directory; otherwise, or when cux cannot tell, the switch
+  lands on the profile's own login as before.
 - Only the account login is copied; MCP server logins stay in the
   directory they were made in.
 
