@@ -109,6 +109,30 @@ func prepareTerminal(state *store.State, target store.Account) (string, profile.
 // readCopySource is profile.CopySource; tests replace it.
 var readCopySource = profile.CopySource
 
+// writeOAuthBlockIn is claudecfg.WriteOAuthBlockIn; tests replace it.
+var writeOAuthBlockIn = claudecfg.WriteOAuthBlockIn
+
+// writeCopy puts login and its oauthAccount block into dir. On an error,
+// left reports whether the copied login is still in dir: a failed identity
+// write puts the profile's login back, and left is true only when that fails.
+func writeCopy(dir, login string, oauth json.RawMessage) (left bool, err error) {
+	undo, err := creds.CopyAccountLoginIn(dir, login)
+	if err != nil {
+		return false, fmt.Errorf("writing %s credentials: %w", dir, err)
+	}
+	if err := writeOAuthBlockIn(dir, oauth); err != nil {
+		// Put the profile's login back as it was: a copied login under
+		// an identity file that does not name the seat is a holder
+		// nothing tracks.
+		if undoErr := undo(); undoErr != nil {
+			return true, fmt.Errorf(
+				"writing %s oauthAccount: %w (and removing the copied login failed: %v)", dir, err, undoErr)
+		}
+		return false, fmt.Errorf("writing %s oauthAccount: %w", dir, err)
+	}
+	return false, nil
+}
+
 // SessionSlot is the seat this process runs on: its own profile's seat
 // under a terminal scope, the shared login's seat (state.ActiveSlot)
 // otherwise.
@@ -199,19 +223,12 @@ func SwitchTerminal(identifier string) (from, to store.Account, err error) {
 	}
 
 	if needsCopy {
-		undo, err := creds.CopyAccountLoginIn(dir, targetCreds)
-		if err != nil {
-			return store.Account{}, store.Account{}, fmt.Errorf("writing %s credentials: %w", dir, err)
-		}
-		if err := claudecfg.WriteOAuthBlockIn(dir, targetOAuth); err != nil {
-			// Put the profile's login back as it was: a copied login under
-			// an identity file that does not name the seat is a holder
-			// nothing tracks.
-			if undoErr := undo(); undoErr != nil {
-				return store.Account{}, store.Account{}, fmt.Errorf(
-					"writing %s oauthAccount: %w (and removing the copied login failed: %v)", dir, err, undoErr)
-			}
-			return store.Account{}, store.Account{}, fmt.Errorf("writing %s oauthAccount: %w", dir, err)
+		// A repair that cannot be written is skipped too, as long as the
+		// profile is back as it was: the switch lands on its own login.
+		// A copied login left behind is refused.
+		left, err := writeCopy(dir, targetCreds, targetOAuth)
+		if err != nil && (plan != profile.RepairLogin || left) {
+			return store.Account{}, store.Account{}, err
 		}
 	}
 
