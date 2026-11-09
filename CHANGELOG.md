@@ -26,6 +26,10 @@ Starts at v0.3.10. Earlier releases are on the
   (the shared one or another `~/.claude-*`) is logged in as that seat; one
   refresh token in two places lets the first refresh sign the other out.
   `--all` likewise refuses a seat whose own profile holds its login.
+- A seat's login is never copied over another account's login a profile
+  holds, nor into the directory the switching terminal's own sessions share
+  (a terminal running on `~/.claude-<alias>` itself). Both used to be
+  overwritten.
 - The backup and a profile that owns the seat's login follow each other: a
   login the profile refreshed is taken into the backup (on every poll and when
   a terminal leaves the profile), and a token cux refreshed is written into the

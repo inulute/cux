@@ -285,8 +285,14 @@ directories holding one token sign each other out. So:
 
 - cux copies the seat's stored login into the profile only while no
   config directory — the shared one, or any other `~/.claude-*` — is
-  logged in as that seat. If one is, the switch is refused with a hint
-  to `/login` once in the profile instead.
+  logged in as that seat, and none holds the stored login's token. If
+  one is, the switch is refused with a hint to `/login` once in the
+  profile instead.
+- cux never copies over a login the profile already holds for another
+  account (a `/login` with the wrong account, say), and never copies into
+  the directory this terminal's own sessions share — if your terminal runs
+  on `~/.claude-<alias>` itself, that would move every one of them; use
+  `--all` for that.
 - Once the profile is logged in as the seat, the profile owns that
   login: its Claude Code keeps refreshing it, cux takes the refreshed
   login into its backup, hands a token it refreshed itself to the
