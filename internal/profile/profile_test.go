@@ -282,6 +282,8 @@ func TestNeedsCopyKeepsTheProfilesOwnLogin(t *testing.T) {
 		{"expired, backup expired too", blob("own", now.Add(-time.Hour)), blob("old", now.Add(-2*time.Hour))},
 		{"expired, backup holds the same token", blob("own", now.Add(-time.Hour)), blob("own", now.Add(-time.Hour))},
 		{"no expiry recorded", `{"claudeAiOauth":{"accessToken":"own","refreshToken":"r-own"}}`, blob("fresh", now.Add(8*time.Hour))},
+		{"expired, backup cannot refresh", blob("own", now.Add(-time.Hour)),
+			fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"fresh","expiresAt":%d}}`, now.Add(8*time.Hour).UnixMilli())},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -313,6 +315,25 @@ func TestNeedsCopyRefusesToReviveWithATokenLiveElsewhere(t *testing.T) {
 	login(t, "", a.Email, blob("other", now.Add(9*time.Hour)))
 	if _, err := NeedsCopy(state, a, Dir("bb")); err == nil || !strings.Contains(err.Error(), "also logged in") {
 		t.Fatalf("NeedsCopy = %v, want a refusal naming the shared login", err)
+	}
+}
+
+// The identity file names the seat but the credentials are another managed
+// seat's stored login (an identity file lagging its credentials, issue #46).
+// That is not the seat's dead login, and it is not overwritten.
+func TestNeedsCopyRefusesToReviveAnotherSeatsLogin(t *testing.T) {
+	now := time.Now()
+	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
+	other := store.Account{Slot: 2, Email: "c@example.com", Alias: "cc"}
+	state.Accounts[2] = other
+	state.Sequence = append(state.Sequence, 2)
+	foreign := blob("c-login", now.Add(-time.Hour))
+	if err := creds.WriteBackup(other.Slot, other.Email, foreign); err != nil {
+		t.Fatal(err)
+	}
+	login(t, Dir("bb"), a.Email, foreign)
+	if _, err := NeedsCopy(state, a, Dir("bb")); err == nil || !strings.Contains(err.Error(), other.Email) {
+		t.Fatalf("NeedsCopy = %v, want a refusal naming %s", err, other.Email)
 	}
 }
 

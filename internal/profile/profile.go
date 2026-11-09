@@ -217,6 +217,9 @@ func NeedsCopy(state *store.State, target store.Account, dir string) (bool, erro
 		if !deadOwnLogin(own, stored, now) || creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
 			return false, nil
 		}
+		if err := refuseForeignLogin(state, target, dir, own); err != nil {
+			return false, err
+		}
 		revive = true
 	}
 	if !revive {
@@ -284,6 +287,35 @@ func NeedsCopy(state *store.State, target store.Account, dir string) (bool, erro
 	return true, nil
 }
 
+// refuseForeignLogin refuses when own, the login dir's identity file says is
+// target's, is provably another managed seat's: that seat's stored login.
+// The identity file can lag the credentials (mid-switch, issue #46); a
+// directory in that state is the user's to sort out with /login, not cux's
+// to overwrite. A login of an account cux does not manage cannot be told
+// apart from the seat's own and is replaced.
+func refuseForeignLogin(state *store.State, target store.Account, dir, own string) error {
+	for _, slot := range state.SortedSlots() {
+		a := state.Accounts[slot]
+		if slot == target.Slot {
+			continue
+		}
+		b, err := creds.ReadBackup(a.Slot, a.Email)
+		switch {
+		case errors.Is(err, creds.ErrNotFound):
+			continue
+		case err != nil:
+			return fmt.Errorf("reading slot %d (%s)'s stored login to check %s: %w", a.Slot, a.Email, dir, err)
+		}
+		if creds.SameLogin(b, own) {
+			return fmt.Errorf(
+				"%s says it is logged in as slot %d (%s), but it holds slot %d (%s)'s login; cux does not overwrite "+
+					"it — log in there with `CLAUDE_CONFIG_DIR=%s claude` and /login once instead",
+				dir, target.Slot, target.Email, a.Slot, a.Email, dir)
+		}
+	}
+	return nil
+}
+
 // deadOwnLogin reports whether own, a profile's login of its seat, is dead
 // while stored, cux's backup of the seat, is not: own's access token has
 // expired and stored carries another refresh token whose access token has
@@ -292,7 +324,8 @@ func NeedsCopy(state *store.State, target store.Account, dir string) (bool, erro
 // no longer refresh it. A profile whose claude refreshed on its own holds
 // the newer token itself and is left alone. Should own's refresh token
 // still work, replacing it loses nothing: NeedsCopy has already made sure
-// no other directory is logged in as the seat.
+// no other directory is logged in as the seat, and that own is no other
+// managed seat's stored login (refuseForeignLogin).
 func deadOwnLogin(own, stored string, now time.Time) bool {
 	expires := creds.ExpiresAt(own)
 	return expires != 0 && expires <= now.UnixMilli() &&
