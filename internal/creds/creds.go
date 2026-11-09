@@ -357,6 +357,100 @@ func TokenFingerprint(blob string) (fingerprint string, ok bool) {
 	return hex.EncodeToString(sum[:]), true
 }
 
+// maxRevoked bounds the revocation record of one seat. A profile that
+// missed more of cux's refreshes than this is no longer recognised and
+// keeps its own login, as every profile did before the record existed.
+const maxRevoked = 32
+
+// revokedDoc is the revocation record of one seat: hashes of the refresh
+// tokens cux rotated out of its stored login, oldest first.
+type revokedDoc struct {
+	RefreshTokens []string `json:"refreshTokens"`
+}
+
+func revokedFilePath(slot int, email string) string {
+	return filepath.Join(paths.AccountDir(slot, email), "revoked-refresh-tokens.json")
+}
+
+// refreshFingerprint hashes blob's refresh token, so the record never holds
+// a usable token.
+func refreshFingerprint(blob string) (string, bool) {
+	rt, ok := refreshTokenOf(blob)
+	if !ok {
+		return "", false
+	}
+	sum := sha256.Sum256([]byte(rt))
+	return hex.EncodeToString(sum[:]), true
+}
+
+// RecordRevoked notes that cux refreshed slot's stored login from old into
+// fresh. The refresh rotated old's refresh token, and the server revoked
+// it: a directory still holding old can no longer refresh, and
+// RevokedByRefresh recognises it later. Nothing is recorded when the
+// refresh kept the refresh token.
+func RecordRevoked(slot int, email, old, fresh string) error {
+	fp, ok := refreshFingerprint(old)
+	if !ok || SameLogin(old, fresh) {
+		return nil
+	}
+	doc, err := readRevoked(slot, email)
+	if err != nil {
+		return err
+	}
+	for _, f := range doc.RefreshTokens {
+		if f == fp {
+			return nil
+		}
+	}
+	doc.RefreshTokens = append(doc.RefreshTokens, fp)
+	if n := len(doc.RefreshTokens); n > maxRevoked {
+		doc.RefreshTokens = doc.RefreshTokens[n-maxRevoked:]
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("creds: marshal revoked tokens: %w", err)
+	}
+	dir := paths.AccountDir(slot, email)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creds: mkdir %s: %w", dir, err)
+	}
+	return atomicfile.Write(revokedFilePath(slot, email), out, 0o600)
+}
+
+// RevokedByRefresh reports whether blob's refresh token is one cux rotated
+// out of slot's stored login (RecordRevoked).
+func RevokedByRefresh(slot int, email, blob string) (bool, error) {
+	fp, ok := refreshFingerprint(blob)
+	if !ok {
+		return false, nil
+	}
+	doc, err := readRevoked(slot, email)
+	if err != nil {
+		return false, err
+	}
+	for _, f := range doc.RefreshTokens {
+		if f == fp {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func readRevoked(slot int, email string) (revokedDoc, error) {
+	var doc revokedDoc
+	b, err := os.ReadFile(revokedFilePath(slot, email))
+	switch {
+	case os.IsNotExist(err):
+		return doc, nil
+	case err != nil:
+		return doc, fmt.Errorf("creds: read revoked tokens: %w", err)
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return revokedDoc{}, fmt.Errorf("creds: parse revoked tokens: %w", err)
+	}
+	return doc, nil
+}
+
 // SlotHoldingToken returns the first slot in slots, other than skipSlot,
 // whose stored credentials carry the same account token as blob.
 //

@@ -187,61 +187,32 @@ func loginIn(state *store.State, slot int, configDir string) (string, bool, erro
 // dir, its profile, and refuses when that copy would give the login a
 // second live holder, rewrite the login this terminal's sessions share, or
 // replace another login dir holds. A profile already logged in as the seat
-// needs no copy, unless its login is dead (see deadOwnLogin): then the
-// stored login replaces it under the same checks. It writes nothing.
+// needs no copy, unless its login is one cux revoked (see repairsDeadLogin).
+// It writes nothing.
 func NeedsCopy(state *store.State, target store.Account, dir string) (bool, error) {
-	own, ok, err := loginIn(state, target.Slot, dir)
-	if err != nil {
+	if own, ok, err := loginIn(state, target.Slot, dir); err != nil {
 		return false, err
-	}
-	var stored string
-	revive := false
-	if ok {
+	} else if ok {
 		// The profile's own claude keeps this login fresh; nothing to copy,
-		// unless the login expired and the backup moved on without it. The
-		// backup is read only then, so a live profile never depends on it.
-		now := time.Now()
-		if expires := creds.ExpiresAt(own); expires == 0 || expires > now.UnixMilli() {
-			return false, nil
-		}
-		stored, err = creds.ReadBackup(target.Slot, target.Email)
-		switch {
-		case errors.Is(err, creds.ErrNotFound):
-			return false, nil
-		case err != nil:
-			return false, fmt.Errorf("reading slot %d (%s)'s stored login to check %s's expired one: %w",
-				target.Slot, target.Email, dir, err)
-		}
-		// The shared login is the shared swap's to repair, never a
-		// terminal switch's.
-		if !deadOwnLogin(own, stored, now) || creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
-			return false, nil
-		}
-		if err := refuseForeignLogin(state, target, dir, own); err != nil {
-			return false, err
-		}
-		revive = true
+		// unless cux revoked it.
+		return repairsDeadLogin(state, target, dir, own, time.Now()), nil
 	}
-	if !revive {
-		if creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
-			return false, fmt.Errorf(
-				"%s is the directory every session of this terminal shares, and it is not logged in as slot %d (%s); "+
-					"copying the seat's login there would move all of them — run `cux switch --all %s` for that, "+
-					"or log in there with `CLAUDE_CONFIG_DIR=%s claude` and /login",
-				dir, target.Slot, target.Email, target.Alias, dir)
-		}
-		stored, err = creds.ReadBackup(target.Slot, target.Email)
-		if err != nil && !errors.Is(err, creds.ErrNotFound) {
-			return false, err
-		}
+	if creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
+		return false, fmt.Errorf(
+			"%s is the directory every session of this terminal shares, and it is not logged in as slot %d (%s); "+
+				"copying the seat's login there would move all of them — run `cux switch --all %s` for that, "+
+				"or log in there with `CLAUDE_CONFIG_DIR=%s claude` and /login",
+			dir, target.Slot, target.Email, target.Alias, dir)
+	}
+	stored, err := creds.ReadBackup(target.Slot, target.Email)
+	if err != nil && !errors.Is(err, creds.ErrNotFound) {
+		return false, err
 	}
 	switch live, err := creds.ReadLiveIn(dir); {
 	case err == nil:
 		// A login that can refresh is some claude's; replacing it would sign
 		// that claude out and drop the token, whichever seat it belongs to.
-		// The seat's own dead login is the one exception: it can no longer
-		// refresh, and the copy below is what brings the profile back.
-		if !revive && creds.HasRefreshToken(live) && !creds.SameLogin(live, stored) {
+		if creds.HasRefreshToken(live) && !creds.SameLogin(live, stored) {
 			return false, fmt.Errorf(
 				"%s is logged in as %s, not slot %d (%s); copying the seat's login there would sign that login out — "+
 					"log out there first (`CLAUDE_CONFIG_DIR=%s claude`, then /logout)",
@@ -269,31 +240,69 @@ func NeedsCopy(state *store.State, target store.Account, dir string) (bool, erro
 		return false, err
 	}
 	for _, h := range holders {
-		if creds.LiveLocation(h.Dir) == creds.LiveLocation(dir) {
-			continue
-		}
-		if revive {
+		if creds.LiveLocation(h.Dir) != creds.LiveLocation(dir) {
 			return false, fmt.Errorf(
-				"%s's login of slot %d (%s) has expired, but the seat is also logged in at %s; cux's stored login "+
-					"may follow that one, so it is not copied in — run `CLAUDE_CONFIG_DIR=%s claude` and /login once instead",
-				dir, target.Slot, target.Email, Label(h.Dir), dir)
+				"slot %d (%s) is logged in at %s and %s is not; copying cux's stored login into %s would leave "+
+					"one refresh token in two places, and whichever refreshes first signs the other out — "+
+					"run `CLAUDE_CONFIG_DIR=%s claude` and /login once instead",
+				target.Slot, target.Email, Label(h.Dir), dir, dir, dir)
 		}
-		return false, fmt.Errorf(
-			"slot %d (%s) is logged in at %s and %s is not; copying cux's stored login into %s would leave "+
-				"one refresh token in two places, and whichever refreshes first signs the other out — "+
-				"run `CLAUDE_CONFIG_DIR=%s claude` and /login once instead",
-			target.Slot, target.Email, Label(h.Dir), dir, dir, dir)
 	}
 	return true, nil
 }
 
-// refuseForeignLogin refuses when own, the login dir's identity file says is
-// target's, is provably another managed seat's: that seat's stored login.
-// The identity file can lag the credentials (mid-switch, issue #46); a
-// directory in that state is the user's to sort out with /login, not cux's
-// to overwrite. A login of an account cux does not manage cannot be told
-// apart from the seat's own and is replaced.
-func refuseForeignLogin(state *store.State, target store.Account, dir, own string) error {
+// repairsDeadLogin reports whether own, the login dir holds of target, is
+// one cux itself revoked and the stored login can take its place. That is
+// the login a refresh of the backup rotated away (creds.RecordRevoked)
+// while dir still held it, because SyncRefreshed could not hand dir the new
+// token: its claude can no longer refresh it, and only the backup holds the
+// seat's working login. A login dir's claude made or refreshed on its own
+// is never on that list, so it is left alone however long it sat idle.
+//
+// The repair only ever adds a copy where the switch would otherwise land on
+// a dead login. Whenever it is not sure (the login has not expired yet, dir
+// is this terminal's shared directory, the revocation record or the backup
+// cannot be read, own is another managed seat's stored login, or the
+// backup's token or another login of the seat is live in another
+// directory) it returns false, and the switch moves onto dir's own login as
+// it did before the repair existed: dir's claude then asks for /login.
+func repairsDeadLogin(state *store.State, target store.Account, dir, own string, now time.Time) bool {
+	if expires := creds.ExpiresAt(own); expires == 0 || expires > now.UnixMilli() {
+		return false
+	}
+	// The shared login is the shared swap's to repair, never a terminal
+	// switch's.
+	if creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
+		return false
+	}
+	if revoked, err := creds.RevokedByRefresh(target.Slot, target.Email, own); err != nil || !revoked {
+		return false
+	}
+	stored, err := creds.ReadBackup(target.Slot, target.Email)
+	if err != nil || !creds.HasRefreshToken(stored) || creds.SameLogin(own, stored) ||
+		creds.ExpiresAt(stored) <= now.UnixMilli() {
+		return false
+	}
+	if foreign, err := anotherSeatsLogin(state, target, own); err != nil || foreign {
+		return false
+	}
+	// One place per refresh token: the copy would give the backup's token,
+	// or the seat, a second live holder.
+	if _, held, err := HeldElsewhere(dir, stored); err != nil || held {
+		return false
+	}
+	if _, elsewhere, err := LiveElsewhere(state, target.Slot, dir); err != nil || elsewhere {
+		return false
+	}
+	return true
+}
+
+// anotherSeatsLogin reports whether own, the login a directory's identity
+// file says is target's, is provably another managed seat's: that seat's
+// stored login. The identity file can lag the credentials (mid-switch,
+// issue #46); a directory in that state is the user's to sort out with
+// /login, not cux's to overwrite.
+func anotherSeatsLogin(state *store.State, target store.Account, own string) (bool, error) {
 	// Every stored account, not the rotation order: a seat missing from the
 	// sequence still owns its login.
 	slots := make([]int, 0, len(state.Accounts))
@@ -311,33 +320,13 @@ func refuseForeignLogin(state *store.State, target store.Account, dir, own strin
 		case errors.Is(err, creds.ErrNotFound):
 			continue
 		case err != nil:
-			return fmt.Errorf("reading slot %d (%s)'s stored login to check %s: %w", a.Slot, a.Email, dir, err)
+			return false, fmt.Errorf("reading slot %d (%s)'s stored login: %w", a.Slot, a.Email, err)
 		}
 		if creds.SameLogin(b, own) {
-			return fmt.Errorf(
-				"%s says it is logged in as slot %d (%s), but it holds slot %d (%s)'s login; cux does not overwrite "+
-					"it — log in there with `CLAUDE_CONFIG_DIR=%s claude` and /login once instead",
-				dir, target.Slot, target.Email, a.Slot, a.Email, dir)
+			return true, nil
 		}
 	}
-	return nil
-}
-
-// deadOwnLogin reports whether own, a profile's login of its seat, is dead
-// while stored, cux's backup of the seat, is not: own's access token has
-// expired and stored carries another refresh token whose access token has
-// not. That happens when the backup was refreshed from the token the
-// profile held: the refresh revoked the profile's token, so its claude can
-// no longer refresh it. A profile whose claude refreshed on its own holds
-// the newer token itself and is left alone. Should own's refresh token
-// still work, replacing it loses nothing: NeedsCopy has already made sure
-// no other directory is logged in as the seat, and that own is no other
-// managed seat's stored login (refuseForeignLogin).
-func deadOwnLogin(own, stored string, now time.Time) bool {
-	expires := creds.ExpiresAt(own)
-	return expires != 0 && expires <= now.UnixMilli() &&
-		creds.HasRefreshToken(stored) && !creds.SameLogin(own, stored) &&
-		creds.ExpiresAt(stored) > now.UnixMilli()
+	return false, nil
 }
 
 // LiveElsewhere returns a directory other than configDir that holds slot's
@@ -458,7 +447,10 @@ func Reconcile(state *store.State, a store.Account) (owned bool, err error) {
 // SyncRefreshed hands a token cux just refreshed from the backup to the
 // seat's own profile, when the profile still holds the token that refresh
 // revoked. A profile holding another login of the seat is left alone: it
-// was logged in on its own and its claude refreshes it.
+// was logged in on its own and its claude refreshes it. A profile this
+// handover misses keeps the revoked token; the refresh recorded it
+// (creds.RecordRevoked), and the next switch to the seat repairs the
+// profile (repairsDeadLogin).
 func SyncRefreshed(state *store.State, a store.Account, old, fresh string) error {
 	if a.Alias == "" {
 		return nil

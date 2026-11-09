@@ -269,3 +269,36 @@ func TestSharedTerminalStillRefreshesItsOwnLoginBesideANewerProfileLogin(t *test
 		t.Fatalf("the profile's own login was replaced: %s", got)
 	}
 }
+
+// A refresh records the refresh token it rotated away, and only that one:
+// a switch later repairs a profile still holding it, and leaves alone any
+// login cux did not revoke.
+func TestRefreshRecordsTheTokenItRevoked(t *testing.T) {
+	_, refreshes := holderEnv(t)
+	holderSeats(t, store.Account{Slot: 1, Email: "a@example.com", UUID: "u-a"})
+	stale := holderBlob("ta", time.Now().Add(-time.Minute))
+	if err := creds.WriteBackup(1, "a@example.com", stale); err != nil {
+		t.Fatal(err)
+	}
+	holderLogin(t, "", "a@example.com", "u-a", stale)
+
+	if _, errs := RefreshAll(); len(errs) != 0 {
+		t.Fatalf("RefreshAll: %v", errs)
+	}
+	if *refreshes != 1 {
+		t.Fatalf("refreshes = %d, want 1", *refreshes)
+	}
+	backup, _ := creds.ReadBackup(1, "a@example.com")
+	for _, c := range []struct {
+		name, blob string
+		want       bool
+	}{
+		{"the rotated-away token", stale, true},
+		{"the refreshed token", backup, false},
+		{"a login cux never saw", holderBlob("tz", time.Now().Add(-time.Minute)), false},
+	} {
+		if got, err := creds.RevokedByRefresh(1, "a@example.com", c.blob); err != nil || got != c.want {
+			t.Fatalf("%s: RevokedByRefresh = %v, %v; want %v", c.name, got, err, c.want)
+		}
+	}
+}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -258,20 +257,45 @@ func TestSharedDirFollowsTheScope(t *testing.T) {
 	}
 }
 
-// A profile logged in as the seat whose token expired after the backup was
-// refreshed from it holds a revoked login its claude cannot refresh. The
-// backup's newer token, live nowhere else, replaces it.
+// revoked records that cux refreshed a's stored login from old, as the
+// monitor does: old's refresh token is then a revoked one.
+func revoked(t *testing.T, a store.Account, old string) {
+	t.Helper()
+	if err := creds.RecordRevoked(a.Slot, a.Email, old, blob("rotated-away", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A profile still holding the token cux's refresh of the backup revoked
+// cannot refresh it. The backup's newer token, live nowhere else, replaces
+// it.
 func TestNeedsCopyRevivesADeadProfileLogin(t *testing.T) {
 	now := time.Now()
 	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
-	login(t, Dir("bb"), a.Email, blob("dead", now.Add(-time.Hour)))
+	dead := blob("dead", now.Add(-time.Hour))
+	login(t, Dir("bb"), a.Email, dead)
+	revoked(t, a, dead)
 	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || !need {
 		t.Fatalf("NeedsCopy = %v, %v; want the backup copied over the dead login", need, err)
 	}
 }
 
-// A profile whose login is still live, or expired without the backup having
-// moved on, keeps its own login.
+// A profile that logged in on its own and sat idle past its access token's
+// expiry is not dead: its claude refreshes it. cux never revoked it, so it
+// is kept, as it was before the repair existed.
+func TestNeedsCopyKeepsAnIdleOwnLogin(t *testing.T) {
+	now := time.Now()
+	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
+	login(t, Dir("bb"), a.Email, blob("idle", now.Add(-10*time.Minute)))
+	revoked(t, a, blob("some-other-old-token", now.Add(-2*time.Hour)))
+	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
+		t.Fatalf("NeedsCopy = %v, %v; want the profile's own login kept", need, err)
+	}
+}
+
+// Even a login cux revoked is kept when the repair has no usable
+// replacement: the access token has not expired yet, the backup has not
+// moved on, or it cannot refresh.
 func TestNeedsCopyKeepsTheProfilesOwnLogin(t *testing.T) {
 	now := time.Now()
 	cases := []struct {
@@ -289,6 +313,7 @@ func TestNeedsCopyKeepsTheProfilesOwnLogin(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			state, a := seat(t, c.stored)
 			login(t, Dir("bb"), a.Email, c.own)
+			revoked(t, a, c.own)
 			if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
 				t.Fatalf("NeedsCopy = %v, %v; want the profile's own login kept", need, err)
 			}
@@ -296,32 +321,38 @@ func TestNeedsCopyKeepsTheProfilesOwnLogin(t *testing.T) {
 	}
 }
 
-// The backup's newer token is live in another directory: copying it over
-// the dead login would leave it in two places, so the copy is refused. So is
-// a seat logged in elsewhere on another token, which the backup may follow.
-func TestNeedsCopyRefusesToReviveWithATokenLiveElsewhere(t *testing.T) {
+// A dead login whose repair would put a refresh token in two places is left
+// as it is, without an error: the switch lands on the profile's own login,
+// as it did before the repair existed. That covers the backup's token live
+// in another directory, and the seat logged in elsewhere on another token,
+// which the backup may follow.
+func TestNeedsCopyLeavesADeadLoginWhenTheSeatIsLiveElsewhere(t *testing.T) {
 	now := time.Now()
 	fresh := blob("fresh", now.Add(8*time.Hour))
+	dead := blob("dead", now.Add(-time.Hour))
+
 	state, a := seat(t, fresh)
-	login(t, Dir("bb"), a.Email, blob("dead", now.Add(-time.Hour)))
+	login(t, Dir("bb"), a.Email, dead)
+	revoked(t, a, dead)
 	login(t, Dir("spare"), "someone-else@example.com", fresh)
-	if _, err := NeedsCopy(state, a, Dir("bb")); err == nil || !strings.Contains(err.Error(), Dir("spare")) ||
-		!strings.Contains(err.Error(), "two places") {
-		t.Fatalf("NeedsCopy = %v, want a refusal naming %s", err, Dir("spare"))
+	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
+		t.Fatalf("token live elsewhere: NeedsCopy = %v, %v; want no copy and no error", need, err)
 	}
 
 	state, a = seat(t, fresh)
-	login(t, Dir("bb"), a.Email, blob("dead", now.Add(-time.Hour)))
+	login(t, Dir("bb"), a.Email, dead)
+	revoked(t, a, dead)
 	login(t, "", a.Email, blob("other", now.Add(9*time.Hour)))
-	if _, err := NeedsCopy(state, a, Dir("bb")); err == nil || !strings.Contains(err.Error(), "also logged in") {
-		t.Fatalf("NeedsCopy = %v, want a refusal naming the shared login", err)
+	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
+		t.Fatalf("seat live elsewhere: NeedsCopy = %v, %v; want no copy and no error", need, err)
 	}
 }
 
 // The identity file names the seat but the credentials are another managed
 // seat's stored login (an identity file lagging its credentials, issue #46).
-// That is not the seat's dead login, and it is not overwritten.
-func TestNeedsCopyRefusesToReviveAnotherSeatsLogin(t *testing.T) {
+// That is not the seat's dead login: it is not overwritten, and the switch
+// is not refused either.
+func TestNeedsCopyLeavesAnotherSeatsLoginAlone(t *testing.T) {
 	now := time.Now()
 	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
 	other := store.Account{Slot: 2, Email: "c@example.com", Alias: "cc"}
@@ -334,8 +365,33 @@ func TestNeedsCopyRefusesToReviveAnotherSeatsLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	login(t, Dir("bb"), a.Email, foreign)
-	if _, err := NeedsCopy(state, a, Dir("bb")); err == nil || !strings.Contains(err.Error(), other.Email) {
-		t.Fatalf("NeedsCopy = %v, want a refusal naming %s", err, other.Email)
+	revoked(t, a, foreign)
+	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
+		t.Fatalf("NeedsCopy = %v, %v; want another seat's login left alone", need, err)
+	}
+}
+
+// An unreadable backup or revocation record does not block a switch onto
+// the profile's own login: the repair is skipped, as if it did not exist.
+func TestNeedsCopyKeepsAnExpiredLoginWhenTheRecordsCannotBeRead(t *testing.T) {
+	now := time.Now()
+	dead := blob("dead", now.Add(-time.Hour))
+	for _, broken := range []string{"credentials.json", "revoked-refresh-tokens.json"} {
+		t.Run(broken, func(t *testing.T) {
+			state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
+			login(t, Dir("bb"), a.Email, dead)
+			revoked(t, a, dead)
+			p := filepath.Join(paths.AccountDir(a.Slot, a.Email), broken)
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(p, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
+				t.Fatalf("NeedsCopy = %v, %v; want the profile's own login kept", need, err)
+			}
+		})
 	}
 }
 
@@ -344,7 +400,9 @@ func TestNeedsCopyRefusesToReviveAnotherSeatsLogin(t *testing.T) {
 func TestNeedsCopyLeavesADeadSharedLoginAlone(t *testing.T) {
 	now := time.Now()
 	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
-	login(t, Dir("bb"), a.Email, blob("dead", now.Add(-time.Hour)))
+	dead := blob("dead", now.Add(-time.Hour))
+	login(t, Dir("bb"), a.Email, dead)
+	revoked(t, a, dead)
 	t.Setenv(paths.EnvClaudeConfigDir, Dir("bb"))
 	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
 		t.Fatalf("NeedsCopy = %v, %v; want the shared login left alone", need, err)

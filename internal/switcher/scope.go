@@ -126,8 +126,8 @@ func LiveSlot(state *store.State) int {
 // at the target seat's own profile directory. It never writes the shared
 // login, the shared .claude.json, or state.json. It copies the seat's
 // stored login into the profile only when no other directory is logged in
-// as that seat and the profile is not either, or is with a login that
-// expired after the backup moved on to a newer token (see profile.NeedsCopy).
+// as that seat and the profile is not either, or is with a login cux's own
+// refresh of the backup revoked (see profile.NeedsCopy).
 //
 // On success CLAUDE_CONFIG_DIR and CUX_SCOPE are set in this process's
 // environment, and CUX_SHARED_CONFIG_DIR records the directory the first

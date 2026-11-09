@@ -352,25 +352,43 @@ func TestSwitchesRefuseATokenLiveUnderAnotherIdentity(t *testing.T) {
 	assertUnchanged(t, shared, before)
 }
 
-// A profile logged in as the seat on a token the backup's refresh revoked
-// gets the backup's newer token, MCP logins kept, and nothing else changes:
-// the shared login, the backup and state.json stay as they were.
-func TestSwitchTerminalRevivesAProfileWithADeadLogin(t *testing.T) {
+// deadProfileSeat sets up seat bb with a fresh stored login and returns it,
+// its fresh backup, and its profile directory.
+func deadProfileSeat(t *testing.T) (store.Account, string, string) {
+	t.Helper()
 	twoSeatsWithProfiles(t)
-	now := time.Now()
 	state, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	b := state.Accounts[state.FindByAlias("bb")]
-	fresh := blobExpiring("token-b-fresh", now.Add(8*time.Hour).UnixMilli())
+	fresh := blobExpiring("token-b-fresh", time.Now().Add(8*time.Hour).UnixMilli())
 	if err := creds.WriteBackup(b.Slot, b.Email, fresh); err != nil {
 		t.Fatal(err)
 	}
-	profileB := filepath.Join(paths.Home(), ".claude-bb")
-	loginIn(t, profileB, "b@example.com", "uuid-b",
-		`{"claudeAiOauth":{"accessToken":"token-b-dead","refreshToken":"r-token-b-dead","expiresAt":`+
-			strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10)+`},"mcpOAuth":{"srv":{"refreshToken":"profile-mcp"}}}`)
+	return b, fresh, filepath.Join(paths.Home(), ".claude-bb")
+}
+
+// assertScopedTo fails unless this terminal now runs on dir.
+func assertScopedTo(t *testing.T, dir string) {
+	t.Helper()
+	if os.Getenv(paths.EnvClaudeConfigDir) != dir || !TerminalScoped() {
+		t.Fatalf("terminal not scoped to %s: CLAUDE_CONFIG_DIR=%q scoped=%v",
+			dir, os.Getenv(paths.EnvClaudeConfigDir), TerminalScoped())
+	}
+}
+
+// A profile still holding the token cux's refresh of the backup revoked
+// gets the backup's newer token, MCP logins kept, and nothing else changes:
+// the shared login, the backup and state.json stay as they were.
+func TestSwitchTerminalRevivesAProfileWithADeadLogin(t *testing.T) {
+	b, fresh, profileB := deadProfileSeat(t)
+	dead := `{"claudeAiOauth":{"accessToken":"token-b-dead","refreshToken":"r-token-b-dead","expiresAt":` +
+		strconv.FormatInt(time.Now().Add(-time.Hour).UnixMilli(), 10) + `},"mcpOAuth":{"srv":{"refreshToken":"profile-mcp"}}}`
+	loginIn(t, profileB, "b@example.com", "uuid-b", dead)
+	if err := creds.RecordRevoked(b.Slot, b.Email, dead, fresh); err != nil {
+		t.Fatal(err)
+	}
 	shared := []string{paths.ClaudeCredentials(), paths.ClaudeConfig(), paths.StateFile()}
 	before := snapshot(t, shared...)
 
@@ -388,35 +406,93 @@ func TestSwitchTerminalRevivesAProfileWithADeadLogin(t *testing.T) {
 	if after, _ := creds.ReadBackup(b.Slot, b.Email); after != fresh {
 		t.Fatalf("backup changed: %s", after)
 	}
+	assertScopedTo(t, profileB)
 }
 
-// The backup's newer token already runs another directory: reviving the
-// dead profile with it would put it in two places. Refuse, write nothing.
-func TestSwitchTerminalRefusesToReviveWithATokenLiveElsewhere(t *testing.T) {
-	twoSeatsWithProfiles(t)
-	now := time.Now()
-	state, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
+// The switches below worked before the repair existed and must keep
+// working: each lands on the profile's own login and writes nothing.
+func TestSwitchTerminalStillLandsOnTheProfilesOwnExpiredLogin(t *testing.T) {
+	idle := func() string {
+		return blobExpiring("token-b-own", time.Now().Add(-10*time.Minute).UnixMilli())
 	}
-	b := state.Accounts[state.FindByAlias("bb")]
-	fresh := blobExpiring("token-b-fresh", now.Add(8*time.Hour).UnixMilli())
-	if err := creds.WriteBackup(b.Slot, b.Email, fresh); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, b store.Account, fresh, profileB string) []string
+	}{
+		{
+			// The profile logged in on its own and sat idle past its access
+			// token's expiry; its claude refreshes it. cux never revoked it.
+			name: "idle own login, no other holder",
+			setup: func(t *testing.T, b store.Account, fresh, profileB string) []string {
+				loginIn(t, profileB, "b@example.com", "uuid-b", idle())
+				return nil
+			},
+		},
+		{
+			// The seat also runs in the shared directory on another grant,
+			// and the backup follows that one.
+			name: "idle own login, seat also live in the shared directory",
+			setup: func(t *testing.T, b store.Account, fresh, profileB string) []string {
+				loginIn(t, "", "b@example.com", "uuid-b", blobExpiring("token-b-shared", time.Now().Add(time.Hour).UnixMilli()))
+				loginIn(t, profileB, "b@example.com", "uuid-b", idle())
+				return nil
+			},
+		},
+		{
+			// A revoked login whose repair would put the backup's token in
+			// a second directory: no repair, and no refusal either.
+			name: "revoked own login, backup's token live in another directory",
+			setup: func(t *testing.T, b store.Account, fresh, profileB string) []string {
+				own := idle()
+				loginIn(t, profileB, "b@example.com", "uuid-b", own)
+				if err := creds.RecordRevoked(b.Slot, b.Email, own, fresh); err != nil {
+					t.Fatal(err)
+				}
+				spare := filepath.Join(paths.Home(), ".claude-spare")
+				loginIn(t, spare, "someone@example.com", "uuid-x", fresh)
+				return []string{paths.ClaudeCredentialsIn(spare)}
+			},
+		},
+		{
+			name: "revoked own login, backup unreadable",
+			setup: func(t *testing.T, b store.Account, fresh, profileB string) []string {
+				own := idle()
+				loginIn(t, profileB, "b@example.com", "uuid-b", own)
+				if err := creds.RecordRevoked(b.Slot, b.Email, own, fresh); err != nil {
+					t.Fatal(err)
+				}
+				p := filepath.Join(paths.AccountDir(b.Slot, b.Email), "credentials.json")
+				if err := os.Remove(p); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(p, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			},
+		},
 	}
-	profileB := filepath.Join(paths.Home(), ".claude-bb")
-	spare := filepath.Join(paths.Home(), ".claude-spare")
-	loginIn(t, profileB, "b@example.com", "uuid-b", blobExpiring("token-b-dead", now.Add(-time.Hour).UnixMilli()))
-	loginIn(t, spare, "someone@example.com", "uuid-x", fresh)
-	watched := []string{paths.ClaudeCredentialsIn(profileB), paths.ClaudeConfigIn(profileB),
-		paths.ClaudeCredentialsIn(spare), paths.ClaudeCredentials(), paths.StateFile()}
-	before := snapshot(t, watched...)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b, fresh, profileB := deadProfileSeat(t)
+			extra := c.setup(t, b, fresh, profileB)
+			watched := append([]string{paths.ClaudeCredentialsIn(profileB), paths.ClaudeConfigIn(profileB),
+				paths.ClaudeCredentials(), paths.ClaudeConfig(), paths.StateFile()}, extra...)
+			before := snapshot(t, watched...)
 
-	if _, _, err := SwitchTerminal("bb"); err == nil || !strings.Contains(err.Error(), spare) {
-		t.Fatalf("SwitchTerminal(bb) = %v, want a refusal naming %s", err, spare)
-	}
-	assertUnchanged(t, watched, before)
-	if TerminalScoped() {
-		t.Fatal("a refusal moved this terminal")
+			state, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			// /switch checks first, before the wrapper stops claude.
+			if dir, need, err := PrepareTerminal(state, b); err != nil || need || dir != profileB {
+				t.Fatalf("PrepareTerminal = %q, %v, %v; want %s with no copy", dir, need, err, profileB)
+			}
+			if _, _, err := SwitchTerminal("bb"); err != nil {
+				t.Fatalf("SwitchTerminal(bb): %v", err)
+			}
+			assertUnchanged(t, watched, before)
+			assertScopedTo(t, profileB)
+		})
 	}
 }
