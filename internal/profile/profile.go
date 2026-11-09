@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/inulute/cux/internal/claudecfg"
 	"github.com/inulute/cux/internal/creds"
@@ -185,30 +186,59 @@ func loginIn(state *store.State, slot int, configDir string) (string, bool, erro
 // NeedsCopy reports whether target's stored login has to be copied into
 // dir, its profile, and refuses when that copy would give the login a
 // second live holder, rewrite the login this terminal's sessions share, or
-// replace another login dir holds. It writes nothing.
+// replace another login dir holds. A profile already logged in as the seat
+// needs no copy, unless its login is dead (see deadOwnLogin): then the
+// stored login replaces it under the same checks. It writes nothing.
 func NeedsCopy(state *store.State, target store.Account, dir string) (bool, error) {
-	if _, ok, err := loginIn(state, target.Slot, dir); err != nil {
+	own, ok, err := loginIn(state, target.Slot, dir)
+	if err != nil {
 		return false, err
-	} else if ok {
-		// The profile's own claude keeps this login fresh; nothing to copy.
-		return false, nil
 	}
-	if creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
-		return false, fmt.Errorf(
-			"%s is the directory every session of this terminal shares, and it is not logged in as slot %d (%s); "+
-				"copying the seat's login there would move all of them — run `cux switch --all %s` for that, "+
-				"or log in there with `CLAUDE_CONFIG_DIR=%s claude` and /login",
-			dir, target.Slot, target.Email, target.Alias, dir)
+	var stored string
+	revive := false
+	if ok {
+		// The profile's own claude keeps this login fresh; nothing to copy,
+		// unless the login expired and the backup moved on without it. The
+		// backup is read only then, so a live profile never depends on it.
+		now := time.Now()
+		if expires := creds.ExpiresAt(own); expires == 0 || expires > now.UnixMilli() {
+			return false, nil
+		}
+		stored, err = creds.ReadBackup(target.Slot, target.Email)
+		switch {
+		case errors.Is(err, creds.ErrNotFound):
+			return false, nil
+		case err != nil:
+			return false, fmt.Errorf("reading slot %d (%s)'s stored login to check %s's expired one: %w",
+				target.Slot, target.Email, dir, err)
+		}
+		// The shared login is the shared swap's to repair, never a
+		// terminal switch's.
+		if !deadOwnLogin(own, stored, now) || creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
+			return false, nil
+		}
+		revive = true
 	}
-	stored, err := creds.ReadBackup(target.Slot, target.Email)
-	if err != nil && !errors.Is(err, creds.ErrNotFound) {
-		return false, err
+	if !revive {
+		if creds.LiveLocation(dir) == creds.LiveLocation(SharedDir()) {
+			return false, fmt.Errorf(
+				"%s is the directory every session of this terminal shares, and it is not logged in as slot %d (%s); "+
+					"copying the seat's login there would move all of them — run `cux switch --all %s` for that, "+
+					"or log in there with `CLAUDE_CONFIG_DIR=%s claude` and /login",
+				dir, target.Slot, target.Email, target.Alias, dir)
+		}
+		stored, err = creds.ReadBackup(target.Slot, target.Email)
+		if err != nil && !errors.Is(err, creds.ErrNotFound) {
+			return false, err
+		}
 	}
 	switch live, err := creds.ReadLiveIn(dir); {
 	case err == nil:
 		// A login that can refresh is some claude's; replacing it would sign
 		// that claude out and drop the token, whichever seat it belongs to.
-		if creds.HasRefreshToken(live) && !creds.SameLogin(live, stored) {
+		// The seat's own dead login is the one exception: it can no longer
+		// refresh, and the copy below is what brings the profile back.
+		if !revive && creds.HasRefreshToken(live) && !creds.SameLogin(live, stored) {
 			return false, fmt.Errorf(
 				"%s is logged in as %s, not slot %d (%s); copying the seat's login there would sign that login out — "+
 					"log out there first (`CLAUDE_CONFIG_DIR=%s claude`, then /logout)",
@@ -236,15 +266,38 @@ func NeedsCopy(state *store.State, target store.Account, dir string) (bool, erro
 		return false, err
 	}
 	for _, h := range holders {
-		if creds.LiveLocation(h.Dir) != creds.LiveLocation(dir) {
-			return false, fmt.Errorf(
-				"slot %d (%s) is logged in at %s and %s is not; copying cux's stored login into %s would leave "+
-					"one refresh token in two places, and whichever refreshes first signs the other out — "+
-					"run `CLAUDE_CONFIG_DIR=%s claude` and /login once instead",
-				target.Slot, target.Email, Label(h.Dir), dir, dir, dir)
+		if creds.LiveLocation(h.Dir) == creds.LiveLocation(dir) {
+			continue
 		}
+		if revive {
+			return false, fmt.Errorf(
+				"%s's login of slot %d (%s) has expired, but the seat is also logged in at %s; cux's stored login "+
+					"may follow that one, so it is not copied in — run `CLAUDE_CONFIG_DIR=%s claude` and /login once instead",
+				dir, target.Slot, target.Email, Label(h.Dir), dir)
+		}
+		return false, fmt.Errorf(
+			"slot %d (%s) is logged in at %s and %s is not; copying cux's stored login into %s would leave "+
+				"one refresh token in two places, and whichever refreshes first signs the other out — "+
+				"run `CLAUDE_CONFIG_DIR=%s claude` and /login once instead",
+			target.Slot, target.Email, Label(h.Dir), dir, dir, dir)
 	}
 	return true, nil
+}
+
+// deadOwnLogin reports whether own, a profile's login of its seat, is dead
+// while stored, cux's backup of the seat, is not: own's access token has
+// expired and stored carries another refresh token whose access token has
+// not. That happens when the backup was refreshed from the token the
+// profile held: the refresh revoked the profile's token, so its claude can
+// no longer refresh it. A profile whose claude refreshed on its own holds
+// the newer token itself and is left alone. Should own's refresh token
+// still work, replacing it loses nothing: NeedsCopy has already made sure
+// no other directory is logged in as the seat.
+func deadOwnLogin(own, stored string, now time.Time) bool {
+	expires := creds.ExpiresAt(own)
+	return expires != 0 && expires <= now.UnixMilli() &&
+		creds.HasRefreshToken(stored) && !creds.SameLogin(own, stored) &&
+		creds.ExpiresAt(stored) > now.UnixMilli()
 }
 
 // LiveElsewhere returns a directory other than configDir that holds slot's

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -349,4 +350,73 @@ func TestSwitchesRefuseATokenLiveUnderAnotherIdentity(t *testing.T) {
 		t.Fatalf("SwitchTo(bb) = %v, want a refusal naming %s", err, spare)
 	}
 	assertUnchanged(t, shared, before)
+}
+
+// A profile logged in as the seat on a token the backup's refresh revoked
+// gets the backup's newer token, MCP logins kept, and nothing else changes:
+// the shared login, the backup and state.json stay as they were.
+func TestSwitchTerminalRevivesAProfileWithADeadLogin(t *testing.T) {
+	twoSeatsWithProfiles(t)
+	now := time.Now()
+	state, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := state.Accounts[state.FindByAlias("bb")]
+	fresh := blobExpiring("token-b-fresh", now.Add(8*time.Hour).UnixMilli())
+	if err := creds.WriteBackup(b.Slot, b.Email, fresh); err != nil {
+		t.Fatal(err)
+	}
+	profileB := filepath.Join(paths.Home(), ".claude-bb")
+	loginIn(t, profileB, "b@example.com", "uuid-b",
+		`{"claudeAiOauth":{"accessToken":"token-b-dead","refreshToken":"r-token-b-dead","expiresAt":`+
+			strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10)+`},"mcpOAuth":{"srv":{"refreshToken":"profile-mcp"}}}`)
+	shared := []string{paths.ClaudeCredentials(), paths.ClaudeConfig(), paths.StateFile()}
+	before := snapshot(t, shared...)
+
+	if _, _, err := SwitchTerminal("bb"); err != nil {
+		t.Fatalf("SwitchTerminal: %v", err)
+	}
+	got, err := os.ReadFile(paths.ClaudeCredentialsIn(profileB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte("r-token-b-fresh")) || bytes.Contains(got, []byte("token-b-dead")) || !bytes.Contains(got, []byte("profile-mcp")) {
+		t.Fatalf("profile credentials = %s", got)
+	}
+	assertUnchanged(t, shared, before)
+	if after, _ := creds.ReadBackup(b.Slot, b.Email); after != fresh {
+		t.Fatalf("backup changed: %s", after)
+	}
+}
+
+// The backup's newer token already runs another directory: reviving the
+// dead profile with it would put it in two places. Refuse, write nothing.
+func TestSwitchTerminalRefusesToReviveWithATokenLiveElsewhere(t *testing.T) {
+	twoSeatsWithProfiles(t)
+	now := time.Now()
+	state, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := state.Accounts[state.FindByAlias("bb")]
+	fresh := blobExpiring("token-b-fresh", now.Add(8*time.Hour).UnixMilli())
+	if err := creds.WriteBackup(b.Slot, b.Email, fresh); err != nil {
+		t.Fatal(err)
+	}
+	profileB := filepath.Join(paths.Home(), ".claude-bb")
+	spare := filepath.Join(paths.Home(), ".claude-spare")
+	loginIn(t, profileB, "b@example.com", "uuid-b", blobExpiring("token-b-dead", now.Add(-time.Hour).UnixMilli()))
+	loginIn(t, spare, "someone@example.com", "uuid-x", fresh)
+	watched := []string{paths.ClaudeCredentialsIn(profileB), paths.ClaudeConfigIn(profileB),
+		paths.ClaudeCredentialsIn(spare), paths.ClaudeCredentials(), paths.StateFile()}
+	before := snapshot(t, watched...)
+
+	if _, _, err := SwitchTerminal("bb"); err == nil || !strings.Contains(err.Error(), spare) {
+		t.Fatalf("SwitchTerminal(bb) = %v, want a refusal naming %s", err, spare)
+	}
+	assertUnchanged(t, watched, before)
+	if TerminalScoped() {
+		t.Fatal("a refusal moved this terminal")
+	}
 }

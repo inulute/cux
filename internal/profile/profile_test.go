@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -254,5 +255,75 @@ func TestSharedDirFollowsTheScope(t *testing.T) {
 	t.Setenv(EnvSharedConfigDir, "/somewhere")
 	if got := SharedDir(); got != "/somewhere" {
 		t.Fatalf("scoped SharedDir() = %q", got)
+	}
+}
+
+// A profile logged in as the seat whose token expired after the backup was
+// refreshed from it holds a revoked login its claude cannot refresh. The
+// backup's newer token, live nowhere else, replaces it.
+func TestNeedsCopyRevivesADeadProfileLogin(t *testing.T) {
+	now := time.Now()
+	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
+	login(t, Dir("bb"), a.Email, blob("dead", now.Add(-time.Hour)))
+	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || !need {
+		t.Fatalf("NeedsCopy = %v, %v; want the backup copied over the dead login", need, err)
+	}
+}
+
+// A profile whose login is still live, or expired without the backup having
+// moved on, keeps its own login.
+func TestNeedsCopyKeepsTheProfilesOwnLogin(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name, own, stored string
+	}{
+		{"live, older backup", blob("own", now.Add(time.Hour)), blob("old", now.Add(-time.Hour))},
+		{"live, newer backup", blob("own", now.Add(time.Hour)), blob("fresh", now.Add(8*time.Hour))},
+		{"expired, backup expired too", blob("own", now.Add(-time.Hour)), blob("old", now.Add(-2*time.Hour))},
+		{"expired, backup holds the same token", blob("own", now.Add(-time.Hour)), blob("own", now.Add(-time.Hour))},
+		{"no expiry recorded", `{"claudeAiOauth":{"accessToken":"own","refreshToken":"r-own"}}`, blob("fresh", now.Add(8*time.Hour))},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			state, a := seat(t, c.stored)
+			login(t, Dir("bb"), a.Email, c.own)
+			if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
+				t.Fatalf("NeedsCopy = %v, %v; want the profile's own login kept", need, err)
+			}
+		})
+	}
+}
+
+// The backup's newer token is live in another directory: copying it over
+// the dead login would leave it in two places, so the copy is refused. So is
+// a seat logged in elsewhere on another token, which the backup may follow.
+func TestNeedsCopyRefusesToReviveWithATokenLiveElsewhere(t *testing.T) {
+	now := time.Now()
+	fresh := blob("fresh", now.Add(8*time.Hour))
+	state, a := seat(t, fresh)
+	login(t, Dir("bb"), a.Email, blob("dead", now.Add(-time.Hour)))
+	login(t, Dir("spare"), "someone-else@example.com", fresh)
+	if _, err := NeedsCopy(state, a, Dir("bb")); err == nil || !strings.Contains(err.Error(), Dir("spare")) ||
+		!strings.Contains(err.Error(), "two places") {
+		t.Fatalf("NeedsCopy = %v, want a refusal naming %s", err, Dir("spare"))
+	}
+
+	state, a = seat(t, fresh)
+	login(t, Dir("bb"), a.Email, blob("dead", now.Add(-time.Hour)))
+	login(t, "", a.Email, blob("other", now.Add(9*time.Hour)))
+	if _, err := NeedsCopy(state, a, Dir("bb")); err == nil || !strings.Contains(err.Error(), "also logged in") {
+		t.Fatalf("NeedsCopy = %v, want a refusal naming the shared login", err)
+	}
+}
+
+// The terminal's own shared directory is never repaired by a terminal
+// switch, even when it is the seat's profile and its login is dead.
+func TestNeedsCopyLeavesADeadSharedLoginAlone(t *testing.T) {
+	now := time.Now()
+	state, a := seat(t, blob("fresh", now.Add(8*time.Hour)))
+	login(t, Dir("bb"), a.Email, blob("dead", now.Add(-time.Hour)))
+	t.Setenv(paths.EnvClaudeConfigDir, Dir("bb"))
+	if need, err := NeedsCopy(state, a, Dir("bb")); err != nil || need {
+		t.Fatalf("NeedsCopy = %v, %v; want the shared login left alone", need, err)
 	}
 }
