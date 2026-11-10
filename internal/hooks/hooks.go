@@ -286,6 +286,29 @@ func handleAutoSwitchPrompt(prompt string, stdout io.Writer) (bool, error) {
 		}
 
 	inPlaceSwap:
+		// A session on a seat's own profile cannot be swapped in place: its
+		// claude reads one configuration directory for life, and the
+		// switcher refuses to write the shared login from inside it. Hand
+		// the swap to the wrapper, which relaunches on the new seat's
+		// profile and replays this prompt there.
+		if switcher.TerminalScoped() {
+			pid, err := wrapperPID()
+			if err != nil {
+				writePromptBlock(stdout, fmt.Sprintf("cux: %s\ncux: this session runs on a seat's own profile and is not under a cux wrapper, so it cannot be moved", why))
+				return true, nil
+			}
+			if err := signals.Write(pid, signals.SwitchRequested, signals.SwitchRequestedPayload{
+				Target:        pick.Identifier(),
+				ResumeMessage: prompt,
+				Scope:         switcher.ScopeTerminal,
+				Timestamp:     time.Now().UTC(),
+			}); err != nil {
+				writePromptBlock(stdout, fmt.Sprintf("cux: %s\ncux: signal failed: %v", why, err))
+				return true, nil
+			}
+			writePromptBlock(stdout, fmt.Sprintf("cux: %s\ncux: → moving this session to %s and resending your prompt...", why, pick.Email))
+			return true, nil
+		}
 		// Pre-turn prompt: swap credentials in-place. Claude Code reads
 		// credentials on every API request, so this prompt will be processed
 		// by the new account with no restart or manual resend needed.
@@ -458,20 +481,19 @@ func runCux(args ...string) string {
 // request the conversation simply carries on (0a914db). The user asked to
 // change account, not to restart their session.
 func runSlashSwitch(target string, stdout io.Writer) error {
-	target = strings.TrimSpace(target)
+	fields := strings.Fields(target)
 	// Nowhere to rotate to is worth saying here: the command would only fail
 	// or land on another exhausted seat. An explicit target is the user's own
-	// call and is never second-guessed.
-	if target == "" {
+	// call and is never second-guessed. A scope flag alone (/switch --all)
+	// names no seat, so it is a rotation too.
+	named, _, _ := switcher.ParseScopeArgs(fields)
+	if len(named) == 0 {
 		if ok, text := promptSwitchHasTarget(); !ok {
 			writePromptBlock(stdout, text)
 			return nil
 		}
 	}
-	args := []string{"__slash-switch"}
-	if target != "" {
-		args = append(args, target)
-	}
+	args := append([]string{"__slash-switch"}, fields...)
 	writePromptBlock(stdout, runCux(args...))
 	return nil
 }

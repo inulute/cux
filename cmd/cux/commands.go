@@ -78,7 +78,7 @@ var commandTable = []*Command{
 		Args: []Arg{{Name: "account", Kind: ArgIdent, Required: true}}, Run: cmdRemove},
 	{Name: "alias", Summary: "set or clear an account's short alias", Mutates: true,
 		Args: []Arg{{Name: "account", Kind: ArgIdent, Required: true}, {Name: "alias", Kind: ArgIdent}}, Run: cmdAlias},
-	{Name: "switch", Summary: "swap the active account", Mutates: true,
+	{Name: "switch", Summary: "switch this terminal's account (--all: every session)", Mutates: true,
 		Args: []Arg{{Name: "account", Kind: ArgIdent, Required: true}}, Run: cmdSwitch},
 	{Name: "force-switch", Aliases: []string{"rescue-switch"}, Summary: "emergency swap for an active cux session", Mutates: true,
 		Args: []Arg{{Name: "account", Kind: ArgIdent}}, Run: cmdForceSwitch},

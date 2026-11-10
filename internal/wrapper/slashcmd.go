@@ -3,13 +3,18 @@ package wrapper
 // SlashSwitch implements `cux __slash-switch <target>`, the body the
 // /switch and /cux:switch slash commands shell out to.
 //
-// The swap happens in place: this process rewrites the live credential
-// blob and returns. Claude Code re-reads credentials on every API
+// With --all the swap happens in place: this process rewrites the live
+// credential blob and returns. Claude Code re-reads credentials on every API
 // request, so the very next message continues on the new account in the
 // same session — no kill, no `--resume`, no lost context. (The auto
 // threshold hook uses the same in-place mechanism.) Mid-turn rate-limit
 // recovery and `cux force-switch` still go through the wrapper's
 // kill+resume path, which reloads the transcript when a turn is broken.
+//
+// The default, terminal scope, cannot be done in place: a running claude
+// cannot change its configuration directory. It goes through the wrapper's
+// kill+resume path instead, which relaunches claude on the seat's own
+// profile and carries the conversation over.
 import (
 	"errors"
 	"fmt"
@@ -30,8 +35,10 @@ import (
 )
 
 // SlashSwitch is invoked by the slash command's bash block. target may
-// be empty — that means "rotate per the configured strategy".
-func SlashSwitch(target string, w io.Writer) error {
+// be empty — that means "rotate per the configured strategy". scope is
+// switcher.ScopeTerminal or switcher.ScopeAll; the caller resolves an unset
+// scope.
+func SlashSwitch(target, scope string, w io.Writer) error {
 	if os.Getenv(envWrapped) != "1" {
 		return errors.New("/switch requires cux as the entry point — start your session with `cux` instead of `claude`")
 	}
@@ -67,6 +74,13 @@ func SlashSwitch(target string, w io.Writer) error {
 	acct, err := state.Resolve(resolved)
 	if err != nil {
 		return err
+	}
+	if scope == switcher.ScopeTerminal {
+		return slashSwitchTerminal(state, acct, resolved, wrapperPID, w)
+	}
+	if switcher.TerminalScoped() {
+		return errors.New("this session runs on a seat's own profile (CUX_SCOPE=terminal), so --all cannot reach the shared login from here; " +
+			"run `cux switch <account> --all` from a terminal that is not on a profile")
 	}
 	if acct.Slot == state.ActiveSlot {
 		fmt.Fprintf(w, "cux: already on %s, nothing to do\n", acct.Email)
@@ -112,6 +126,36 @@ func SlashSwitch(target string, w io.Writer) error {
 	}(from.Email, to.Email)
 
 	fmt.Fprint(w, renderSwitched(from, to, toU))
+	return nil
+}
+
+// slashSwitchTerminal asks the wrapper to move only this session: it stops
+// claude, points it at the seat's profile and resumes the conversation.
+// Nothing shared is written here.
+func slashSwitchTerminal(state *store.State, acct store.Account, resolved string, wrapperPID int, w io.Writer) error {
+	if os.Getenv(envScopedSwitch) != "1" {
+		return errors.New("this session's cux wrapper predates terminal-only switching and would switch every session; " +
+			"restart this session with `cux`, or pass --all to switch every session")
+	}
+	// What counts is the seat this session runs on. state.ActiveSlot is the
+	// shared login's seat, which may be another one entirely.
+	if acct.Slot == switcher.LiveSlot(state) {
+		fmt.Fprintf(w, "cux: this session is already on %s, nothing to do\n", acct.Email)
+		return nil
+	}
+	// Refuse before the wrapper stops claude, not after.
+	dir, err := switcher.ProfileDir(acct)
+	if err != nil {
+		return err
+	}
+	if err := signals.Write(wrapperPID, signals.SwitchRequested, signals.SwitchRequestedPayload{
+		Target:    resolved,
+		Scope:     switcher.ScopeTerminal,
+		Timestamp: time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "cux: moving this session to %s (%s) and resuming the conversation — other sessions keep their account\n", acct.Email, dir)
 	return nil
 }
 
