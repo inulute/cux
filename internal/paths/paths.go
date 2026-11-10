@@ -2,7 +2,8 @@
 // so the rest of the codebase never builds a path string by hand.
 //
 // Two roots matter:
-//   - Claude Code's own state, under $HOME/.claude (and a sibling fallback).
+//   - Claude Code's own state, under $HOME/.claude (and a sibling fallback),
+//     or under $CLAUDE_CONFIG_DIR when that is set.
 //     cux never invents these — it follows whatever Claude Code itself uses.
 //   - cux's own state, under a backup root that follows XDG on Linux and
 //     falls back to $HOME/.cux elsewhere.
@@ -46,14 +47,33 @@ func Home() string {
 	return h
 }
 
-// ClaudeDir is Claude Code's state directory, $HOME/.claude.
-func ClaudeDir() string { return filepath.Join(Home(), ".claude") }
+// EnvClaudeConfigDir is the variable Claude Code reads to keep its state
+// somewhere other than $HOME/.claude. cux follows it so that it reads and
+// writes the same login the claude it launches will use.
+const EnvClaudeConfigDir = "CLAUDE_CONFIG_DIR"
+
+// ClaudeDir is Claude Code's state directory: $CLAUDE_CONFIG_DIR when set,
+// otherwise $HOME/.claude. An empty value counts as unset, as it does for
+// Claude Code.
+func ClaudeDir() string {
+	if dir := os.Getenv(EnvClaudeConfigDir); dir != "" {
+		return dir
+	}
+	return filepath.Join(Home(), ".claude")
+}
 
 // ClaudeConfig returns the path Claude Code reads its global config from.
 // Newer versions use $HOME/.claude/.claude.json; older ones use $HOME/.claude.json.
 // Match cc-account-switcher's resolution: prefer the new location only if
 // it exists and parses; otherwise fall back to the legacy sibling.
+//
+// Under CLAUDE_CONFIG_DIR there is no legacy sibling: the config is always
+// inside that directory, and falling back to $HOME/.claude.json would read
+// the default login's identity instead.
 func ClaudeConfig() string {
+	if os.Getenv(EnvClaudeConfigDir) != "" {
+		return filepath.Join(ClaudeDir(), ".claude.json")
+	}
 	primary := filepath.Join(ClaudeDir(), ".claude.json")
 	if fi, err := os.Stat(primary); err == nil && !fi.IsDir() {
 		return primary

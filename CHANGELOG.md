@@ -3,6 +3,17 @@
 Starts at v0.3.10. Earlier releases are on the
 [releases page](https://github.com/inulute/cux/releases).
 
+## Unreleased
+
+### Fixed
+
+- **cux ignored `CLAUDE_CONFIG_DIR`.** It always read `~/.claude` and, on
+  macOS, the unsuffixed Keychain item, while Claude Code used the configured
+  directory and that directory's own Keychain item. Under a custom config
+  directory cux read one login while claude used another, and a swap wrote
+  the login every other session shares. cux now resolves both the way Claude
+  Code does.
+
 ## v0.3.11 — 2026-08-21
 
 ### Fixed
