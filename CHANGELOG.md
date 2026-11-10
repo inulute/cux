@@ -3,6 +3,57 @@
 Starts at v0.3.10. Earlier releases are on the
 [releases page](https://github.com/inulute/cux/releases).
 
+## Unreleased
+
+### Changed (breaking default)
+
+- **`cux switch` and `/switch` move only the current terminal.** One switch
+  used to rewrite the shared login, so every running session moved to the new
+  account on its next request. A switch now points just this session at the
+  seat's own profile, `~/.claude-<alias>`, through `CLAUDE_CONFIG_DIR`; the
+  shared login, the shared `.claude.json` and `state.json` are not written.
+  `--all` (or `--scope all`) keeps the old behaviour. Terminal scope needs the
+  seat to have an alias and an initialised profile directory; see
+  [Switch scope](README.md#switch-scope).
+- `cux switch <seat>` opens a shell on the seat's profile, runs the command
+  after `--`, or prints the variables for `eval` when there is no terminal.
+  `/switch` restarts Claude Code on the profile and resumes the conversation.
+- A session started on a profile stays on profiles: automatic swaps move it to
+  the next seat's profile, and `--all` is refused inside it.
+- A terminal-only `/switch` sent to a wrapper from an earlier version refuses
+  instead of moving every session, since that wrapper would ignore the scope.
+- A seat's login is copied into its profile only while no config directory
+  (the shared one or another `~/.claude-*`) is logged in as that seat; one
+  refresh token in two places lets the first refresh sign the other out.
+  `--all` likewise refuses a seat whose own profile holds its login.
+- A profile left holding an expired token that cux's own refresh of the backup
+  revoked gets the backup's login on the next switch to that seat, under the
+  same one-place checks. cux recognises such a token from a hashed record of
+  the tokens it rotated away; a login the profile made on its own, idle or
+  not, is never replaced, and a switch that cannot repair lands on the
+  profile's login as before instead of refusing.
+- A seat's login is never copied over another account's login a profile
+  holds, nor into the directory the switching terminal's own sessions share
+  (a terminal running on `~/.claude-<alias>` itself).
+- The backup and a profile that owns the seat's login follow each other: a
+  login the profile refreshed is taken into the backup (on every poll and when
+  a terminal leaves the profile), and a token cux refreshed is written into the
+  profile. Only the account login is copied, never another directory's MCP
+  logins.
+- A profile without cux's hooks and `/switch` is refused, with the
+  `CLAUDE_CONFIG_DIR=… cux setup` hint.
+- Inside a terminal-scoped session, rotation and `/cux:list` use the seat that
+  session runs on, not the shared login's.
+
+### Fixed
+
+- **cux ignored `CLAUDE_CONFIG_DIR`.** It always read `~/.claude` and, on
+  macOS, the unsuffixed Keychain item, while Claude Code used the configured
+  directory and that directory's own Keychain item. Under a custom config
+  directory cux read one login while claude used another, and a swap wrote
+  the login every other session shares. cux now resolves both the way Claude
+  Code does.
+
 ## v0.3.11 — 2026-08-21
 
 ### Fixed

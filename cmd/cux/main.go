@@ -36,6 +36,7 @@ import (
 	"github.com/inulute/cux/internal/lockfile"
 	"github.com/inulute/cux/internal/monitor"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/profile"
 	"github.com/inulute/cux/internal/registry"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/supportnotice"
@@ -691,12 +692,41 @@ func printSharedTokenWarning(w io.Writer, st *store.State) {
 	fmt.Fprintf(w, " %sCheck CLAUDE_CONFIG_DIR points where you expect before each one.%s\n\n", colorGray, colorReset)
 }
 
+const switchUsage = "usage: cux switch [--all | --scope terminal|all] <slot|email|alias> [-- command...]"
+
 func cmdSwitch(args []string) {
-	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: cux switch <slot|email|alias>")
+	var command []string
+	for i, a := range args {
+		if a == "--" {
+			args, command = args[:i], args[i+1:]
+			break
+		}
+	}
+	rest, scope, err := switcher.ParseScopeArgs(args)
+	if err != nil || len(rest) != 1 {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cux switch:", err)
+		}
+		fmt.Fprintln(os.Stderr, switchUsage)
 		os.Exit(2)
 	}
-	from, to, err := switcher.SwitchTo(args[0])
+	// Moving every session is never the default: one switch used to move
+	// every running terminal to another account. It takes --all.
+	if scope == "" {
+		scope = switcher.ScopeTerminal
+	}
+	if scope == switcher.ScopeTerminal {
+		cmdSwitchTerminal(rest[0], command)
+		return
+	}
+	if len(command) > 0 {
+		fail(errors.New("a command after -- runs on this terminal's seat; it cannot be combined with --all"))
+	}
+	if switcher.TerminalScoped() {
+		fail(errors.New("this shell runs on a seat's own profile (CUX_SCOPE=terminal); " +
+			"leave it before switching every session"))
+	}
+	from, to, err := switcher.SwitchTo(rest[0])
 	if err != nil {
 		fail(err)
 	}
@@ -720,10 +750,75 @@ func cmdSwitch(args []string) {
 }
 
 func cmdSlashSwitch(args []string) {
-	target := strings.TrimSpace(strings.Join(args, " "))
-	if err := wrapper.SlashSwitch(target, os.Stdout); err != nil {
+	// The slash command passes $ARGUMENTS, which may arrive as one word or
+	// several; split again so a flag is found either way.
+	fields, scope, err := switcher.ParseScopeArgs(strings.Fields(strings.Join(args, " ")))
+	if err != nil {
 		fail(err)
 	}
+	if scope == "" {
+		scope = switcher.ScopeTerminal
+	}
+	if err := wrapper.SlashSwitch(strings.Join(fields, " "), scope, os.Stdout); err != nil {
+		fail(err)
+	}
+}
+
+// cmdSwitchTerminal moves only this terminal to the target seat. A child
+// process cannot change its parent shell's environment, so the seat's
+// profile is applied to a process cux starts: the command after --, or a
+// new interactive shell. Without a terminal it prints the variables for
+// eval instead.
+func cmdSwitchTerminal(target string, command []string) {
+	if os.Getenv("CUX_WRAPPED") == "1" && len(command) == 0 {
+		fail(errors.New("inside a cux session use /switch, which moves that session; " +
+			"a shell started from here would not move it"))
+	}
+	from, to, err := switcher.SwitchTerminal(target)
+	if err != nil {
+		fail(err)
+	}
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	label := to.Email
+	if to.Alias != "" {
+		label = to.Alias
+	}
+	run := func(name string, argv []string) {
+		c := exec.Command(name, argv...)
+		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+		c.Env = os.Environ()
+		if err := c.Run(); err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				os.Exit(ee.ExitCode())
+			}
+			fail(err)
+		}
+		os.Exit(0)
+	}
+	if len(command) > 0 {
+		run(command[0], command[1:])
+	}
+	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+		shell := os.Getenv("SHELL")
+		if shell == "" && runtime.GOOS == "windows" {
+			shell = os.Getenv("COMSPEC")
+		}
+		if shell == "" {
+			shell = "/bin/sh"
+		}
+		if from.Email != "" && from.Slot != to.Slot {
+			fmt.Printf("cux: %s → %s for this terminal only (%s). Other sessions keep their account. Type `exit` to go back.\n", from.Email, label, dir)
+		} else {
+			fmt.Printf("cux: this terminal now uses %s (%s). Other sessions keep their account. Type `exit` to go back.\n", label, dir)
+		}
+		run(shell, nil)
+	}
+	quote := func(v string) string { return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'" }
+	fmt.Printf("export CLAUDE_CONFIG_DIR=%s\n", quote(dir))
+	fmt.Printf("export %s=%s\n", switcher.EnvScope, switcher.ScopeTerminal)
+	fmt.Printf("export %s=%s\n", profile.EnvSharedConfigDir, quote(os.Getenv(profile.EnvSharedConfigDir)))
+	fmt.Fprintf(os.Stderr, "cux: %s is ready in %s; apply it to this shell with: eval \"$(cux switch %s)\"\n", label, dir, target)
 }
 
 func cmdForceSwitch(args []string) {
@@ -1901,8 +1996,8 @@ func printFancyHeader(w io.Writer, st *store.State, liveEmail string) {
 	slotStr := "--"
 	if liveEmail != "" {
 		statusLabel = "ACTIVE"
-		if st.ActiveSlot != 0 {
-			slotStr = fmt.Sprintf("%02d", st.ActiveSlot)
+		if slot := switcher.SessionSlot(st); slot != 0 {
+			slotStr = fmt.Sprintf("%02d", slot)
 		}
 	}
 	managedStr := fmt.Sprintf("%02d", len(st.Accounts))
@@ -2118,8 +2213,10 @@ USAGE
   cux project stats <name>                usage detail for one project
   cux project remove <name>               unbind a directory (accounts untouched)
   cux alias <slot|email|alias> --clear    remove alias
-  cux switch <slot|email|alias>           swap the active account (manual; requires
-                                          restart unless run from /switch inside)
+  cux switch <slot|email|alias>           switch THIS terminal only: opens a shell on the
+      [-- command...]                     seat's ~/.claude-<alias> profile (or runs command)
+  cux switch --all <slot|email|alias>     swap the shared login for every session
+                                          (restart needed unless run from /switch inside)
   cux force-switch [slot|email|alias]     emergency swap for an active cux session
                                           when Claude will not run /switch
   cux remove [--force] <slot|email|alias> remove an account from cux

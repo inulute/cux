@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -404,5 +406,72 @@ func TestSharedTokenSlotsFindsAnAlreadyCorruptedPool(t *testing.T) {
 	// A healthy pool reports nothing.
 	if got := SharedTokenSlots([]SlotRef{{3, "c@x.test"}}); len(got) != 0 {
 		t.Fatalf("healthy pool reported %+v", got)
+	}
+}
+
+// The revocation record keeps hashes of rotated-away refresh tokens only:
+// nothing for a refresh that kept its refresh token, no raw token on disk,
+// and no more than maxRevoked entries.
+func TestRecordRevokedKeepsOnlyRotatedAwayTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	login := func(at, rt string) string {
+		return fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q,"refreshToken":%q,"expiresAt":1}}`, at, rt)
+	}
+	revoked := func(blob string) bool {
+		t.Helper()
+		got, err := RevokedByRefresh(1, "a@example.com", blob)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	if revoked(login("a0", "r0")) {
+		t.Fatal("a token was revoked before anything was recorded")
+	}
+	if err := RecordRevoked(1, "a@example.com", login("a0", "r0"), login("a1", "r0")); err != nil {
+		t.Fatal(err)
+	}
+	if revoked(login("a0", "r0")) {
+		t.Fatal("a refresh that kept its refresh token recorded it as revoked")
+	}
+	if err := RecordRevoked(1, "a@example.com", login("a0", "secret-r0"), login("a1", "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if !revoked(login("other-access", "secret-r0")) || revoked(login("a1", "r1")) {
+		t.Fatal("the rotated-away refresh token is not recognised by its refresh token alone")
+	}
+	raw, err := os.ReadFile(revokedFilePath(1, "a@example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secret-r0") {
+		t.Fatalf("the record holds a raw refresh token: %s", raw)
+	}
+	if runtime.GOOS != "windows" {
+		for path, want := range map[string]os.FileMode{
+			revokedFilePath(1, "a@example.com"):               0o600,
+			filepath.Dir(revokedFilePath(1, "a@example.com")): 0o700,
+		} {
+			fi, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fi.Mode().Perm(); got != want {
+				t.Fatalf("%s has mode %o, want %o", path, got, want)
+			}
+		}
+	}
+
+	for i := 0; i < maxRevoked; i++ {
+		if err := RecordRevoked(1, "a@example.com", login("x", fmt.Sprintf("rx%d", i)), login("y", "ry")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if revoked(login("a0", "secret-r0")) || !revoked(login("x", fmt.Sprintf("rx%d", maxRevoked-1))) {
+		t.Fatal("the record is not bounded to the newest entries")
 	}
 }

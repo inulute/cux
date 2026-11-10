@@ -26,6 +26,7 @@ import (
 	"github.com/inulute/cux/internal/creds"
 	"github.com/inulute/cux/internal/lockfile"
 	"github.com/inulute/cux/internal/paths"
+	"github.com/inulute/cux/internal/profile"
 	"github.com/inulute/cux/internal/store"
 	"github.com/inulute/cux/internal/usage"
 )
@@ -139,7 +140,7 @@ func refreshAll(maxAge time.Duration) (usage.Cache, []error) {
 		}
 		go func(slot int, a store.Account, others []store.Account) {
 			defer wg.Done()
-			entry, err := refreshOne(slot, a.Email, a.OrgUUID, others)
+			entry, err := refreshOne(state, a, others)
 			ch <- result{cacheKey: a.CacheKey(), entry: entry, err: err, email: a.Email}
 		}(slot, a, others)
 	}
@@ -265,7 +266,7 @@ func refreshActive(email string, maxAge time.Duration) error {
 			others = append(others, other)
 		}
 	}
-	entry, err := refreshOne(slot, acct.Email, acct.OrgUUID, others)
+	entry, err := refreshOne(state, acct, others)
 	if err != nil && !entry.TokenExpired {
 		// Network blips shouldn't blow away the prior entry.
 		return err
@@ -287,16 +288,55 @@ func refreshActive(email string, maxAge time.Duration) error {
 // refreshOne polls one account. others is the rest of the managed pool, used
 // only on the post-401 fallback path to check a live token is not already
 // filed under another slot; pass nil to skip that check.
-func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.AccountUsage, error) {
+//
+// A refresh rotates the seat's refresh token and revokes the old one, so it
+// is only safe where cux can hand the new token to every directory holding
+// the old one. That is this process's own directory and nothing else: a
+// seat whose stored refresh token is live in any other directory cux can
+// find — the shared login seen from a terminal-scoped process, or a seat's
+// own ~/.claude-<alias> profile seen from the shared terminal — is polled
+// with that directory's token and never refreshed from here. Its claude
+// refreshes it. A login a profile's claude refreshed on its own is taken
+// into the backup first (profile.Reconcile), and an expired backup is not
+// refreshed while another directory holds a newer login of the seat.
+func refreshOne(state *store.State, acct store.Account, others []store.Account) (usage.AccountUsage, error) {
+	slot, email, orgUUID := acct.Slot, acct.Email, acct.OrgUUID
+	if _, err := profile.Reconcile(state, acct); err != nil {
+		return usage.AccountUsage{}, fmt.Errorf("monitor: take the profile's login into the backup: %w", err)
+	}
+	syncCurrent := func(b string) error {
+		_, err := syncLiveIfActive(email, orgUUID, b)
+		return err
+	}
 	blob, err := creds.ReadBackup(slot, email)
 	if err != nil {
 		return usage.AccountUsage{}, err
+	}
+	own := os.Getenv(paths.EnvClaudeConfigDir)
+	holder, held, err := profile.HeldElsewhere(own, blob)
+	if err != nil {
+		return usage.AccountUsage{}, fmt.Errorf("monitor: %w", err)
+	}
+	if held {
+		return pollHeldElsewhere(slot, holder)
 	}
 
 	// Proactively refresh before we even try the API if the token is
 	// expired or within the 5-minute buffer window.
 	if creds.IsTokenExpired(blob) {
-		if freshBlob, refreshErr := creds.RefreshBlob(blob); refreshErr == nil {
+		// Another directory's claude refreshed the seat since cux saw it, so
+		// the backup's token is most likely revoked, and every poll would
+		// try it again until the shared terminal adopts the new one. Poll
+		// with that directory's token instead. Not when this process's own
+		// login is the backup's: that one is refreshed here and handed over.
+		if ownLive, _ := creds.ReadLiveIn(own); !creds.SameLogin(ownLive, blob) {
+			if newer, ok, err := profile.NewerElsewhere(state, slot, own, blob); err != nil {
+				return usage.AccountUsage{}, fmt.Errorf("monitor: %w", err)
+			} else if ok {
+				return pollHeldElsewhere(slot, newer)
+			}
+		}
+		if freshBlob, refreshErr := refreshBlob(blob); refreshErr == nil {
 			if writeErr := creds.WriteBackup(slot, email, freshBlob); writeErr != nil {
 				// If we can't persist the new token, the refresh token may
 				// be single-use (OAuth 2.1) and we'd permanently lose access.
@@ -304,8 +344,18 @@ func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.
 				// token we cannot save.
 				return usage.AccountUsage{}, fmt.Errorf("monitor: save refreshed token: %w", writeErr)
 			}
-			if _, writeErr := syncLiveIfActive(email, orgUUID, freshBlob); writeErr != nil {
+			// Recorded before the token is handed on, so a directory the
+			// handover misses keeps a login a later switch can recognise as
+			// revoked and repair (profile.NeedsCopy). The record is
+			// best-effort: the refreshed token is already saved, and a
+			// failure to record costs only that later repair, not this
+			// poll's reading.
+			_ = creds.RecordRevoked(slot, email, blob, freshBlob)
+			if writeErr := syncCurrent(freshBlob); writeErr != nil {
 				return usage.AccountUsage{}, fmt.Errorf("monitor: save refreshed live token: %w", writeErr)
+			}
+			if writeErr := profile.SyncRefreshed(state, acct, blob, freshBlob); writeErr != nil {
+				return usage.AccountUsage{}, fmt.Errorf("monitor: save refreshed token into the profile: %w", writeErr)
 			}
 			blob = freshBlob
 		}
@@ -319,7 +369,7 @@ func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.
 	}
 	u, err := usage.Fetch(token)
 	if err == nil {
-		if _, writeErr := syncLiveIfActive(email, orgUUID, blob); writeErr != nil {
+		if writeErr := syncCurrent(blob); writeErr != nil {
 			return usage.AccountUsage{}, fmt.Errorf("monitor: save active live token: %w", writeErr)
 		}
 		return u, nil
@@ -373,6 +423,17 @@ func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.
 	// still worth having, and leaving the stale backup in place keeps the
 	// slot repairable by `cux add`, which can attribute the token properly.
 	// `cux status` reports pools already in this state.
+	//
+	// Under a terminal scope this process's directory is a profile, which
+	// may hold a login of this seat made there on its own while the backup
+	// follows another directory. Adopting it then would let that other
+	// directory's next sync copy it, giving one token two holders; adopt
+	// only when the profile is the seat's sole holder.
+	if profile.TerminalScoped() {
+		if _, elsewhere, lerr := profile.LiveElsewhere(state, slot, os.Getenv(paths.EnvClaudeConfigDir)); lerr != nil || elsewhere {
+			return u2, nil
+		}
+	}
 	refs := make([]creds.SlotRef, 0, len(others))
 	for _, o := range others {
 		refs = append(refs, creds.SlotRef{Slot: o.Slot, Email: o.Email})
@@ -384,8 +445,31 @@ func refreshOne(slot int, email, orgUUID string, others []store.Account) (usage.
 	return u2, nil
 }
 
+// refreshBlob is creds.RefreshBlob; tests replace it to count refreshes.
+var refreshBlob = creds.RefreshBlob
+
+// pollHeldElsewhere reads a seat's usage with the token of the directory
+// that runs on it. It never refreshes: that would revoke the token the
+// directory's claude holds. When the token has expired the last reading is
+// kept until that claude refreshes it.
+func pollHeldElsewhere(slot int, h profile.Holder) (usage.AccountUsage, error) {
+	if creds.IsTokenExpired(h.Blob) {
+		return usage.AccountUsage{}, fmt.Errorf("monitor: slot %d is logged in at %s, whose claude refreshes it; "+
+			"its access token has expired, so the last reading stays until that claude runs", slot, profile.Label(h.Dir))
+	}
+	token, err := creds.ExtractAccessToken(h.Blob)
+	if err != nil {
+		return usage.AccountUsage{}, err
+	}
+	return usage.Fetch(token)
+}
+
+// syncLiveIfActive writes blob into this process's live login when that
+// login is the same account. Under a terminal scope this process's
+// directory is a profile, and profile.SyncRefreshed — which also checks the
+// profile holds the token being replaced — is what writes there.
 func syncLiveIfActive(email, orgUUID, blob string) (bool, error) {
-	if email == "" || blob == "" {
+	if email == "" || blob == "" || profile.TerminalScoped() {
 		return false, nil
 	}
 	_, parsed, err := claudecfg.ReadOAuthBlock()

@@ -62,9 +62,15 @@ type RateLimitedPayload struct {
 
 // SwitchRequestedPayload carries an optional explicit target. An empty
 // Target means "rotate to the next account per the configured strategy."
+//
+// Scope is "terminal" when only the wrapper's own session should move to
+// the target seat's profile. Empty keeps the original meaning, a swap of
+// the shared login, so a signal written by an older cux still does what it
+// did.
 type SwitchRequestedPayload struct {
 	Target        string    `json:"target,omitempty"`
 	ResumeMessage string    `json:"resumeMessage,omitempty"`
+	Scope         string    `json:"scope,omitempty"`
 	Timestamp     time.Time `json:"timestamp"`
 }
 

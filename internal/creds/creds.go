@@ -4,7 +4,7 @@
 //
 //   - "Live" credentials are wherever Claude Code itself reads from.
 //     cux must write here to actually change the active account.
-//     macOS:     Keychain generic password; see macKeychainServices.
+//     macOS:     Keychain generic password; see liveKeychainServices.
 //     Linux/Win: File at ~/.claude/.credentials.json, mode 0600.
 //
 //   - "Backup" credentials are cux's per-account stash. On macOS/Windows
@@ -61,6 +61,30 @@ import (
 var macKeychainServices = []string{
 	"Claude Code-credentials",
 	"Orca Claude Code Managed Credentials",
+}
+
+// liveKeychainServices returns the service names the live login is looked
+// up and written under for the current Claude Code configuration directory.
+//
+// With CLAUDE_CONFIG_DIR set, Claude Code keys its login item by that
+// directory: "Claude Code-credentials-" plus the first 8 hex digits of the
+// SHA-256 of the path. That item, and only that one, belongs to the
+// directory. The unsuffixed items belong to the default ~/.claude login, so
+// falling back to them would read — and on a switch overwrite — the login
+// every other session shares.
+//
+// Claude Code NFC-normalises the path before hashing; a path that is
+// already NFC, as typed paths almost always are, hashes the same here.
+func liveKeychainServices() []string {
+	return liveKeychainServicesIn(os.Getenv(paths.EnvClaudeConfigDir))
+}
+
+func liveKeychainServicesIn(dir string) []string {
+	if dir == "" {
+		return macKeychainServices
+	}
+	sum := sha256.Sum256([]byte(dir))
+	return []string{macKeychainServices[0] + "-" + hex.EncodeToString(sum[:])[:8]}
 }
 
 // keychainExitNotFound is `security`'s exit code for "no such item".
@@ -120,16 +144,12 @@ func fileBackendForced() bool {
 // backup or write it back live. The macOS path already selects by content;
 // the check lives here so the file backends answer identically and the
 // sentinel is not a platform quirk.
-func ReadLive() (string, error) {
-	var (
-		blob string
-		err  error
-	)
-	if runtime.GOOS == "darwin" && !fileBackendForced() {
-		blob, err = readLiveMacOS()
-	} else {
-		blob, err = readLiveFile()
-	}
+func ReadLive() (string, error) { return ReadLiveIn(os.Getenv(paths.EnvClaudeConfigDir)) }
+
+// ReadLiveIn is ReadLive for the configuration directory configDir ("" is
+// the default), read without touching CLAUDE_CONFIG_DIR.
+func ReadLiveIn(configDir string) (string, error) {
+	blob, err := readLiveRawIn(configDir)
 	if err != nil {
 		return "", err
 	}
@@ -139,20 +159,170 @@ func ReadLive() (string, error) {
 	return blob, nil
 }
 
+// readLiveRawIn returns whatever configDir's live credentials hold, with or
+// without an account token.
+func readLiveRawIn(configDir string) (string, error) {
+	if runtime.GOOS == "darwin" && !fileBackendForced() {
+		return readLiveMacOS(configDir)
+	}
+	return readLiveFile(configDir)
+}
+
 // WriteLive replaces the live credential blob Claude Code reads.
 // On macOS it goes to the keychain; on Linux/Windows it goes to the
 // file at ~/.claude/.credentials.json with mode 0600.
-func WriteLive(blob string) error {
+func WriteLive(blob string) error { return WriteLiveIn(os.Getenv(paths.EnvClaudeConfigDir), blob) }
+
+// WriteLiveIn is WriteLive for the configuration directory configDir.
+func WriteLiveIn(configDir, blob string) error {
 	if blob == "" {
 		return errors.New("creds: refusing to write empty live credentials")
 	}
 	if err := requireAccountToken(blob); err != nil {
 		return fmt.Errorf("creds: refusing to write live credentials with no account token — that would sign you out: %w", err)
 	}
+	return writeLiveRawIn(configDir, blob)
+}
+
+func writeLiveRawIn(configDir, blob string) error {
 	if runtime.GOOS == "darwin" && !fileBackendForced() {
-		return writeLiveMacOS(blob)
+		return writeLiveMacOS(configDir, blob)
 	}
-	return writeLiveFile(blob)
+	return writeLiveFile(configDir, blob)
+}
+
+// LiveLocation names where configDir's live login is stored: the keychain
+// item on macOS, the credentials file elsewhere. Two directories with the
+// same location share one login — "" and $HOME/.claude do on Linux, and
+// do not on macOS, where only "" uses the unsuffixed item.
+func LiveLocation(configDir string) string {
+	if runtime.GOOS == "darwin" && !fileBackendForced() {
+		return "keychain:" + liveKeychainServicesIn(configDir)[0]
+	}
+	return "file:" + filepath.Clean(paths.ClaudeCredentialsIn(configDir))
+}
+
+// CopyAccountLoginIn makes configDir logged in with src's account login. It
+// takes only src's claudeAiOauth block and keeps everything else configDir
+// already stores next to it, such as MCP server logins: those belong to
+// that directory, and copying another directory's would put their refresh
+// tokens in two places too.
+//
+// undo puts configDir back as it was, deleting the login when there was
+// none before. Refuses the default directory (""): that is the shared login
+// a profile copy must never replace.
+func CopyAccountLoginIn(configDir, src string) (undo func() error, err error) {
+	if configDir == "" {
+		return nil, errors.New("creds: refusing to copy a login into the default Claude Code directory")
+	}
+	prev, prevErr := readLiveRawIn(configDir)
+	switch {
+	case prevErr == nil:
+	case errors.Is(prevErr, ErrNotFound):
+		prev = ""
+	default:
+		return nil, prevErr
+	}
+	out, err := WithAccountLogin(prev, src)
+	if err != nil {
+		return nil, err
+	}
+	if err := WriteLiveIn(configDir, out); err != nil {
+		return nil, err
+	}
+	undo = func() error {
+		if prev == "" {
+			return deleteLiveIn(configDir)
+		}
+		return writeLiveRawIn(configDir, prev)
+	}
+	return undo, nil
+}
+
+// WithAccountLogin returns dst with its claudeAiOauth block replaced by
+// src's, every other key of dst kept as it was. dst may be "".
+func WithAccountLogin(dst, src string) (string, error) {
+	var srcDoc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(src), &srcDoc); err != nil {
+		return "", fmt.Errorf("creds: parse source login: %w", err)
+	}
+	account, ok := srcDoc["claudeAiOauth"]
+	if !ok {
+		return "", ErrNoAccountToken
+	}
+	doc := map[string]json.RawMessage{}
+	if dst != "" {
+		if err := json.Unmarshal([]byte(dst), &doc); err != nil {
+			return "", fmt.Errorf("creds: parse destination credentials: %w", err)
+		}
+	}
+	doc["claudeAiOauth"] = account
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("creds: marshal: %w", err)
+	}
+	return string(out), nil
+}
+
+// deleteLiveIn removes configDir's live login. Never the default one.
+func deleteLiveIn(configDir string) error {
+	if configDir == "" {
+		return errors.New("creds: refusing to delete the default Claude Code login")
+	}
+	if runtime.GOOS == "darwin" && !fileBackendForced() {
+		return deleteLiveMacOS(configDir)
+	}
+	if err := os.Remove(paths.ClaudeCredentialsIn(configDir)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("creds: remove %s: %w", paths.ClaudeCredentialsIn(configDir), err)
+	}
+	return nil
+}
+
+// HasRefreshToken reports whether blob carries a refresh token: only such a
+// login can rotate, and so revoke another holder of the same token.
+func HasRefreshToken(blob string) bool {
+	_, ok := refreshTokenOf(blob)
+	return ok
+}
+
+// SameLogin reports whether two credential blobs carry one login: the same
+// refresh token, or the same access token when neither has a refresh
+// token. Other keys in the blobs, such as MCP server logins, do not count.
+func SameLogin(a, b string) bool {
+	ra, okA := refreshTokenOf(a)
+	rb, okB := refreshTokenOf(b)
+	if okA || okB {
+		return okA && okB && ra == rb
+	}
+	ta, errA := ExtractAccessToken(a)
+	tb, errB := ExtractAccessToken(b)
+	return errA == nil && errB == nil && ta == tb
+}
+
+// ExpiresAt returns the access token's expiry in milliseconds since the
+// Unix epoch, or 0 when blob does not say.
+func ExpiresAt(blob string) int64 {
+	var doc struct {
+		ClaudeAIOAuth struct {
+			ExpiresAt int64 `json:"expiresAt"`
+		} `json:"claudeAiOauth"`
+	}
+	if err := json.Unmarshal([]byte(blob), &doc); err != nil {
+		return 0
+	}
+	return doc.ClaudeAIOAuth.ExpiresAt
+}
+
+func refreshTokenOf(blob string) (string, bool) {
+	var doc struct {
+		ClaudeAIOAuth struct {
+			RefreshToken string `json:"refreshToken"`
+		} `json:"claudeAiOauth"`
+	}
+	if err := json.Unmarshal([]byte(blob), &doc); err != nil || doc.ClaudeAIOAuth.RefreshToken == "" {
+		return "", false
+	}
+	return doc.ClaudeAIOAuth.RefreshToken, true
 }
 
 // ReadBackup returns the saved credential blob for one account, or
@@ -185,6 +355,100 @@ func TokenFingerprint(blob string) (fingerprint string, ok bool) {
 	}
 	sum := sha256.Sum256([]byte(tok))
 	return hex.EncodeToString(sum[:]), true
+}
+
+// maxRevoked bounds the revocation record of one seat. A profile that
+// missed more of cux's refreshes than this is no longer recognised and
+// keeps its own login, as every profile did before the record existed.
+const maxRevoked = 32
+
+// revokedDoc is the revocation record of one seat: hashes of the refresh
+// tokens cux rotated out of its stored login, oldest first.
+type revokedDoc struct {
+	RefreshTokens []string `json:"refreshTokens"`
+}
+
+func revokedFilePath(slot int, email string) string {
+	return filepath.Join(paths.AccountDir(slot, email), "revoked-refresh-tokens.json")
+}
+
+// refreshFingerprint hashes blob's refresh token, so the record never holds
+// a usable token.
+func refreshFingerprint(blob string) (string, bool) {
+	rt, ok := refreshTokenOf(blob)
+	if !ok {
+		return "", false
+	}
+	sum := sha256.Sum256([]byte(rt))
+	return hex.EncodeToString(sum[:]), true
+}
+
+// RecordRevoked notes that cux refreshed slot's stored login from old into
+// fresh. The refresh rotated old's refresh token, and the server revoked
+// it: a directory still holding old can no longer refresh, and
+// RevokedByRefresh recognises it later. Nothing is recorded when the
+// refresh kept the refresh token.
+func RecordRevoked(slot int, email, old, fresh string) error {
+	fp, ok := refreshFingerprint(old)
+	if !ok || SameLogin(old, fresh) {
+		return nil
+	}
+	doc, err := readRevoked(slot, email)
+	if err != nil {
+		return err
+	}
+	for _, f := range doc.RefreshTokens {
+		if f == fp {
+			return nil
+		}
+	}
+	doc.RefreshTokens = append(doc.RefreshTokens, fp)
+	if n := len(doc.RefreshTokens); n > maxRevoked {
+		doc.RefreshTokens = doc.RefreshTokens[n-maxRevoked:]
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("creds: marshal revoked tokens: %w", err)
+	}
+	dir := paths.AccountDir(slot, email)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creds: mkdir %s: %w", dir, err)
+	}
+	return atomicfile.Write(revokedFilePath(slot, email), out, 0o600)
+}
+
+// RevokedByRefresh reports whether blob's refresh token is one cux rotated
+// out of slot's stored login (RecordRevoked).
+func RevokedByRefresh(slot int, email, blob string) (bool, error) {
+	fp, ok := refreshFingerprint(blob)
+	if !ok {
+		return false, nil
+	}
+	doc, err := readRevoked(slot, email)
+	if err != nil {
+		return false, err
+	}
+	for _, f := range doc.RefreshTokens {
+		if f == fp {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func readRevoked(slot int, email string) (revokedDoc, error) {
+	var doc revokedDoc
+	b, err := os.ReadFile(revokedFilePath(slot, email))
+	switch {
+	case os.IsNotExist(err):
+		return doc, nil
+	case err != nil:
+		return doc, fmt.Errorf("creds: read revoked tokens: %w", err)
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return revokedDoc{}, fmt.Errorf("creds: parse revoked tokens: %w", err)
+	}
+	return doc, nil
 }
 
 // SlotHoldingToken returns the first slot in slots, other than skipSlot,
@@ -551,7 +815,7 @@ func readMacKeychainSecret(service string, account ...string) (string, error) {
 }
 
 // findMacKeychainItems returns every known credentials item that exists, in
-// macKeychainServices order. `security find-generic-password -s` returns an
+// liveKeychainServices order. `security find-generic-password -s` returns an
 // arbitrary single match, so the metadata-only dump supplies every account
 // and each secret is then read by its exact (service, account) pair.
 //
@@ -561,6 +825,10 @@ func readMacKeychainSecret(service string, account ...string) (string, error) {
 // The name-only lookup still runs afterward so an unquoted account or an
 // empty successful dump cannot make an item reachable by the old path vanish.
 func findMacKeychainItems() ([]macKeychainItem, error) {
+	return findMacKeychainItemsIn(os.Getenv(paths.EnvClaudeConfigDir))
+}
+
+func findMacKeychainItemsIn(configDir string) ([]macKeychainItem, error) {
 	dump, err := exec.Command("security", "dump-keychain").Output()
 	if err != nil {
 		var ee *exec.ExitError
@@ -575,7 +843,7 @@ func findMacKeychainItems() ([]macKeychainItem, error) {
 		out      []macKeychainItem
 		firstErr error
 	)
-	for _, service := range macKeychainServices {
+	for _, service := range liveKeychainServicesIn(configDir) {
 		accounts := parseMacKeychainAccounts(string(dump), service)
 		for _, account := range accounts {
 			blob, err := readMacKeychainSecret(service, account)
@@ -625,10 +893,14 @@ func findMacKeychainItems() ([]macKeychainItem, error) {
 // creating a new one — while the read path discards it and surfaces the
 // error, so no caller can mistake an MCP-only blob for a login.
 func selectLiveItem(items []macKeychainItem) (macKeychainItem, error) {
+	return selectLiveItemIn(items, os.Getenv(paths.EnvClaudeConfigDir))
+}
+
+func selectLiveItemIn(items []macKeychainItem, configDir string) (macKeychainItem, error) {
 	if len(items) == 0 {
 		return macKeychainItem{}, ErrNotFound
 	}
-	for _, service := range macKeychainServices {
+	for _, service := range liveKeychainServicesIn(configDir) {
 		firstToken := -1
 		for i := range items {
 			if items[i].service != service || !hasAccountToken(items[i].blob) {
@@ -648,16 +920,38 @@ func selectLiveItem(items []macKeychainItem) (macKeychainItem, error) {
 	return items[0], ErrNoAccountToken
 }
 
-func readLiveMacOS() (string, error) {
-	items, err := findMacKeychainItems()
+// readLiveMacOS returns the selected item's blob, with or without an
+// account token; ReadLiveIn applies the token check.
+func readLiveMacOS(configDir string) (string, error) {
+	items, err := findMacKeychainItemsIn(configDir)
 	if err != nil {
 		return "", err
 	}
-	it, err := selectLiveItem(items)
-	if err != nil {
+	it, err := selectLiveItemIn(items, configDir)
+	if err != nil && !errors.Is(err, ErrNoAccountToken) {
 		return "", err
 	}
 	return it.blob, nil
+}
+
+func deleteLiveMacOS(configDir string) error {
+	items, err := findMacKeychainItemsIn(configDir)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	for _, it := range items {
+		args := []string{"delete-generic-password", "-s", it.service}
+		if it.account != "" {
+			args = append(args, "-a", it.account)
+		}
+		if out, err := exec.Command("security", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("creds: security delete %q: %w (%s)", it.service, err, out)
+		}
+	}
+	return nil
 }
 
 // keychainAcctRe and keychainServiceRe match attributes in `security`'s item
@@ -691,14 +985,14 @@ func parseMacKeychainAccounts(dump, service string) []string {
 	return accounts
 }
 
-func writeLiveMacOS(blob string) error {
+func writeLiveMacOS(configDir, blob string) error {
 	// Write into whichever item the read path selects, so a switch lands
 	// where Claude Code is actually looking. Falling back to the classic
 	// service only when nothing exists keeps a first-ever write working.
-	service := macKeychainServices[0]
+	service := liveKeychainServicesIn(configDir)[0]
 	account := ""
-	if items, err := findMacKeychainItems(); err == nil {
-		if it, _ := selectLiveItem(items); it.service != "" {
+	if items, err := findMacKeychainItemsIn(configDir); err == nil {
+		if it, _ := selectLiveItemIn(items, configDir); it.service != "" {
 			service = it.service
 			account = it.account
 		}
@@ -720,22 +1014,24 @@ func writeLiveMacOS(blob string) error {
 
 // --- Linux/Windows live (file) --------------------------------------------
 
-func readLiveFile() (string, error) {
-	b, err := os.ReadFile(paths.ClaudeCredentials())
+func readLiveFile(configDir string) (string, error) {
+	path := paths.ClaudeCredentialsIn(configDir)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", ErrNotFound
 		}
-		return "", fmt.Errorf("creds: read %s: %w", paths.ClaudeCredentials(), err)
+		return "", fmt.Errorf("creds: read %s: %w", path, err)
 	}
 	return string(b), nil
 }
 
-func writeLiveFile(blob string) error {
-	if err := os.MkdirAll(paths.ClaudeDir(), 0o700); err != nil {
-		return fmt.Errorf("creds: mkdir %s: %w", paths.ClaudeDir(), err)
+func writeLiveFile(configDir, blob string) error {
+	dir := paths.ClaudeDirIn(configDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creds: mkdir %s: %w", dir, err)
 	}
-	return atomicfile.Write(paths.ClaudeCredentials(), []byte(blob), 0o600)
+	return atomicfile.Write(paths.ClaudeCredentialsIn(configDir), []byte(blob), 0o600)
 }
 
 // --- Backup: keyring (Windows) --------------------------------------------
