@@ -67,9 +67,12 @@ func claudeLogin(bin string) switcher.LoginFunc {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		// Ctrl-C reaches claude through the terminal either way. cux must
 		// outlive it, so the staged login is cleaned up rather than left on
-		// disk (or in the Keychain) by a cux killed mid-login.
-		signal.Ignore(os.Interrupt)
-		defer signal.Reset(os.Interrupt)
+		// disk (or in the Keychain) by a cux killed mid-login. Catching the
+		// signal, not ignoring it: an ignored signal stays ignored in the
+		// exec'd child, and then Ctrl-C would not stop claude.
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt)
+		defer signal.Stop(sig)
 		return cmd.Run()
 	}
 }
