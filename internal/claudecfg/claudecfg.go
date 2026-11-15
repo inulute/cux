@@ -41,7 +41,13 @@ var ErrNoOAuthAccount = errors.New("claudecfg: oauthAccount block not present")
 // parsed identifying fields. The raw JSON is what we store in backups
 // so unknown fields round-trip without loss.
 func ReadOAuthBlock() (raw json.RawMessage, parsed OAuthAccount, err error) {
-	cfg, err := readConfig()
+	return ReadOAuthBlockAt(paths.ClaudeConfig())
+}
+
+// ReadOAuthBlockAt is ReadOAuthBlock for the config file at path, such as
+// the one a login run under its own CLAUDE_CONFIG_DIR writes.
+func ReadOAuthBlockAt(path string) (raw json.RawMessage, parsed OAuthAccount, err error) {
+	cfg, err := readConfigAt(path)
 	if err != nil {
 		return nil, OAuthAccount{}, err
 	}
@@ -80,7 +86,10 @@ func WriteOAuthBlock(raw json.RawMessage) error {
 // readConfig parses the config as a map preserving raw JSON for every
 // value, so we can rewrite oauthAccount without disturbing anything else.
 func readConfig() (map[string]json.RawMessage, error) {
-	path := paths.ClaudeConfig()
+	return readConfigAt(paths.ClaudeConfig())
+}
+
+func readConfigAt(path string) (map[string]json.RawMessage, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

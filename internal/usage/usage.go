@@ -50,8 +50,7 @@ type Window struct {
 // AccountUsage is one account's snapshot of every window we care
 // about. PolledAt records when this snapshot was captured;
 // TokenExpired is set when fetching with the account's stored token
-// returned 401 (so the user knows to `claude login` and `cux add`
-// again).
+// returned 401 (so the user knows to run `cux relogin`).
 type AccountUsage struct {
 	FiveHour *Window
 	SevenDay *Window
@@ -500,7 +499,7 @@ func Fetch(token string) (AccountUsage, error) {
 // ErrTokenExpired is returned by Fetch when the API rejects the token
 // with 401. The returned AccountUsage has TokenExpired = true so the
 // caller can write it through to the cache without losing the signal.
-var ErrTokenExpired = fmt.Errorf("usage: token expired (re-login and `cux add`)")
+var ErrTokenExpired = fmt.Errorf("usage: token expired (run `cux relogin <slot>`)")
 
 // RateLimitedError is the endpoint refusing a poll. It is carried as its own
 // type because the caller has to treat it differently from a failure: a

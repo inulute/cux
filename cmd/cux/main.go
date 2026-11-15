@@ -656,8 +656,7 @@ func printCredentialHealth(w io.Writer, st *store.State) {
 		fmt.Fprintf(w, "   %s[%02d]%s %s — %s%s%s\n",
 			colorGray, p.slot, colorReset, p.email, colorYellow, p.state.Describe(), colorReset)
 	}
-	fmt.Fprintf(w, "\n %sTo repair, for each account above: run `claude login` as that account,%s\n", colorGray, colorReset)
-	fmt.Fprintf(w, " %sthen `cux add` to recapture the slot.%s\n\n", colorGray, colorReset)
+	fmt.Fprintf(w, "\n %sTo repair, run `cux relogin <slot>` for each account above.%s\n\n", colorGray, colorReset)
 }
 
 // printSharedTokenWarning reports slots that hold the same account token as
@@ -1469,16 +1468,9 @@ func runWrapper(argv []string) {
 	updateDone := startUpdateCheck()
 	printCachedUpdateNotice()
 	warnIfSetupMissing()
-	bin := os.Getenv("CUX_CLAUDE_BIN")
-	if bin == "" {
-		resolved, err := exec.LookPath("claude")
-		if err != nil {
-			fail(fmt.Errorf("`claude` not found on PATH — install Claude Code first, or set CUX_CLAUDE_BIN"))
-		}
-		bin = resolved
-	}
-	if bin == os.Args[0] || strings.HasSuffix(bin, "/cux") {
-		fail(fmt.Errorf("refusing to launch cux as the claude binary (loop)"))
+	bin, err := claudeBinary()
+	if err != nil {
+		fail(err)
 	}
 	exitCode, err := wrapper.Run(bin, argv, os.Stderr)
 	if err != nil {
@@ -2109,6 +2101,8 @@ USAGE
   cux run [claude-args...]                same, explicit
   cux add [--slot N] [--alias NAME] [--no-alias] [--force]
                                           add the currently logged-in account
+  cux relogin <slot|email|alias>          log an account in again (expired login);
+                                          the active account stays as it is
   cux list                                list managed accounts
   cux alias <slot|email|alias> <name>     set a short alias (e.g. work, personal)
   cux project create <name> [--dir PATH]  scope a directory to its own seat pool
