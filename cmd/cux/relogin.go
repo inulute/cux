@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 
 	"github.com/inulute/cux/internal/switcher"
@@ -64,6 +65,11 @@ func claudeLogin(bin string) switcher.LoginFunc {
 		cmd := exec.Command(bin, "auth", "login", "--email", email)
 		cmd.Env = loginEnv(os.Environ(), dir)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		// Ctrl-C reaches claude through the terminal either way. cux must
+		// outlive it, so the staged login is cleaned up rather than left on
+		// disk (or in the Keychain) by a cux killed mid-login.
+		signal.Ignore(os.Interrupt)
+		defer signal.Reset(os.Interrupt)
 		return cmd.Run()
 	}
 }
@@ -88,7 +94,8 @@ func loginEnv(environ []string, dir string) []string {
 		name, _, _ := strings.Cut(kv, "=")
 		drop := false
 		for _, d := range loginEnvDropped {
-			if name == d {
+			// EqualFold: Windows treats environment names case-insensitively.
+			if strings.EqualFold(name, d) {
 				drop = true
 				break
 			}

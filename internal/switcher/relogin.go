@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/inulute/cux/internal/claudecfg"
 	"github.com/inulute/cux/internal/creds"
@@ -29,6 +30,9 @@ type ReloginResult struct {
 	// replaced as well, so the sessions on it pick up the new login.
 	Live bool
 }
+
+// reloginLockTimeout bounds the wait for the cux lock after the login.
+const reloginLockTimeout = time.Minute
 
 // ErrReloginWrongAccount is returned when the login that finished is not
 // the account the slot belongs to — another email, or the same email in
@@ -109,8 +113,11 @@ func Relogin(identifier string, login LoginFunc, out io.Writer) (ReloginResult, 
 		return ReloginResult{}, err
 	}
 
-	lk, err := lockfile.Acquire(paths.LockFile(), lockTimeout)
+	// The login is done and would be lost to a timeout, so wait longer
+	// for the lock than the usual short operations do.
+	lk, err := lockfile.Acquire(paths.LockFile(), reloginLockTimeout)
 	if err != nil {
+		fmt.Fprintln(out, "Could not take the cux lock; the new login was discarded. Run the command again.")
 		return ReloginResult{}, err
 	}
 	defer lk.Unlock()
@@ -122,8 +129,11 @@ func Relogin(identifier string, login LoginFunc, out io.Writer) (ReloginResult, 
 		return ReloginResult{}, err
 	}
 	current, ok := state.Accounts[target.Slot]
-	if !ok || current.Email != target.Email || current.OrgUUID != target.OrgUUID {
-		return ReloginResult{}, fmt.Errorf("switcher: slot %d changed while logging in; nothing was changed — run the command again", target.Slot)
+	if !ok {
+		return ReloginResult{}, fmt.Errorf("switcher: slot %d was removed while logging in; nothing was changed", target.Slot)
+	}
+	if err := sameSeat(current, org, parsed); err != nil {
+		return ReloginResult{}, err
 	}
 	if slot, other := slotSharingToken(state, current.Slot, blob); slot != 0 {
 		return ReloginResult{}, fmt.Errorf("%w: the new login carries the token already stored for slot %d (%s); nothing was changed",
@@ -133,8 +143,7 @@ func Relogin(identifier string, login LoginFunc, out io.Writer) (ReloginResult, 
 	// Is the slot the live login? Decided by identity, never by comparing
 	// the live files' bytes: a running session rewrites those whenever it
 	// refreshes its token.
-	_, liveParsed, liveErr := claudecfg.ReadOAuthBlock()
-	isLive := liveErr == nil && state.FindByIdentity(liveParsed.EmailAddress, liveParsed.OrganizationUUID) == current.Slot
+	isLive := isLiveSeat(state, current)
 
 	if err := creds.WriteBackup(current.Slot, current.Email, blob); err != nil {
 		return ReloginResult{}, err
@@ -160,10 +169,31 @@ func Relogin(identifier string, login LoginFunc, out io.Writer) (ReloginResult, 
 	return ReloginResult{Account: current, Live: isLive}, nil
 }
 
+// isLiveSeat reports whether acct is the seat the live login belongs to,
+// resolved the way the hooks and the wrapper resolve it (store.LiveSeat),
+// plus the account UUID when both sides have one. Anything it cannot
+// establish counts as not live, so the live login is left alone.
+func isLiveSeat(state *store.State, acct store.Account) bool {
+	_, live, err := claudecfg.ReadOAuthBlock()
+	if err != nil || live.EmailAddress == "" {
+		return false
+	}
+	liveKey := store.Account{Email: live.EmailAddress, UUID: live.AccountUUID, OrgUUID: live.OrganizationUUID}.CacheKey()
+	seat, ok := state.LiveSeat(live.EmailAddress, liveKey)
+	if !ok || seat.Slot != acct.Slot {
+		return false
+	}
+	if acct.UUID != "" && live.AccountUUID != "" && acct.UUID != live.AccountUUID {
+		return false
+	}
+	return true
+}
+
 // sameSeat reports whether a login's identity is the seat acct belongs to.
 // The email alone is not enough: one email can hold seats in several
 // organizations, and a login in the wrong one would file that seat's token
-// under this slot.
+// under this slot. A legacy slot with no stored organization or account
+// UUID can only be checked on what it has.
 func sameSeat(acct store.Account, org string, got claudecfg.OAuthAccount) error {
 	if got.EmailAddress == acct.Email &&
 		(acct.OrgUUID == "" || got.OrganizationUUID == acct.OrgUUID) &&

@@ -1425,7 +1425,7 @@ func waitForReset(trigger history.Trigger, cfg *config.Config, excluded map[int]
 		readyAt, email, ok := nextAvailability(pool, cache, cfg.Thresholds, time.Now())
 		if !ok {
 			if allTokensExpired(pool, cache) {
-				return "", errors.New("every account needs a fresh login (`cux add`) — waiting cannot help")
+				return "", errors.New("every account needs a fresh login (`cux relogin <slot>`) — waiting cannot help")
 			}
 			// No usable reset clock yet — the cache is catching up after
 			// a roll-over, or the API hasn't published one. Time heals

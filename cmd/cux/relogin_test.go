@@ -15,6 +15,7 @@ func TestLoginEnvPointsClaudeAtTheStagingDir(t *testing.T) {
 		"CLAUDE_CODE_OAUTH_TOKEN=x",
 		"ANTHROPIC_API_KEY=x",
 		"CLAUDE_CONFIG_DIR_EXTRA=kept",
+		"Anthropic_Auth_Token=x",
 	}
 	got := loginEnv(environ, "/stage")
 	want := []string{"PATH=/usr/bin", "CLAUDE_CONFIG_DIR_EXTRA=kept", "CLAUDE_CONFIG_DIR=/stage"}

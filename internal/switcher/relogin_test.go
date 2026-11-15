@@ -222,3 +222,53 @@ func TestReloginOfTheLiveSlotReplacesTheLiveLogin(t *testing.T) {
 	}
 	assertNoStagingLeft(t)
 }
+
+// Two legacy slots on one email (no UUIDs stored) both match the live
+// email. Only the active one is the live login; relogging the other must
+// leave the live login alone.
+func TestReloginOfALegacyTwinDoesNotTakeTheLiveLogin(t *testing.T) {
+	live, other := twoSeats(t)
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, slot := range []int{live.Slot, other.Slot} {
+		a := st.Accounts[slot]
+		a.UUID, a.OrgUUID = "", ""
+		st.Accounts[slot] = a
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	liveBefore := readLiveCreds(t)
+
+	res, err := Relogin("2", func(dir, email string) error {
+		writeLogin(t, dir, other.Email, other.UUID, other.OrgUUID, "token-personal-new")
+		return nil
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Relogin: %v", err)
+	}
+	if res.Live {
+		t.Error("an inactive legacy twin was reported as the live login")
+	}
+	if got := readLiveCreds(t); got != liveBefore {
+		t.Errorf("live credentials = %q; want them untouched", got)
+	}
+}
+
+func TestReloginRefusesATokenAnotherSlotHolds(t *testing.T) {
+	_, other := twoSeats(t)
+	before, _ := creds.ReadBackup(other.Slot, other.Email)
+	_, err := Relogin("2", func(dir, email string) error {
+		writeLogin(t, dir, other.Email, other.UUID, other.OrgUUID, "token-work")
+		return nil
+	}, &bytes.Buffer{})
+	if !errors.Is(err, ErrTokenIdentityMismatch) {
+		t.Fatalf("Relogin error = %v, want ErrTokenIdentityMismatch", err)
+	}
+	if after, _ := creds.ReadBackup(other.Slot, other.Email); after != before {
+		t.Errorf("slot backup changed: %q", after)
+	}
+	assertNoStagingLeft(t)
+}
