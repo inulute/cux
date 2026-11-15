@@ -3,6 +3,18 @@
 Starts at v0.3.10. Earlier releases are on the
 [releases page](https://github.com/inulute/cux/releases).
 
+## Unreleased
+
+### Added
+
+- **`cux relogin <slot|email|alias>` logs one account in again.** Repairing
+  an expired slot used to take `claude login` as that account and then
+  `cux add`, which also replaced the live login and made the slot active.
+  `relogin` runs `claude auth login` in a private directory, checks the
+  login is the slot's account (email, organization and account UUID),
+  saves it to that slot only and drops the slot's cached failed reading.
+  The live login is replaced only when it is that same slot.
+
 ## v0.3.11 — 2026-08-21
 
 ### Fixed

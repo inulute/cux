@@ -160,7 +160,7 @@ func TestManifestIsUsableByAClient(t *testing.T) {
 // TestClaudeArgsAreNotClaimed protects the wrapper's whole premise: a
 // first-arg cux does not own must reach claude untouched.
 func TestClaudeArgsAreNotClaimed(t *testing.T) {
-	for _, arg := range []string{"--resume", "-r", "mcp", "-c", "-p", "--model", "doctor", "update"} {
+	for _, arg := range []string{"--resume", "-r", "mcp", "-c", "-p", "--model", "doctor", "update", "login", "auth", "setup-token"} {
 		if c, ok := lookupTop(arg); ok {
 			t.Errorf("cux claims %q (as %s); it would never reach claude", arg, c.Name)
 		}
@@ -181,6 +181,7 @@ func TestMutatesIsSetDeliberately(t *testing.T) {
 		"config keys":    false,
 		"switch":         true,
 		"add":            true,
+		"relogin":        true,
 		"remove":         true,
 		"usage refresh":  true,
 		"config set":     true,

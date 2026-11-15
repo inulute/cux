@@ -152,6 +152,9 @@ cux                 # launch claude under cux instead of `claude` directly
 > that account (it will show up as `EXPRD` in `cux list`). Once both
 > accounts are added, let cux do all switching — it swaps credentials
 > directly and never logs out, so nothing gets revoked.
+>
+> If a stored login does expire (`EXPRD` in `cux list`), `cux relogin <slot>`
+> logs that account in again without switching accounts.
 
 After `cux setup`, restart Claude Code so it picks up the newly
 installed hooks. From then on:
@@ -213,6 +216,7 @@ cux list                     # accounts with 5h / 7d utilisation
 cux list --refresh           # refresh usage before listing
 cux status                   # current login + cux state
 cux switch <slot|email>      # manual swap (no auto-resume)
+cux relogin <slot|email>     # log an expired account in again; the active one stays
 cux remove <slot|email>      # forget an account
 cux history                  # recent swaps with reasons
 cux sessions                 # running sessions, plus recently ended ones and how to resume them

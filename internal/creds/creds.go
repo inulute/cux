@@ -718,6 +718,75 @@ func writeLiveMacOS(blob string) error {
 	return nil
 }
 
+// --- A login staged in its own config directory ---------------------------
+
+// loginKeychainService is the Keychain service Claude Code stores a login
+// under when it runs with CLAUDE_CONFIG_DIR=dir: the classic name plus the
+// first 8 hex digits of sha256(dir). The default directory keeps the
+// unsuffixed name, which is why a login staged this way never touches the
+// live item.
+func loginKeychainService(dir string) string {
+	sum := sha256.Sum256([]byte(dir))
+	return macKeychainServices[0] + "-" + hex.EncodeToString(sum[:])[:8]
+}
+
+// ReadLoginAt returns the credentials a `claude auth login` run with
+// CLAUDE_CONFIG_DIR=dir stored: the suffixed Keychain item on macOS (see
+// loginKeychainService), dir/.credentials.json elsewhere. On macOS the file
+// is still tried when no item exists, since that is where Claude Code goes
+// when the Keychain is unavailable. Credentials without an account token
+// come back as ErrNoAccountToken, as from ReadLive.
+func ReadLoginAt(dir string) (string, error) {
+	if runtime.GOOS == "darwin" && !fileBackendForced() {
+		blob, err := readMacKeychainSecret(loginKeychainService(dir))
+		if err == nil {
+			if err := requireAccountToken(blob); err != nil {
+				return "", err
+			}
+			return blob, nil
+		}
+		if !errors.Is(err, errKeychainItemAbsent) {
+			return "", err
+		}
+	}
+	path := filepath.Join(dir, ".credentials.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("creds: read %s: %w", path, err)
+	}
+	if err := requireAccountToken(string(b)); err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// DeleteLoginAt removes the Keychain item a login staged in dir left behind
+// on macOS. The directory itself, and any credentials file in it, are the
+// caller's to remove. Missing items are not an error.
+func DeleteLoginAt(dir string) error {
+	if runtime.GOOS != "darwin" || fileBackendForced() {
+		return nil
+	}
+	service := loginKeychainService(dir)
+	// One item per service is what Claude Code writes, but a retried login
+	// under another account name would add a second; delete until none is
+	// left, with a bound so a failing `security` cannot spin.
+	for range 8 {
+		out, err := exec.Command("security", "delete-generic-password", "-s", service).CombinedOutput()
+		if err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) && ee.ExitCode() == keychainExitNotFound {
+				return nil
+			}
+			return fmt.Errorf("creds: security delete %q: %w (%s)", service, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return fmt.Errorf("creds: security delete %q: items remain after 8 deletions", service)
+}
+
 // --- Linux/Windows live (file) --------------------------------------------
 
 func readLiveFile() (string, error) {

@@ -73,6 +73,8 @@ type Command struct {
 var commandTable = []*Command{
 	{Name: "run", Summary: "run claude under the wrapper", Args: []Arg{{Name: "claude-args", Kind: ArgText, Variadic: true}}, Run: func(a []string) { runWrapper(a) }},
 	{Name: "add", Summary: "add the currently logged-in account", Mutates: true, Run: cmdAdd},
+	{Name: "relogin", Summary: "log a managed account in again, leaving the active one alone", Mutates: true,
+		Args: []Arg{{Name: "account", Kind: ArgIdent, Required: true}}, Run: cmdRelogin},
 	{Name: "list", Aliases: []string{"ls"}, Summary: "list managed accounts", Run: cmdList},
 	{Name: "remove", Aliases: []string{"rm"}, Summary: "remove an account from cux", Mutates: true,
 		Args: []Arg{{Name: "account", Kind: ArgIdent, Required: true}}, Run: cmdRemove},

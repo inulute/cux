@@ -722,7 +722,7 @@ func renderAccountRow(slot int, email string, u usage.AccountUsage, stateLabel s
 		clipDisplay(reset, 6),
 	)
 	if u.TokenExpired {
-		line += fmt.Sprintf("│ %-96s │\n", "TOKEN EXPIRED: RE-LOGIN AND RUN /cux:add")
+		line += fmt.Sprintf("│ %-96s │\n", "TOKEN EXPIRED: RUN cux relogin <SLOT> IN A TERMINAL")
 	}
 	return line
 }

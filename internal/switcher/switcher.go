@@ -243,8 +243,8 @@ func SwitchTo(identifier string) (from, to store.Account, err error) {
 	if _, tokErr := creds.ExtractAccessToken(targetCreds); tokErr != nil {
 		return store.Account{}, store.Account{}, fmt.Errorf(
 			"slot %d (%s) has no usable stored login: its saved credentials carry no account token, "+
-				"so switching to it would sign you out — run `claude login` as %s, then `cux add` to recapture the slot",
-			target.Slot, target.Email, target.Email)
+				"so switching to it would sign you out — run `cux relogin %d` to log it in again",
+			target.Slot, target.Email, target.Slot)
 	}
 	targetOAuth, err := store.ReadOAuthBlockBackup(target.Slot, target.Email)
 	if err != nil {
